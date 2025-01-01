@@ -1,0 +1,23 @@
+name: langgraph-redis-notebooks
+services:
+  jupyter:
+    build:
+      context: ../../../..  # This should point to the root of langgraph-redis
+      dockerfile: libs/checkpoint-redis/langgraph/docs/Dockerfile.jupyter
+    ports:
+      - "8888:8888"
+    volumes:
+      - ./:/home/jupyter/workspace/libs/checkpoint-redis/docs
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - USER_AGENT=LangGraphRedisJupyterNotebooks/0.0.4
+    user: jupyter
+    working_dir: /home/jupyter/workspace/libs/checkpoint-redis/docs
+    depends_on:
+      - redis
+
+  redis:
+    image: redis/redis-stack:latest
+    ports:
+      - "6379:6379"
+      - "8001:8001"
