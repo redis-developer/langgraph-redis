@@ -1,18 +1,19 @@
-# LangGraph Checkpoint Redis
+# LangGraph Redis
 
-This README provides documentation for the LangGraph CheckpointSaver Redis implementation. This integration leverages Redis as a persistence layer for LangGraph, enabling fast and reliable storage and retrieval of checkpoint data.
+This repository contains Redis implementations for LangGraph, providing both Checkpoint Savers and Stores functionality.
 
 ## Overview
 
-LangGraph Checkpointers are a vital component in managing graph states, ensuring resiliency and offering advanced features like human-in-the-loop processing and session-based memory. The Redis implementation provides both synchronous and asynchronous interfaces for checkpoint saving, utilizing Redis JSON and RediSearch for efficient storage and querying.
+The project consists of two main components:
+1. **Redis Checkpoint Savers**: Implementations for storing and managing checkpoints using Redis
+2. **Redis Stores**: Redis-backed key-value stores with optional vector search capabilities
 
-## Features
+## Dependencies
 
-- **High Performance**: Optimized for speed and scalability using Redis.
-- **Flexible Storage**: Supports JSON storage for checkpoint data.
-- **Advanced Querying**: Uses RediSearch to enable complex queries over checkpoint metadata.
-- **Asynchronous Support**: Async and sync implementations available to suit diverse use cases.
-- **Easy Integration**: Simple API design that conforms to the LangGraph Checkpointer interface.
+The project requires the following main dependencies:
+- `redis>=5.2.1`
+- `redisvl>=0.3.7`
+- `langgraph-checkpoint>=2.0.10`
 
 ## Installation
 
@@ -22,11 +23,14 @@ Install the library using pip:
 pip install langgraph-checkpoint-redis
 ```
 
-This will automatically install all required dependencies as defined in the `pyproject.toml` file.
+## Redis Checkpoint Savers
 
-## Usage
+### Important Notes
 
-### Synchronous Example
+> [!IMPORTANT]  
+> When using Redis checkpointers for the first time, make sure to call `.setup()` method on them to create required indices. See examples below.
+
+### Standard Implementation
 
 ```python
 from langgraph.checkpoint.redis import RedisSaver
@@ -34,7 +38,6 @@ from langgraph.checkpoint.redis import RedisSaver
 write_config = {"configurable": {"thread_id": "1", "checkpoint_ns": ""}}
 read_config = {"configurable": {"thread_id": "1"}}
 
-# Initialize RedisSaver
 with RedisSaver.from_conn_string("redis://localhost:6379") as checkpointer:
     # Call setup to initialize indices
     checkpointer.setup()
@@ -74,7 +77,7 @@ with RedisSaver.from_conn_string("redis://localhost:6379") as checkpointer:
     checkpoints = list(checkpointer.list(read_config))
 ```
 
-### Asynchronous Example
+### Async Implementation
 
 ```python
 from langgraph.checkpoint.redis.aio import AsyncRedisSaver
@@ -83,7 +86,6 @@ async def main():
     write_config = {"configurable": {"thread_id": "1", "checkpoint_ns": ""}}
     read_config = {"configurable": {"thread_id": "1"}}
 
-    # Initialize AsyncRedisSaver
     async with AsyncRedisSaver.from_conn_string("redis://localhost:6379") as checkpointer:
         # Call setup to initialize indices
         await checkpointer.asetup()
@@ -131,60 +133,54 @@ asyncio.run(main())
 
 Shallow Redis checkpoint savers store only the latest checkpoint in Redis. These implementations are useful when retaining a complete checkpoint history is unnecessary.
 
-#### Synchronous Example
-
 ```python
 from langgraph.checkpoint.redis.shallow import ShallowRedisSaver
+# For async version: from langgraph.checkpoint.redis.ashallow import AsyncShallowRedisSaver
 
 write_config = {"configurable": {"thread_id": "1", "checkpoint_ns": ""}}
 read_config = {"configurable": {"thread_id": "1"}}
 
-# Initialize ShallowRedisSaver
 with ShallowRedisSaver.from_conn_string("redis://localhost:6379") as checkpointer:
-    # Call setup to initialize indices
     checkpointer.setup()
-    checkpoint = {
-        "v": 1,
-        "ts": "2024-07-31T20:14:19.804150+00:00",
-        "id": "1ef4f797-8335-6428-8001-8a1503f9b875",
-        "metadata": {"source": "input", "step": 1}
-    }
-
-    # Store the latest checkpoint
-    checkpointer.put(write_config, checkpoint, {}, {})
-
-    # Retrieve the latest checkpoint
-    loaded_checkpoint = checkpointer.get_tuple(read_config)
+    # ... rest of the implementation follows similar pattern
 ```
 
-#### Asynchronous Example
+## Redis Stores
+
+Redis Stores provide a persistent key-value store with optional vector search capabilities.
+
+### Synchronous Implementation
 
 ```python
-from langgraph.checkpoint.redis.ashallow import AsyncShallowRedisSaver
+from langgraph.store.redis import RedisStore
+
+# Basic usage
+with RedisStore.from_conn_string("redis://localhost:6379") as store:
+    store.setup()
+    # Use the store...
+
+# With vector search configuration
+index_config = {
+    "dims": 1536,  # Vector dimensions
+    "distance_type": "cosine",  # Distance metric
+    "fields": ["text"],  # Fields to index
+}
+
+with RedisStore.from_conn_string("redis://localhost:6379", index=index_config) as store:
+    store.setup()
+    # Use the store with vector search capabilities...
+```
+
+### Async Implementation
+
+```python
+from langgraph.store.redis.aio import AsyncRedisStore
 
 async def main():
-    write_config = {"configurable": {"thread_id": "1", "checkpoint_ns": ""}}
-    read_config = {"configurable": {"thread_id": "1"}}
+    async with AsyncRedisStore.from_conn_string("redis://localhost:6379") as store:
+        await store.setup()
+        # Use the store asynchronously...
 
-    # Initialize AsyncShallowRedisSaver
-    async with AsyncShallowRedisSaver.from_conn_string("redis://localhost:6379") as checkpointer:
-        # Call setup to initialize indices
-        await checkpointer.asetup()
-        checkpoint = {
-            "v": 1,
-            "ts": "2024-07-31T20:14:19.804150+00:00",
-            "id": "1ef4f797-8335-6428-8001-8a1503f9b875",
-            "metadata": {"source": "input", "step": 1}
-        }
-
-        # Store the latest checkpoint
-        await checkpointer.aput(write_config, checkpoint, {}, {})
-
-        # Retrieve the latest checkpoint
-        loaded_checkpoint = await checkpointer.aget_tuple(read_config)
-
-# Run the async main function
-import asyncio
 asyncio.run(main())
 ```
 
@@ -192,96 +188,62 @@ asyncio.run(main())
 
 ### Indexing
 
-This implementation creates three main indices in Redis using RediSearch:
+The Redis implementation creates these main indices:
 
-1. **Checkpoints Index**: Stores checkpoint metadata and versioning.
-2. **Channel Values Index**: Stores the channel-specific data for each checkpoint.
-3. **Writes Index**: Tracks pending writes and intermediate states.
+1. **Checkpoints Index**: Stores checkpoint metadata and versioning
+2. **Channel Values Index**: Stores channel-specific data
+3. **Writes Index**: Tracks pending writes and intermediate states
 
-These indices enable efficient querying and retrieval operations for various use cases.
-
-### Schema
-
-Below is the schema used for the checkpoint indices:
-
-- **Checkpoints Index**:
-  - `thread_id`: Thread identifier (Tag)
-  - `checkpoint_ns`: Namespace (Tag)
-  - `checkpoint_id`: Checkpoint ID (Tag)
-  - `source`: Metadata source (Tag)
-  - `step`: Step number (Numeric)
-  - `score`: Checkpoint score (Numeric)
-
-- **Channel Values Index**:
-  - `thread_id`: Thread identifier (Tag)
-  - `checkpoint_ns`: Namespace (Tag)
-  - `channel`: Channel name (Tag)
-  - `version`: Version (Tag)
-  - `type`: Data type (Tag)
-  - `blob`: Data content (Text)
-
-- **Writes Index**:
-  - `thread_id`: Thread identifier (Tag)
-  - `checkpoint_ns`: Namespace (Tag)
-  - `checkpoint_id`: Checkpoint ID (Tag)
-  - `task_id`: Task ID (Tag)
-  - `channel`: Channel name (Tag)
-
-## Testing
-
-### Unit Tests
-
-The implementation includes an extensive suite of unit tests covering both synchronous and asynchronous functionality. See the `tests` directory for detailed test cases.
-
-### Running Tests
-
-Use `pytest` to run all tests:
-
-```bash
-pytest tests/
-```
-
-For asynchronous tests, ensure `pytest-asyncio` is installed.
+For Redis Stores with vector search:
+1. **Store Index**: Main key-value store
+2. **Vector Index**: Optional vector embeddings for similarity search
 
 ## Contributing
 
-We welcome contributions to improve this library. Here’s how you can contribute:
-
-1. **Report Issues**: Found a bug or have a suggestion? Please open an issue on our [GitHub repository](https://www.github.com/langchain-ai/langgraph).
-2. **Submit Pull Requests**: If you want to contribute code, fork the repository, create a new branch, make your changes, and submit a pull request.
-3. **Improve Documentation**: If you find any discrepancies or omissions in the documentation, feel free to contribute fixes or enhancements.
+We welcome contributions! Here's how you can help:
 
 ### Development Setup
 
-To set up the development environment:
-
 1. Clone the repository:
-
    ```bash
    git clone https://github.com/langchain-ai/langgraph
    cd langgraph
    ```
 
 2. Install dependencies:
-
    ```bash
    poetry install
    ```
 
-3. Format and lint the code before submitting your changes:
+### Available Commands
 
-   ```bash
-   make format
-   make lint
-   ```
+The project includes several make commands for development:
 
-4. Craft commit messages following [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/) to maintain a clear and structured history.
+- **Testing**:
+  ```bash
+  make test           # Run all tests
+  make test_watch    # Run tests in watch mode
+  ```
 
-5. Run tests to ensure everything is set up correctly:
+- **Linting and Formatting**:
+  ```bash
+  make lint          # Run all linters
+  make lint_diff     # Lint only changed files
+  make lint_package  # Lint only the package
+  make lint_tests    # Lint only tests
+  make format        # Format all files
+  make format_diff   # Format only changed files
+  ```
 
-   ```bash
-   poetry run pytest
-   ```
+### Contribution Guidelines
+
+1. Create a new branch for your changes
+2. Write tests for new functionality
+3. Ensure all tests pass: `make test`
+4. Format your code: `make format`
+5. Run linting checks: `make lint`
+6. Submit a pull request with a clear description of your changes
+7. Follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/) for commit messages
 
 ## License
 
