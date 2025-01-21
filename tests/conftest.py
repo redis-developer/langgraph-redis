@@ -3,6 +3,8 @@ from redis.asyncio import Redis
 
 DEFAULT_REDIS_URI = "redis://localhost:6379"
 
+VECTOR_TYPES = ["vector", "halfvec"]
+
 
 @pytest.fixture(autouse=True)
 async def clear_redis() -> None:

@@ -1,431 +1,661 @@
-# import asyncio
-# import logging
-# from collections.abc import AsyncIterator, Iterable, Sequence
-# from contextlib import asynccontextmanager
-# from typing import Any, Callable, Optional, Union, cast
+from __future__ import annotations
 
-# import orjson
-# from psycopg import AsyncConnection, AsyncCursor, AsyncPipeline, Capabilities
-# from psycopg.rows import DictRow, dict_row
-# from psycopg_pool import AsyncConnectionPool
+import asyncio
+import json
+import uuid
+import weakref
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from types import TracebackType
+from typing import Any, AsyncIterator, Iterable, Optional, Sequence, cast
 
-# from langgraph.checkpoint.postgres import _ainternal
-# from langgraph.store.base import (
-#     GetOp,
-#     ListNamespacesOp,
-#     Op,
-#     PutOp,
-#     Result,
-#     SearchOp,
-# )
-# from langgraph.store.base.batch import AsyncBatchedBaseStore
-# from langgraph.store.postgres.base import (
-#     _PLACEHOLDER,
-#     BasePostgresStore,
-#     PoolConfig,
-#     PostgresIndexConfig,
-#     Row,
-#     _decode_ns_bytes,
-#     _ensure_index_config,
-#     _group_ops,
-#     _row_to_item,
-#     _row_to_search_item,
-# )
+from redisvl.index import AsyncSearchIndex
+from redisvl.query import FilterQuery, VectorQuery
+from redisvl.redis.connection import RedisConnectionFactory
 
-# logger = logging.getLogger(__name__)
+from langgraph.store.base import (
+    BaseStore,
+    GetOp,
+    IndexConfig,
+    ListNamespacesOp,
+    Op,
+    PutOp,
+    Result,
+    SearchOp,
+    ensure_embeddings,
+    get_text_at_path,
+    tokenize_path,
+)
+from langgraph.store.base.batch import AsyncBatchedBaseStore, _dedupe_ops
+from langgraph.store.redis.base import (
+    BaseRedisStore,
+    RedisDocument,
+    _decode_ns,
+    _ensure_string_or_literal,
+    _group_ops,
+    _namespace_to_text,
+    _row_to_item,
+    _row_to_search_item,
+)
+from redis.asyncio import Redis as AsyncRedis
+from redis.commands.search.query import Query
 
 
-# class AsyncPostgresStore(AsyncBatchedBaseStore, BasePostgresStore[_ainternal.Conn]):
-#     """Asynchronous Postgres-backed store with optional vector search using pgvector.
+class AsyncRedisStore(
+    BaseRedisStore[AsyncRedis, AsyncSearchIndex], AsyncBatchedBaseStore
+):
+    """Async Redis store with optional vector search."""
 
-#     !!! example "Examples"
-#         Basic setup and key-value storage:
-#         ```python
-#         from langgraph.store.postgres import AsyncPostgresStore
+    store_index: AsyncSearchIndex
+    vector_index: AsyncSearchIndex
+    _owns_client: bool
 
-#         async with AsyncPostgresStore.from_conn_string(
-#             "postgresql://user:pass@localhost:5432/dbname"
-#         ) as store:
-#             await store.setup()
+    def __init__(
+        self,
+        redis_url: Optional[str] = None,
+        *,
+        redis_client: Optional[AsyncRedis] = None,
+        index: Optional[IndexConfig] = None,
+    ) -> None:
+        """Initialize store with Redis connection and optional index config."""
+        if redis_url is None and redis_client is None:
+            raise ValueError("Either redis_url or redis_client must be provided")
 
-#             # Store and retrieve data
-#             await store.aput(("users", "123"), "prefs", {"theme": "dark"})
-#             item = await store.aget(("users", "123"), "prefs")
-#         ```
+        # Initialize base classes
+        AsyncBatchedBaseStore.__init__(self)
 
-#         Vector search using LangChain embeddings:
-#         ```python
-#         from langchain.embeddings import init_embeddings
-#         from langgraph.store.postgres import AsyncPostgresStore
+        # Set up index config first
+        self.index_config = index
+        if self.index_config:
+            self.index_config = self.index_config.copy()
+            self.embeddings = ensure_embeddings(
+                self.index_config.get("embed"),
+            )
+            fields = (
+                self.index_config.get("text_fields", ["$"])
+                or self.index_config.get("fields", ["$"])
+                or []
+            )
+            if isinstance(fields, str):
+                fields = [fields]
 
-#         async with AsyncPostgresStore.from_conn_string(
-#             "postgresql://user:pass@localhost:5432/dbname",
-#             index={
-#                 "dims": 1536,
-#                 "embed": init_embeddings("openai:text-embedding-3-small"),
-#                 "fields": ["text"]  # specify which fields to embed. Default is the whole serialized value
-#             }
-#         ) as store:
-#             await store.setup()  # Do this once to run migrations
+            self.index_config["__tokenized_fields"] = [
+                (p, tokenize_path(p)) if p != "$" else (p, p)
+                for p in (self.index_config.get("fields") or ["$"])
+            ]
 
-#             # Store documents
-#             await store.aput(("docs",), "doc1", {"text": "Python tutorial"})
-#             await store.aput(("docs",), "doc2", {"text": "TypeScript guide"})
-#             # Don't index the following
-#             await store.aput(("docs",), "doc3", {"text": "Other guide"}, index=False)
+        # Configure client
+        self.configure_client(redis_url=redis_url, redis_client=redis_client)
 
-#             # Search by similarity
-#             results = await store.asearch(("docs",), query="python programming")
-#         ```
+        # Create store index
+        self.store_index = AsyncSearchIndex.from_dict(self.SCHEMAS[0])
 
-#         Using connection pooling for better performance:
-#         ```python
-#         from langgraph.store.postgres import AsyncPostgresStore, PoolConfig
+        # Configure vector index if needed
+        if self.index_config:
+            vector_schema = self.SCHEMAS[1].copy()
+            vector_fields = vector_schema.get("fields", [])
+            vector_field = None
+            for f in vector_fields:
+                if isinstance(f, dict) and f.get("name") == "embedding":
+                    vector_field = f
+                    break
 
-#         async with AsyncPostgresStore.from_conn_string(
-#             "postgresql://user:pass@localhost:5432/dbname",
-#             pool_config=PoolConfig(
-#                 min_size=5,
-#                 max_size=20
-#             )
-#         ) as store:
-#             await store.setup()
-#             # Use store with connection pooling...
-#         ```
+            if vector_field:
+                # Configure vector field with index config values
+                vector_field["attrs"] = {
+                    "algorithm": "flat",  # Default to flat
+                    "datatype": "float32",
+                    "dims": self.index_config["dims"],
+                    "distance_metric": {
+                        "cosine": "COSINE",
+                        "inner_product": "IP",
+                        "l2": "L2",
+                    }[
+                        _ensure_string_or_literal(
+                            self.index_config.get("distance_type", "cosine")
+                        )
+                    ],
+                }
 
-#     Warning:
-#         Make sure to:
-#         1. Call `setup()` before first use to create necessary tables and indexes
-#         2. Have the pgvector extension available to use vector search
-#         3. Use Python 3.10+ for async functionality
+                # Apply any additional vector type config
+                if "ann_index_config" in self.index_config:
+                    vector_field["attrs"].update(self.index_config["ann_index_config"])
 
-#     Note:
-#         Semantic search is disabled by default. You can enable it by providing an `index` configuration
-#         when creating the store. Without this configuration, all `index` arguments passed to
-#         `put` or `aput`will have no effect.
-#     """
+            try:
+                self.vector_index = AsyncSearchIndex.from_dict(vector_schema)
+            except Exception as e:
+                raise ValueError(
+                    f"Failed to create vector index with schema: {vector_schema}. Error: {str(e)}"
+                ) from e
 
-#     __slots__ = (
-#         "_deserializer",
-#         "pipe",
-#         "lock",
-#         "supports_pipeline",
-#         "index_config",
-#         "embeddings",
-#     )
+        # Set up async components
+        self.loop = asyncio.get_running_loop()
+        self._aqueue: dict[asyncio.Future[Any], Op] = {}
 
-#     def __init__(
-#         self,
-#         conn: _ainternal.Conn,
-#         *,
-#         pipe: Optional[AsyncPipeline] = None,
-#         deserializer: Optional[
-#             Callable[[Union[bytes, orjson.Fragment]], dict[str, Any]]
-#         ] = None,
-#         index: Optional[PostgresIndexConfig] = None,
-#     ) -> None:
-#         if isinstance(conn, AsyncConnectionPool) and pipe is not None:
-#             raise ValueError(
-#                 "Pipeline should be used only with a single AsyncConnection, not AsyncConnectionPool."
-#             )
-#         super().__init__()
-#         self._deserializer = deserializer
-#         self.conn = conn
-#         self.pipe = pipe
-#         self.lock = asyncio.Lock()
-#         self.loop = asyncio.get_running_loop()
-#         self.supports_pipeline = Capabilities().has_pipeline()
-#         self.index_config = index
-#         if self.index_config:
-#             self.embeddings, self.index_config = _ensure_index_config(self.index_config)
+    def configure_client(
+        self,
+        redis_url: Optional[str] = None,
+        redis_client: Optional[AsyncRedis] = None,
+    ) -> None:
+        """Configure the Redis client."""
+        self._owns_client = redis_client is None
+        self._redis = redis_client or RedisConnectionFactory.get_async_redis_connection(
+            redis_url
+        )
 
-#         else:
-#             self.embeddings = None
+    async def setup(self) -> None:
+        """Initialize store indices."""
+        # Handle embeddings in same way as sync store
+        if self.index_config:
+            self.embeddings = ensure_embeddings(
+                self.index_config.get("embed"),
+            )
 
-#     async def abatch(self, ops: Iterable[Op]) -> list[Result]:
-#         grouped_ops, num_ops = _group_ops(ops)
-#         results: list[Result] = [None] * num_ops
+        # Now connect Redis client to indices
+        await self.store_index.set_client(self._redis)
+        if self.index_config:
+            await self.vector_index.set_client(self._redis)
 
-#         async with _ainternal.get_connection(self.conn) as conn:
-#             if self.pipe:
-#                 async with self.pipe:
-#                     await self._execute_batch(grouped_ops, results, conn)
-#             else:
-#                 await self._execute_batch(grouped_ops, results, conn)
+        # Create indices in Redis
+        await self.store_index.create(overwrite=False)
+        if self.index_config:
+            await self.vector_index.create(overwrite=False)
 
-#         return results
+    @classmethod
+    @asynccontextmanager
+    async def from_conn_string(
+        cls,
+        conn_string: str,
+        *,
+        index: Optional[IndexConfig] = None,
+    ) -> AsyncIterator[AsyncRedisStore]:
+        """Create store from Redis connection string."""
+        store = cls(redis_url=conn_string, index=index)
+        try:
+            store._task = store.loop.create_task(
+                store._run_background_tasks(store._aqueue, weakref.ref(store))
+            )
+            await store.setup()
+            yield store
+        finally:
+            if hasattr(store, "_task"):
+                store._task.cancel()
+                try:
+                    await store._task
+                except asyncio.CancelledError:
+                    pass
+            if store._owns_client:
+                await store._redis.aclose()  # type: ignore[attr-defined]
+                await store._redis.connection_pool.disconnect()
 
-#     @classmethod
-#     @asynccontextmanager
-#     async def from_conn_string(
-#         cls,
-#         conn_string: str,
-#         *,
-#         pipeline: bool = False,
-#         pool_config: Optional[PoolConfig] = None,
-#         index: Optional[PostgresIndexConfig] = None,
-#     ) -> AsyncIterator["AsyncPostgresStore"]:
-#         """Create a new AsyncPostgresStore instance from a connection string.
+    def create_indexes(self) -> None:
+        """Create async indices."""
+        self.store_index = AsyncSearchIndex.from_dict(self.SCHEMAS[0])
+        if self.index_config:
+            self.vector_index = AsyncSearchIndex.from_dict(self.SCHEMAS[1])
 
-#         Args:
-#             conn_string (str): The Postgres connection info string.
-#             pipeline (bool): Whether to use AsyncPipeline (only for single connections)
-#             pool_config (Optional[PoolConfig]): Configuration for the connection pool.
-#                 If provided, will create a connection pool and use it instead of a single connection.
-#                 This overrides the `pipeline` argument.
-#             index (Optional[PostgresIndexConfig]): The embedding config.
+    async def __aenter__(self) -> AsyncRedisStore:
+        """Async context manager enter."""
+        return self
 
-#         Returns:
-#             AsyncPostgresStore: A new AsyncPostgresStore instance.
-#         """
-#         if pool_config is not None:
-#             pc = pool_config.copy()
-#             async with cast(
-#                 AsyncConnectionPool[AsyncConnection[DictRow]],
-#                 AsyncConnectionPool(
-#                     conn_string,
-#                     min_size=pc.pop("min_size", 1),
-#                     max_size=pc.pop("max_size", None),
-#                     kwargs={
-#                         "autocommit": True,
-#                         "prepare_threshold": 0,
-#                         "row_factory": dict_row,
-#                         **(pc.pop("kwargs", None) or {}),
-#                     },
-#                     **cast(dict, pc),
-#                 ),
-#             ) as pool:
-#                 yield cls(conn=pool, index=index)
-#         else:
-#             async with await AsyncConnection.connect(
-#                 conn_string, autocommit=True, prepare_threshold=0, row_factory=dict_row
-#             ) as conn:
-#                 if pipeline:
-#                     async with conn.pipeline() as pipe:
-#                         yield cls(conn=conn, pipe=pipe, index=index)
-#                 else:
-#                     yield cls(conn=conn, index=index)
+    async def __aexit__(
+        self,
+        exc_type: Optional[type[BaseException]] = None,
+        exc_value: Optional[BaseException] = None,
+        traceback: Optional[TracebackType] = None,
+    ) -> None:
+        """Async context manager exit."""
+        if hasattr(self, "_task"):
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
 
-#     async def setup(self) -> None:
-#         """Set up the store database asynchronously.
+        # if self._owns_client:
+        await self._redis.aclose()  # type: ignore[attr-defined]
 
-#         This method creates the necessary tables in the Postgres database if they don't
-#         already exist and runs database migrations. It MUST be called directly by the user
-#         the first time the store is used.
-#         """
+    async def abatch(self, ops: Iterable[Op]) -> list[Result]:
+        """Execute batch of operations asynchronously."""
+        grouped_ops, num_ops = _group_ops(ops)
+        results: list[Result] = [None] * num_ops
 
-#         async def _get_version(cur: AsyncCursor[DictRow], table: str) -> int:
-#             await cur.execute(
-#                 f"""
-#                 CREATE TABLE IF NOT EXISTS {table} (
-#                     v INTEGER PRIMARY KEY
-#                 )
-#             """
-#             )
-#             await cur.execute(f"SELECT v FROM {table} ORDER BY v DESC LIMIT 1")
-#             row = cast(dict, await cur.fetchone())
-#             if row is None:
-#                 version = -1
-#             else:
-#                 version = row["v"]
-#             return version
+        tasks = []
 
-#         async with self._cursor() as cur:
-#             version = await _get_version(cur, table="store_migrations")
-#             for v, sql in enumerate(self.MIGRATIONS[version + 1 :], start=version + 1):
-#                 await cur.execute(sql)
-#                 await cur.execute("INSERT INTO store_migrations (v) VALUES (%s)", (v,))
+        if GetOp in grouped_ops:
+            tasks.append(
+                self._batch_get_ops(
+                    list(cast(list[tuple[int, GetOp]], grouped_ops[GetOp])), results
+                )
+            )
 
-#             if self.index_config:
-#                 version = await _get_version(cur, table="vector_migrations")
-#                 for v, migration in enumerate(
-#                     self.VECTOR_MIGRATIONS[version + 1 :], start=version + 1
-#                 ):
-#                     sql = migration.sql
-#                     if migration.params:
-#                         params = {
-#                             k: v(self) if v is not None and callable(v) else v
-#                             for k, v in migration.params.items()
-#                         }
-#                         sql = sql % params
-#                     await cur.execute(sql)
-#                     await cur.execute(
-#                         "INSERT INTO vector_migrations (v) VALUES (%s)", (v,)
-#                     )
+        if PutOp in grouped_ops:
+            tasks.append(
+                self._batch_put_ops(
+                    list(cast(list[tuple[int, PutOp]], grouped_ops[PutOp]))
+                )
+            )
 
-#     async def _execute_batch(
-#         self,
-#         grouped_ops: dict,
-#         results: list[Result],
-#         conn: AsyncConnection[DictRow],
-#     ) -> None:
-#         async with self._cursor(pipeline=True) as cur:
-#             if GetOp in grouped_ops:
-#                 await self._batch_get_ops(
-#                     cast(Sequence[tuple[int, GetOp]], grouped_ops[GetOp]),
-#                     results,
-#                     cur,
-#                 )
+        if SearchOp in grouped_ops:
+            tasks.append(
+                self._batch_search_ops(
+                    list(cast(list[tuple[int, SearchOp]], grouped_ops[SearchOp])),
+                    results,
+                )
+            )
 
-#             if SearchOp in grouped_ops:
-#                 await self._batch_search_ops(
-#                     cast(Sequence[tuple[int, SearchOp]], grouped_ops[SearchOp]),
-#                     results,
-#                     cur,
-#                 )
+        if ListNamespacesOp in grouped_ops:
+            tasks.append(
+                self._batch_list_namespaces_ops(
+                    list(
+                        cast(
+                            list[tuple[int, ListNamespacesOp]],
+                            grouped_ops[ListNamespacesOp],
+                        )
+                    ),
+                    results,
+                )
+            )
 
-#             if ListNamespacesOp in grouped_ops:
-#                 await self._batch_list_namespaces_ops(
-#                     cast(
-#                         Sequence[tuple[int, ListNamespacesOp]],
-#                         grouped_ops[ListNamespacesOp],
-#                     ),
-#                     results,
-#                     cur,
-#                 )
+        await asyncio.gather(*tasks)
 
-#             if PutOp in grouped_ops:
-#                 await self._batch_put_ops(
-#                     cast(Sequence[tuple[int, PutOp]], grouped_ops[PutOp]),
-#                     cur,
-#                 )
+        return results
 
-#     async def _batch_get_ops(
-#         self,
-#         get_ops: Sequence[tuple[int, GetOp]],
-#         results: list[Result],
-#         cur: AsyncCursor[DictRow],
-#     ) -> None:
-#         for query, params, namespace, items in self._get_batch_GET_ops_queries(get_ops):
-#             await cur.execute(query, params)
-#             rows = cast(list[Row], await cur.fetchall())
-#             key_to_row = {row["key"]: row for row in rows}
-#             for idx, key in items:
-#                 row = key_to_row.get(key)
-#                 if row:
-#                     results[idx] = _row_to_item(
-#                         namespace, row, loader=self._deserializer
-#                     )
-#                 else:
-#                     results[idx] = None
+    def batch(self: AsyncRedisStore, ops: Iterable[Op]) -> list[Result]:
+        """Execute batch of operations synchronously.
 
-#     async def _batch_put_ops(
-#         self,
-#         put_ops: Sequence[tuple[int, PutOp]],
-#         cur: AsyncCursor[DictRow],
-#     ) -> None:
-#         queries, embedding_request = self._prepare_batch_PUT_queries(put_ops)
-#         if embedding_request:
-#             if self.embeddings is None:
-#                 # Should not get here since the embedding config is required
-#                 # to return an embedding_request above
-#                 raise ValueError(
-#                     "Embedding configuration is required for vector operations "
-#                     f"(for semantic search). "
-#                     f"Please provide an EmbeddingConfig when initializing the {self.__class__.__name__}."
-#                 )
-#             query, txt_params = embedding_request
-#             vectors = await self.embeddings.aembed_documents(
-#                 [param[-1] for param in txt_params]
-#             )
-#             queries.append(
-#                 (
-#                     query,
-#                     [
-#                         p
-#                         for (ns, k, pathname, _), vector in zip(txt_params, vectors)
-#                         for p in (ns, k, pathname, vector)
-#                     ],
-#                 )
-#             )
+        Args:
+            ops: Operations to execute in batch
 
-#         for query, params in queries:
-#             await cur.execute(query, params)
+        Returns:
+            Results from batch execution
 
-#     async def _batch_search_ops(
-#         self,
-#         search_ops: Sequence[tuple[int, SearchOp]],
-#         results: list[Result],
-#         cur: AsyncCursor[DictRow],
-#     ) -> None:
-#         queries, embedding_requests = self._prepare_batch_search_queries(search_ops)
+        Raises:
+            asyncio.InvalidStateError: If called from the main event loop
+        """
+        try:
+            if asyncio.get_running_loop() is self.loop:
+                raise asyncio.InvalidStateError(
+                    "Synchronous calls to AsyncRedisStore are only allowed from a "
+                    "different thread. From the main thread, use the async interface."
+                    "For example, use `await store.abatch(...)` or `await "
+                    "store.aget(...)`"
+                )
+        except RuntimeError:
+            pass
+        return asyncio.run_coroutine_threadsafe(self.abatch(ops), self.loop).result()
 
-#         if embedding_requests and self.embeddings:
-#             vectors = await self.embeddings.aembed_documents(
-#                 [query for _, query in embedding_requests]
-#             )
-#             for (idx, _), vector in zip(embedding_requests, vectors):
-#                 _paramslist = queries[idx][1]
-#                 for i in range(len(_paramslist)):
-#                     if _paramslist[i] is _PLACEHOLDER:
-#                         _paramslist[i] = vector
+    async def _batch_get_ops(
+        self,
+        get_ops: Sequence[tuple[int, GetOp]],
+        results: list[Result],
+    ) -> None:
+        """Execute GET operations in batch asynchronously."""
+        for query, _, namespace, items in self._get_batch_GET_ops_queries(get_ops):
+            # Use RedisVL AsyncSearchIndex search
+            search_query = FilterQuery(
+                filter_expression=query,
+                return_fields=["id"],  # Just need the document id
+                num_results=len(items),
+            )
+            res = await self.store_index.search(search_query)
 
-#         for (idx, _), (query, params) in zip(search_ops, queries):
-#             await cur.execute(query, params)
-#             rows = cast(list[Row], await cur.fetchall())
-#             items = [
-#                 _row_to_search_item(
-#                     _decode_ns_bytes(row["prefix"]), row, loader=self._deserializer
-#                 )
-#                 for row in rows
-#             ]
-#             results[idx] = items
+            # Use pipeline to get the actual JSON documents
+            pipeline = self._redis.pipeline()
+            doc_ids = []
+            for doc in res.docs:
+                # The id is already in the correct format (store:prefix:key)
+                pipeline.json().get(doc.id)
+                doc_ids.append(doc.id)
 
-#     async def _batch_list_namespaces_ops(
-#         self,
-#         list_ops: Sequence[tuple[int, ListNamespacesOp]],
-#         results: list[Result],
-#         cur: AsyncCursor[DictRow],
-#     ) -> None:
-#         queries = self._get_batch_list_namespaces_queries(list_ops)
-#         for (query, params), (idx, _) in zip(queries, list_ops):
-#             await cur.execute(query, params)
-#             rows = cast(list[dict], await cur.fetchall())
-#             namespaces = [_decode_ns_bytes(row["truncated_prefix"]) for row in rows]
-#             results[idx] = namespaces
+            json_docs = await pipeline.execute()
 
-#     @asynccontextmanager
-#     async def _cursor(
-#         self, *, pipeline: bool = False
-#     ) -> AsyncIterator[AsyncCursor[DictRow]]:
-#         """Create a database cursor as a context manager.
+            # Convert to dictionary format
+            key_to_row = {doc["key"]: doc for doc in json_docs if doc}
 
-#         Args:
-#             pipeline: whether to use pipeline for the DB operations inside the context manager.
-#                 Will be applied regardless of whether the PostgresStore instance was initialized with a pipeline.
-#                 If pipeline mode is not supported, will fall back to using transaction context manager.
-#         """
-#         async with _ainternal.get_connection(self.conn) as conn:
-#             if self.pipe:
-#                 # a connection in pipeline mode can be used concurrently
-#                 # in multiple threads/coroutines, but only one cursor can be
-#                 # used at a time
-#                 try:
-#                     async with conn.cursor(binary=True, row_factory=dict_row) as cur:
-#                         yield cur
-#                 finally:
-#                     if pipeline:
-#                         await self.pipe.sync()
-#             elif pipeline:
-#                 # a connection not in pipeline mode can only be used by one
-#                 # thread/coroutine at a time, so we acquire a lock
-#                 if self.supports_pipeline:
-#                     async with (
-#                         self.lock,
-#                         conn.pipeline(),
-#                         conn.cursor(binary=True, row_factory=dict_row) as cur,
-#                     ):
-#                         yield cur
-#                 else:
-#                     async with (
-#                         self.lock,
-#                         conn.transaction(),
-#                         conn.cursor(binary=True, row_factory=dict_row) as cur,
-#                     ):
-#                         yield cur
-#             else:
-#                 async with (
-#                     self.lock,
-#                     conn.cursor(binary=True) as cur,
-#                 ):
-#                     yield cur
+            for idx, key in items:
+                if key in key_to_row:
+                    results[idx] = _row_to_item(namespace, key_to_row[key])
+
+    def _prepare_batch_PUT_queries(
+        self,
+        put_ops: Sequence[tuple[int, PutOp]],
+    ) -> tuple[
+        list[RedisDocument], Optional[tuple[str, list[tuple[str, str, str, str]]]]
+    ]:
+        """Prepare queries - no Redis operations in async version."""
+        # Last-write wins
+        dedupped_ops: dict[tuple[tuple[str, ...], str], PutOp] = {}
+        for _, op in put_ops:
+            dedupped_ops[(op.namespace, op.key)] = op
+
+        inserts: list[PutOp] = []
+        deletes: list[PutOp] = []
+        for op in dedupped_ops.values():
+            if op.value is None:
+                deletes.append(op)
+            else:
+                inserts.append(op)
+
+        operations: list[RedisDocument] = []
+        embedding_request = None
+        to_embed: list[tuple[str, str, str, str]] = []
+
+        # Handle inserts
+        if inserts:
+            for op in inserts:
+                now = int(datetime.now(timezone.utc).timestamp() * 1_000_000)
+                doc = RedisDocument(
+                    prefix=_namespace_to_text(op.namespace),
+                    key=op.key,
+                    value=op.value,
+                    created_at=now,
+                    updated_at=now,
+                )
+                operations.append(doc)
+
+                if self.index_config and op.index is not False:
+                    paths = (
+                        self.index_config["__tokenized_fields"]
+                        if op.index is None
+                        else [(ix, tokenize_path(ix)) for ix in op.index]
+                    )
+
+                    for path, tokenized_path in paths:
+                        texts = get_text_at_path(op.value, tokenized_path)
+                        for text in texts:
+                            to_embed.append(
+                                (_namespace_to_text(op.namespace), op.key, path, text)
+                            )
+
+            if to_embed:
+                embedding_request = ("", to_embed)
+
+        return operations, embedding_request
+
+    async def _batch_put_ops(
+        self,
+        put_ops: Sequence[tuple[int, PutOp]],
+    ) -> None:
+        """Execute PUT operations in batch asynchronously."""
+        operations, embedding_request = self._prepare_batch_PUT_queries(put_ops)
+
+        # First delete any existing documents that are being updated/deleted
+        for _, op in put_ops:
+            namespace = _namespace_to_text(op.namespace)
+            query = FilterQuery(
+                filter_expression=f"@prefix:{namespace} @key:{{{op.key}}}",
+                return_fields=["id"],
+            )
+            results = await self.store_index.search(query)
+            pipeline = self._redis.pipeline()
+            for doc in results.docs:
+                pipeline.delete(doc.id)
+
+            if self.index_config:
+                vector_results = await self.vector_index.search(query)
+                for doc in vector_results.docs:
+                    pipeline.delete(doc.id)
+
+            if pipeline:
+                await pipeline.execute()
+
+        # Now handle new document creation
+        doc_ids: dict[tuple[str, str], str] = {}
+        store_docs: list[RedisDocument] = []
+        store_keys: list[str] = []
+
+        # Generate IDs for PUT operations
+        for _, op in put_ops:
+            if op.value is not None:
+                generated_doc_id = uuid.uuid4().hex
+                namespace = _namespace_to_text(op.namespace)
+                doc_ids[(namespace, op.key)] = generated_doc_id
+
+        # Load store docs with explicit keys
+        for doc in operations:
+            store_key = (doc["prefix"], doc["key"])
+            doc_id = doc_ids[store_key]
+            store_docs.append(doc)
+            store_keys.append(f"store:{doc_id}")
+        if store_docs:
+            await self.store_index.load(store_docs, keys=store_keys)
+
+        # Handle vector embeddings with same IDs
+        if embedding_request and self.embeddings:
+            _, text_params = embedding_request
+            vectors = await self.embeddings.aembed_documents(
+                [text for _, _, _, text in text_params]
+            )
+
+            vector_docs: list[dict[str, Any]] = []
+            vector_keys: list[str] = []
+            for (ns, key, path, _), vector in zip(text_params, vectors):
+                vector_key: tuple[str, str] = (ns, key)
+                doc_id = doc_ids[vector_key]
+                vector_docs.append(
+                    {
+                        "prefix": ns,
+                        "key": key,
+                        "field_name": path,
+                        "embedding": vector.tolist()
+                        if hasattr(vector, "tolist")
+                        else vector,
+                        "created_at": datetime.now(timezone.utc).timestamp(),
+                        "updated_at": datetime.now(timezone.utc).timestamp(),
+                    }
+                )
+                vector_keys.append(f"vector:{doc_id}")
+            if vector_docs:
+                await self.vector_index.load(vector_docs, keys=vector_keys)
+
+    async def _batch_search_ops(
+        self,
+        search_ops: Sequence[tuple[int, SearchOp]],
+        results: list[Result],
+    ) -> None:
+        """Execute search operations in batch asynchronously."""
+        queries, embedding_requests = self._get_batch_search_queries(search_ops)
+
+        # Handle vector search
+        query_vectors = {}
+        if embedding_requests and self.embeddings:
+            vectors = await self.embeddings.aembed_documents(
+                [query for _, query in embedding_requests]
+            )
+            query_vectors = dict(zip([idx for idx, _ in embedding_requests], vectors))
+
+        # Process each search operation
+        for (idx, op), (query_str, params) in zip(search_ops, queries):
+            if op.query and idx in query_vectors:
+                # Vector similarity search
+                vector = query_vectors[idx]
+                vector_results = await self.vector_index.query(
+                    VectorQuery(
+                        vector=vector.tolist() if hasattr(vector, "tolist") else vector,
+                        vector_field_name="embedding",
+                        filter_expression=f"@prefix:{_namespace_to_text(op.namespace_prefix)}*",
+                        return_fields=["prefix", "key", "vector_distance"],
+                        num_results=op.limit,
+                    )
+                )
+
+                # Get matching store docs in pipeline
+                pipeline = self._redis.pipeline()
+                result_map = {}  # Map store key to vector result with distances
+
+                for doc in vector_results:
+                    doc_id = (
+                        doc.get("id")
+                        if isinstance(doc, dict)
+                        else getattr(doc, "id", None)
+                    )
+                    if doc_id:
+                        store_key = f"store:{doc_id.split(':')[1]}"  # Convert vector:ID to store:ID
+                        result_map[store_key] = doc
+                        pipeline.json().get(store_key)
+
+                # Execute all lookups in one batch
+                store_docs = await pipeline.execute()
+
+                # Process results maintaining order and applying filters
+                items = []
+                for store_key, store_doc in zip(result_map.keys(), store_docs):
+                    if store_doc:
+                        vector_result = result_map[store_key]
+                        # Get vector_distance from original search result
+                        dist = (
+                            vector_result.get("vector_distance")
+                            if isinstance(vector_result, dict)
+                            else getattr(vector_result, "vector_distance", 0)
+                        )
+                        # Convert to similarity score
+                        score = (1.0 - float(dist)) if dist is not None else 0.0
+                        store_doc["vector_distance"] = dist
+
+                        # Apply value filters if needed
+                        if op.filter:
+                            matches = True
+                            value = store_doc.get("value", {})
+                            for key, expected in op.filter.items():
+                                actual = value.get(key)
+                                if isinstance(expected, list):
+                                    if actual not in expected:
+                                        matches = False
+                                        break
+                                elif actual != expected:
+                                    matches = False
+                                    break
+                            if not matches:
+                                continue
+
+                        items.append(
+                            _row_to_search_item(
+                                _decode_ns(store_doc["prefix"]),
+                                store_doc,
+                                score=score,
+                            )
+                        )
+
+                results[idx] = items
+            else:
+                # Regular search
+                query = Query(query_str)
+                # Get all potential matches for filtering
+                res = await self.store_index.search(query)
+                items = []
+
+                for doc in res.docs:
+                    data = json.loads(doc.json)
+                    # Apply value filters
+                    if op.filter:
+                        matches = True
+                        value = data.get("value", {})
+                        for key, expected in op.filter.items():
+                            actual = value.get(key)
+                            if isinstance(expected, list):
+                                if actual not in expected:
+                                    matches = False
+                                    break
+                            elif actual != expected:
+                                matches = False
+                                break
+                        if not matches:
+                            continue
+                    items.append(_row_to_search_item(_decode_ns(data["prefix"]), data))
+
+            # Apply pagination after filtering
+            if params:
+                limit, offset = params
+                items = items[offset : offset + limit]
+
+            results[idx] = items
+
+    async def _batch_list_namespaces_ops(
+        self,
+        list_ops: Sequence[tuple[int, ListNamespacesOp]],
+        results: list[Result],
+    ) -> None:
+        """Execute list namespaces operations in batch."""
+        for idx, op in list_ops:
+            # Construct base query for namespace search
+            base_query = "*"  # Start with all documents
+            if op.match_conditions:
+                conditions = []
+                for condition in op.match_conditions:
+                    if condition.match_type == "prefix":
+                        prefix = _namespace_to_text(
+                            condition.path, handle_wildcards=True
+                        )
+                        conditions.append(f"@prefix:{prefix}*")
+                    elif condition.match_type == "suffix":
+                        suffix = _namespace_to_text(
+                            condition.path, handle_wildcards=True
+                        )
+                        conditions.append(f"@prefix:*{suffix}")
+                if conditions:
+                    base_query = " ".join(conditions)
+
+            # Execute search with return_fields=["prefix"] to get just namespaces
+            query = FilterQuery(filter_expression=base_query, return_fields=["prefix"])
+            res = await self.store_index.search(query)
+
+            # Extract unique namespaces
+            namespaces = set()
+            for doc in res.docs:
+                if hasattr(doc, "prefix"):
+                    ns = tuple(doc.prefix.split("."))
+                    # Apply max_depth if specified
+                    if op.max_depth is not None:
+                        ns = ns[: op.max_depth]
+                    namespaces.add(ns)
+
+            # Sort and apply pagination
+            sorted_namespaces = sorted(namespaces)
+            if op.limit or op.offset:
+                offset = op.offset or 0
+                limit = op.limit or 10
+                sorted_namespaces = sorted_namespaces[offset : offset + limit]
+
+            results[idx] = sorted_namespaces
+
+    async def _run_background_tasks(
+        self,
+        aqueue: dict[asyncio.Future[Any], Op],
+        store: weakref.ReferenceType[BaseStore],
+    ) -> None:
+        """Run background tasks for processing operations.
+
+        Args:
+            aqueue: Queue of operations to process
+            store: Weakref to the store instance
+        """
+        while True:
+            await asyncio.sleep(0)
+            if not aqueue:
+                continue
+
+            if s := store():
+                # get the operations to run
+                taken = aqueue.copy()
+                # action each operation
+                try:
+                    values = list(taken.values())
+                    listen, dedupped = _dedupe_ops(values)
+                    results = await s.abatch(dedupped)
+                    if listen is not None:
+                        results = [results[ix] for ix in listen]
+
+                    # set the results of each operation
+                    for fut, result in zip(taken, results):
+                        fut.set_result(result)
+                except Exception as e:
+                    for fut in taken:
+                        fut.set_exception(e)
+                # remove the operations from the queue
+                for fut in taken:
+                    del aqueue[fut]
+            else:
+                break
+            # remove strong ref to store
+            del s
