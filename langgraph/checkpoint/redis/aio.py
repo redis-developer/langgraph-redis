@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from types import TracebackType
 from typing import Any, Optional, Sequence, Tuple, Type, cast
 
@@ -30,11 +30,13 @@ from redis.asyncio import Redis as AsyncRedis
 class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
     """Async Redis implementation for checkpoint saver."""
 
-    _redis_url: str
+    _redis_url: Optional[str] = None
+    _redis: Optional[AsyncRedis] = None
+    _owns_its_client: bool = False
+
     checkpoint_index: AsyncSearchIndex
     channel_index: AsyncSearchIndex
     writes_index: AsyncSearchIndex
-    _redis: AsyncRedis  # Override the type from the base class
 
     def __init__(
         self,
@@ -50,6 +52,7 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             index_prefix=index_prefix,
             connection_args=connection_args,
         )
+        self._exit_stack = AsyncExitStack()
         self.loop = asyncio.get_running_loop()
 
     def configure_client(
@@ -60,9 +63,18 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
     ) -> None:
         """Configure the Redis client."""
         self._owns_its_client = redis_client is None
-        self._redis = redis_client or RedisConnectionFactory.get_async_redis_connection(
-            redis_url, **connection_args
-        )
+        self._redis_url = redis_url
+        self._connection_args = connection_args or {}
+        self._redis = redis_client
+
+    async def _redis_client(self) -> AsyncRedis:
+        if self._redis is None:
+            self._owns_its_client = True
+            self._redis = RedisConnectionFactory.get_async_redis_connection(
+                self._redis_url, **self._connection_args
+            )
+            await self._exit_stack.enter_async_context(self._redis)
+        return self._redis
 
     def create_indexes(self) -> None:
         """Create indexes without connecting to Redis."""
@@ -82,21 +94,16 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
     ) -> None:
         """Async context manager exit."""
         # Close client connections
-        if hasattr(self, "checkpoint_index") and hasattr(
-            self.checkpoint_index, "client"
-        ):
-            await self.checkpoint_index.client.aclose()
-        if hasattr(self, "channel_index") and hasattr(self.channel_index, "client"):
-            await self.channel_index.client.aclose()
-        if hasattr(self, "writes_index") and hasattr(self.writes_index, "client"):
-            await self.writes_index.client.aclose()
+        if self._owns_its_client and self._redis_client is not None:
+            await self._exit_stack.aclose()
 
     async def asetup(self) -> None:
         """Initialize Redis indexes asynchronously."""
         # Connect Redis client to indices asynchronously
-        await self.checkpoint_index.set_client(self._redis)
-        await self.channel_index.set_client(self._redis)
-        await self.writes_index.set_client(self._redis)
+        redis = await self._redis_client()
+        await self.checkpoint_index.set_client(redis)
+        await self.channel_index.set_client(redis)
+        await self.writes_index.set_client(redis)
 
         # Create indexes in Redis asynchronously
         await self.checkpoint_index.create(overwrite=False)
@@ -105,9 +112,13 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
 
     async def aget_tuple(self, config: RunnableConfig) -> Optional[CheckpointTuple]:
         """Get a checkpoint tuple from Redis asynchronously."""
-        thread_id = config["configurable"]["thread_id"]
-        checkpoint_ns = config["configurable"].get("checkpoint_ns", "")
-        checkpoint_id = config["configurable"]["checkpoint_id"]
+        configurable = config.get("configurable")
+        if not configurable:
+            raise ValueError('The "configurable" key was not found in RunnableConfig')
+
+        thread_id = configurable["thread_id"]
+        checkpoint_ns = configurable.get("checkpoint_ns", "")
+        checkpoint_id = configurable["checkpoint_id"]
 
         # Construct the query
         query = FilterQuery(
@@ -133,7 +144,6 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             return None
 
         doc = results.docs[0]
-        print(f"Full document retrieved: {doc.__dict__}")
 
         # Fetch and parse metadata
         raw_metadata = getattr(doc, "$.metadata", "{}")
@@ -168,10 +178,12 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         # Construct the filter expression
         filter_expression = []
         if config:
-            filter_expression.append(
-                Tag("thread_id") == config["configurable"]["thread_id"]
-            )
-            if checkpoint_ns := config["configurable"].get("checkpoint_ns"):
+            configurable = config.get("configurable")
+            if not configurable:
+                raise ValueError('The "configurable" key was not found in RunnableConfig')
+
+            filter_expression.append(Tag("thread_id") == configurable["thread_id"])
+            if checkpoint_ns := configurable.get("checkpoint_ns"):
                 filter_expression.append(Tag("checkpoint_ns") == checkpoint_ns)
             if checkpoint_id := get_checkpoint_id(config):
                 filter_expression.append(Tag("checkpoint_id") == checkpoint_id)
@@ -274,7 +286,10 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         new_versions: ChannelVersions,
     ) -> RunnableConfig:
         """Store a checkpoint to Redis asynchronously."""
-        configurable = config["configurable"].copy()
+        configurable = config.get("configurable")
+        if not configurable:
+            raise ValueError('The "configurable" key was not found in RunnableConfig')
+
         thread_id = configurable.pop("thread_id")
         checkpoint_ns = configurable.pop("checkpoint_ns", "")
         checkpoint_id = checkpoint["id"]
@@ -340,9 +355,13 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             writes: List of writes as (channel, value) pairs
             task_id: Identifier for the task creating the writes
         """
-        thread_id = config["configurable"]["thread_id"]
-        checkpoint_ns = config["configurable"].get("checkpoint_ns", "")
-        checkpoint_id = config["configurable"]["checkpoint_id"]
+        configurable = config.get("configurable")
+        if not configurable:
+            raise ValueError('The "configurable" key was not found in RunnableConfig')
+
+        thread_id = configurable["thread_id"]
+        checkpoint_ns = configurable.get("checkpoint_ns", "")
+        checkpoint_id = configurable["checkpoint_id"]
 
         # Transform writes into JSON structure
         writes_objects = []
@@ -362,32 +381,36 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             write_key = f"{self.index_prefix}:writes:{thread_id}:{checkpoint_ns}:{checkpoint_id}"
 
             # Use pipeline for atomic operations
-            pipeline = self.checkpoint_index.client.pipeline()
-            try:
-                # Check if document exists
-                pipeline.json().type(write_key, "$")
-                exists = (await pipeline.execute())[0] is not None
+            client = await self._redis_client()
+            async with client.pipeline() as pipeline:
+                try:
+                    await pipeline.watch(write_key)
 
-                if exists:
-                    # Append to writes array
-                    await pipeline.json().arrappend(
-                        write_key, "$.writes", *writes_objects
-                    )
-                else:
-                    # Create new document
-                    await pipeline.json().set(
-                        write_key,
-                        "$",
-                        {
-                            "thread_id": thread_id,
-                            "checkpoint_ns": checkpoint_ns,
-                            "checkpoint_id": checkpoint_id,
-                            "writes": writes_objects,
-                        },
-                    )
-                await pipeline.execute()
-            finally:
-                await pipeline.reset()
+                    # Check if document exists
+                    pipeline.json().type(write_key, "$")
+                    exists = (await pipeline.execute())[0] is not None
+
+                    if exists:
+                        # Append to writes array
+                        # TODO: What's up with the type error here?
+                        await pipeline.json().arrappend(
+                            write_key, "$.writes", *writes_objects  # type: ignore
+                        )
+                    else:
+                        # Create new document
+                        await pipeline.json().set(
+                            write_key,
+                            "$",
+                            {
+                                "thread_id": thread_id,
+                                "checkpoint_ns": checkpoint_ns,
+                                "checkpoint_id": checkpoint_id,
+                                "writes": writes_objects,
+                            },
+                        )
+                    await pipeline.execute()
+                finally:
+                    await pipeline.reset()
 
     def put_writes(
         self,
@@ -414,7 +437,8 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             return []
 
         # Get the full JSON document
-        result = await self._redis.json().get(write_key)
+        client = await self._redis_client()
+        result = await client.json().get(write_key)
         if not result:
             return []
 
@@ -504,16 +528,10 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         index_prefix: str = "checkpoint",
         connection_args: Optional[dict[str, Any]] = None,
     ) -> AsyncIterator[AsyncRedisSaver]:
-        saver: Optional[AsyncRedisSaver] = None
-        try:
-            saver = cls(
-                redis_url=redis_url,
-                redis_client=redis_client,
-                index_prefix=index_prefix,
-                connection_args=connection_args,
-            )
+        async with cls(
+            redis_url=redis_url,
+            redis_client=redis_client,
+            index_prefix=index_prefix,
+            connection_args=connection_args,
+        ) as saver:
             yield saver
-        finally:
-            if saver and saver._owns_its_client:  # Ensure saver is not None
-                await saver._redis.aclose()  # type: ignore[attr-defined]
-                await saver._redis.connection_pool.disconnect()
