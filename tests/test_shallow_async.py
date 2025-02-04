@@ -10,7 +10,6 @@ from langgraph.checkpoint.base import (
     empty_checkpoint,
 )
 from langgraph.checkpoint.redis.ashallow import AsyncShallowRedisSaver
-from tests.conftest import DEFAULT_REDIS_URI
 
 
 @pytest.fixture
@@ -70,9 +69,9 @@ async def test_data() -> Dict[str, Any]:
 
 
 @pytest.fixture
-async def saver() -> AsyncGenerator[AsyncShallowRedisSaver, None]:
+async def saver(redis_url: str) -> AsyncGenerator[AsyncShallowRedisSaver, None]:
     """AsyncShallowRedisSaver fixture."""
-    saver = AsyncShallowRedisSaver(DEFAULT_REDIS_URI)
+    saver = AsyncShallowRedisSaver(redis_url)
     await saver.asetup()
     yield saver
 

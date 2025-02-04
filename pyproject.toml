@@ -29,6 +29,7 @@ types-redis = "^4.6.0.20241004"
 aioconsole = "^0.8.1"
 langchain-openai = "^0.3.2"
 langgraph = "^0.2.67"
+testcontainers = "^4.9.1"
 
 [tool.pytest.ini_options]
 # --strict-markers will raise errors on unknown marks.

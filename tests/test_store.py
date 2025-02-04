@@ -15,13 +15,13 @@ from langgraph.store.base import (
     SearchOp,
 )
 from langgraph.store.redis import RedisStore
-from tests.conftest import DEFAULT_REDIS_URI, VECTOR_TYPES
+from tests.conftest import VECTOR_TYPES
 from tests.embed_test_utils import CharacterEmbeddings
 
 
 @pytest.fixture(scope="function", autouse=True)
-def clear_test_redis() -> None:
-    client = Redis.from_url(DEFAULT_REDIS_URI)
+def clear_test_redis(redis_url: str) -> None:
+    client = Redis.from_url(redis_url)
     try:
         client.flushall()
     finally:
@@ -29,8 +29,8 @@ def clear_test_redis() -> None:
 
 
 @pytest.fixture
-def store() -> RedisStore:
-    with RedisStore.from_conn_string(DEFAULT_REDIS_URI) as store:
+def store(redis_url: str) -> RedisStore:
+    with RedisStore.from_conn_string(redis_url) as store:
         store.setup()
         return store
 
@@ -214,6 +214,7 @@ def test_vector_search(
     fake_embeddings: CharacterEmbeddings,
     vector_type: str,
     distance_type: str,
+    redis_url: str,
 ) -> None:
     index_config: IndexConfig = {
         "dims": fake_embeddings.dims,
@@ -225,7 +226,7 @@ def test_vector_search(
         "distance_type": distance_type,
     }
 
-    with RedisStore.from_conn_string(DEFAULT_REDIS_URI, index=index_config) as store:
+    with RedisStore.from_conn_string(redis_url, index=index_config) as store:
         store.setup()
 
         docs = [
@@ -367,6 +368,7 @@ def test_vector_update_with_score_verification(
     fake_embeddings: CharacterEmbeddings,
     vector_type: str,
     distance_type: str,
+    redis_url: str,
 ) -> None:
     """Test that updating items properly updates their embeddings and scores."""
     index_config: IndexConfig = {
@@ -379,7 +381,7 @@ def test_vector_update_with_score_verification(
         "distance_type": distance_type,
     }
 
-    with RedisStore.from_conn_string(DEFAULT_REDIS_URI, index=index_config) as store:
+    with RedisStore.from_conn_string(redis_url, index=index_config) as store:
         store.setup()
 
         store.put(("test",), "doc1", {"text": "zany zebra Xerxes"})

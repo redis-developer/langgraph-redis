@@ -23,7 +23,6 @@ from langgraph.checkpoint.base import (
 from langgraph.checkpoint.redis import BaseRedisSaver
 from langgraph.checkpoint.redis.aio import AsyncRedisSaver
 from langgraph.prebuilt import create_react_agent
-from tests.conftest import DEFAULT_REDIS_URI
 
 
 @pytest.fixture
@@ -79,9 +78,9 @@ async def test_data() -> Dict[str, Any]:
 
 
 @pytest.fixture
-async def saver() -> AsyncGenerator[AsyncRedisSaver, None]:
+async def saver(redis_url: str) -> AsyncGenerator[AsyncRedisSaver, None]:
     """Async saver fixture."""
-    saver = AsyncRedisSaver(DEFAULT_REDIS_URI)
+    saver = AsyncRedisSaver(redis_url)
     await saver.asetup()
     yield saver
 
@@ -144,9 +143,9 @@ async def test_null_chars(
 
 
 @pytest.mark.asyncio
-async def test_put_writes_async(test_data: Dict[str, Any]) -> None:
+async def test_put_writes_async(redis_url: str, test_data: Dict[str, Any]) -> None:
     """Test storing writes in Redis asynchronously."""
-    async with AsyncRedisSaver(DEFAULT_REDIS_URI) as saver:
+    async with AsyncRedisSaver(redis_url) as saver:
         await saver.asetup()
 
         config = test_data["configs"][0]
@@ -183,9 +182,11 @@ async def test_put_writes_async(test_data: Dict[str, Any]) -> None:
 
 
 @pytest.mark.asyncio
-async def test_concurrent_writes_async(test_data: Dict[str, Any]) -> None:
+async def test_concurrent_writes_async(
+    redis_url: str, test_data: Dict[str, Any]
+) -> None:
     """Test concurrent writes to Redis."""
-    async with AsyncRedisSaver(DEFAULT_REDIS_URI) as saver:
+    async with AsyncRedisSaver(redis_url) as saver:
         await saver.asetup()
 
         config = test_data["configs"][0]
@@ -218,9 +219,9 @@ async def test_concurrent_writes_async(test_data: Dict[str, Any]) -> None:
 
 
 @pytest.mark.asyncio
-async def test_from_conn_string_with_url() -> None:
+async def test_from_conn_string_with_url(redis_url: str) -> None:
     """Test creating an AsyncRedisSaver with a connection URL."""
-    async with AsyncRedisSaver.from_conn_string("redis://localhost:6379") as saver:
+    async with AsyncRedisSaver.from_conn_string(redis_url) as saver:
         await saver.asetup()
         # Verify connection works by creating and checking a key
         await saver._redis.set("test_key", "test_value")
@@ -229,9 +230,9 @@ async def test_from_conn_string_with_url() -> None:
 
 
 @pytest.mark.asyncio
-async def test_from_conn_string_with_client() -> None:
+async def test_from_conn_string_with_client(redis_url: str) -> None:
     """Test creating an AsyncRedisSaver with an existing Redis client."""
-    client = Redis.from_url("redis://localhost:6379")
+    client = Redis.from_url(redis_url)
     try:
         async with AsyncRedisSaver.from_conn_string(redis_client=client) as saver:
             await saver.asetup()
@@ -244,10 +245,10 @@ async def test_from_conn_string_with_client() -> None:
 
 
 @pytest.mark.asyncio
-async def test_from_conn_string_with_connection_args() -> None:
+async def test_from_conn_string_with_connection_args(redis_url: str) -> None:
     """Test creating an AsyncRedisSaver with connection arguments."""
     async with AsyncRedisSaver.from_conn_string(
-        "redis://localhost:6379", connection_args={"decode_responses": True}
+        redis_url, connection_args={"decode_responses": True}
     ) as saver:
         await saver.asetup()
         # Test with decode_responses=True, so we get str instead of bytes
@@ -258,18 +259,18 @@ async def test_from_conn_string_with_connection_args() -> None:
 
 
 @pytest.mark.asyncio
-async def test_from_conn_string_cleanup() -> None:
+async def test_from_conn_string_cleanup(redis_url: str) -> None:
     """Test proper cleanup of Redis connections."""
     # When creating from URL
     client = None
     saver = None
-    async with AsyncRedisSaver.from_conn_string("redis://localhost:6379") as s:
+    async with AsyncRedisSaver.from_conn_string(redis_url) as s:
         saver = s
         client = s._redis
         assert await client.ping()  # Connection works
 
     # When passing external client, should not close it
-    ext_client = Redis.from_url("redis://localhost:6379")
+    ext_client = Redis.from_url(redis_url)
     try:
         async with AsyncRedisSaver.from_conn_string(redis_client=ext_client) as saver:
             client = saver._redis
@@ -307,9 +308,11 @@ async def test_from_conn_string_errors() -> None:
 
 
 @pytest.mark.asyncio
-async def test_put_writes_json_structure_async(test_data: Dict[str, Any]) -> None:
+async def test_put_writes_json_structure_async(
+    redis_url: str, test_data: Dict[str, Any]
+) -> None:
     """Test that writes are properly stored in Redis JSON format."""
-    async with AsyncRedisSaver.from_conn_string(DEFAULT_REDIS_URI) as saver:
+    async with AsyncRedisSaver.from_conn_string(redis_url) as saver:
         await saver.asetup()
 
         config = test_data["configs"][0]
@@ -349,9 +352,9 @@ async def test_put_writes_json_structure_async(test_data: Dict[str, Any]) -> Non
 
 
 @pytest.mark.asyncio
-async def test_search_writes_async() -> None:
+async def test_search_writes_async(redis_url: str) -> None:
     """Test searching writes using Redis Search."""
-    async with AsyncRedisSaver.from_conn_string(DEFAULT_REDIS_URI) as saver:
+    async with AsyncRedisSaver.from_conn_string(redis_url) as saver:
         await saver.asetup()
 
         # Set up test data with proper typing
@@ -404,9 +407,9 @@ async def test_search_writes_async() -> None:
 
 
 @pytest.mark.asyncio
-async def test_no_running_loop(test_data: dict[str, Any]) -> None:
+async def test_no_running_loop(redis_url: str, test_data: dict[str, Any]) -> None:
     """Test that sync operations raise error when called from async loop."""
-    async with AsyncRedisSaver.from_conn_string(DEFAULT_REDIS_URI) as saver:
+    async with AsyncRedisSaver.from_conn_string(redis_url) as saver:
         await saver.asetup()
         saver.loop = asyncio.get_running_loop()  # Set the loop explicitly
 
@@ -428,9 +431,9 @@ async def test_no_running_loop(test_data: dict[str, Any]) -> None:
 
 
 @pytest.mark.asyncio
-async def test_large_batches(test_data: dict[str, Any]) -> None:
+async def test_large_batches(redis_url: str, test_data: dict[str, Any]) -> None:
     """Test handling large numbers of operations with thread pool."""
-    async with AsyncRedisSaver.from_conn_string(DEFAULT_REDIS_URI) as saver:
+    async with AsyncRedisSaver.from_conn_string(redis_url) as saver:
         await saver.asetup()
         saver.loop = asyncio.get_running_loop()
 
@@ -466,9 +469,9 @@ async def test_large_batches(test_data: dict[str, Any]) -> None:
 
 
 @pytest.mark.asyncio
-async def test_large_batches_async(test_data: dict[str, Any]) -> None:
+async def test_large_batches_async(redis_url: str, test_data: dict[str, Any]) -> None:
     """Test handling large numbers of async operations."""
-    async with AsyncRedisSaver.from_conn_string(DEFAULT_REDIS_URI) as saver:
+    async with AsyncRedisSaver.from_conn_string(redis_url) as saver:
         await saver.asetup()
 
         N = 1000
@@ -538,9 +541,9 @@ def model() -> ChatOpenAI:
 
 @pytest.mark.asyncio
 async def test_async_redis_checkpointer(
-    tools: List[BaseTool], model: ChatOpenAI
+    redis_url: str, tools: List[BaseTool], model: ChatOpenAI
 ) -> None:
-    async with AsyncRedisSaver.from_conn_string(DEFAULT_REDIS_URI) as checkpointer:
+    async with AsyncRedisSaver.from_conn_string(redis_url) as checkpointer:
         await checkpointer.asetup()
         # Create agent with checkpointer
         graph = create_react_agent(model, tools=tools, checkpointer=checkpointer)

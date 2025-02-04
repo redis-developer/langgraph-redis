@@ -13,7 +13,6 @@ from langgraph.checkpoint.base import (
     empty_checkpoint,
 )
 from langgraph.checkpoint.redis.shallow import ShallowRedisSaver
-from tests.conftest import DEFAULT_REDIS_URI
 
 
 @pytest.fixture
@@ -67,9 +66,9 @@ def test_data() -> dict[str, list[Any]]:
 
 
 @pytest.fixture(autouse=True)
-async def clear_test_redis() -> None:
+async def clear_test_redis(redis_url: str) -> None:
     """Clear Redis before each test."""
-    client = Redis.from_url(DEFAULT_REDIS_URI)
+    client = Redis.from_url(redis_url)
     try:
         client.flushall()
     finally:
@@ -77,9 +76,9 @@ async def clear_test_redis() -> None:
 
 
 @contextmanager
-def _saver() -> Any:
+def _saver(redis_url: str) -> Any:
     """Fixture for shallow saver testing."""
-    saver = ShallowRedisSaver(DEFAULT_REDIS_URI)
+    saver = ShallowRedisSaver(redis_url)
     saver.setup()
     try:
         yield saver
@@ -87,9 +86,11 @@ def _saver() -> Any:
         pass
 
 
-def test_only_latest_checkpoint(test_data: dict[str, list[Any]]) -> None:
+def test_only_latest_checkpoint(
+    test_data: dict[str, list[Any]], redis_url: str
+) -> None:
     """Test that only latest checkpoint is stored."""
-    with _saver() as saver:
+    with _saver(redis_url) as saver:
         thread_id = "test-thread"
         checkpoint_ns = ""
 
@@ -129,10 +130,13 @@ def test_only_latest_checkpoint(test_data: dict[str, list[Any]]) -> None:
     ],
 )
 def test_search(
-    query: dict[str, Any], expected_count: int, test_data: dict[str, list[Any]]
+    query: dict[str, Any],
+    expected_count: int,
+    test_data: dict[str, list[Any]],
+    redis_url: str,
 ) -> None:
     """Test search functionality."""
-    with _saver() as saver:
+    with _saver(redis_url) as saver:
         configs = test_data["configs"]
         checkpoints = test_data["checkpoints"]
         metadata = test_data["metadata"]
@@ -145,9 +149,9 @@ def test_search(
         assert len(search_results) == expected_count
 
 
-def test_overwrite_writes(test_data: dict[str, list[Any]]) -> None:
+def test_overwrite_writes(test_data: dict[str, list[Any]], redis_url: str) -> None:
     """Test that writes are overwritten, not appended."""
-    with _saver() as saver:
+    with _saver(redis_url) as saver:
         config = test_data["configs"][0]
         checkpoint = test_data["checkpoints"][0]
         metadata = test_data["metadata"][0]
@@ -176,9 +180,11 @@ def test_overwrite_writes(test_data: dict[str, list[Any]]) -> None:
         ("my_key", "\x00abc"),  # Null character in value
     ],
 )
-def test_null_chars(key: str, value: str, test_data: dict[str, list[Any]]) -> None:
+def test_null_chars(
+    key: str, value: str, test_data: dict[str, list[Any]], redis_url: str
+) -> None:
     """Test handling of null characters."""
-    with _saver() as saver:
+    with _saver(redis_url) as saver:
         config = saver.put(
             test_data["configs"][0],
             test_data["checkpoints"][0],
@@ -195,17 +201,17 @@ def test_null_chars(key: str, value: str, test_data: dict[str, list[Any]]) -> No
         assert result.metadata[sanitized_key] == sanitized_value
 
 
-def test_from_conn_string_with_url() -> None:
+def test_from_conn_string_with_url(redis_url: str) -> None:
     """Test creating ShallowRedisSaver with connection URL."""
-    with ShallowRedisSaver.from_conn_string("redis://localhost:6379") as saver:
+    with ShallowRedisSaver.from_conn_string(redis_url) as saver:
         saver.setup()
         saver._redis.set("test_key", "test_value")
         assert saver._redis.get("test_key") == b"test_value"
 
 
-def test_from_conn_string_with_client() -> None:
+def test_from_conn_string_with_client(redis_url: str) -> None:
     """Test creating ShallowRedisSaver with existing client."""
-    client = Redis.from_url(DEFAULT_REDIS_URI)
+    client = Redis.from_url(redis_url)
     try:
         with ShallowRedisSaver.from_conn_string(redis_client=client) as saver:
             saver.setup()
@@ -215,10 +221,10 @@ def test_from_conn_string_with_client() -> None:
         client.close()
 
 
-def test_from_conn_string_with_connection_args() -> None:
+def test_from_conn_string_with_connection_args(redis_url: str) -> None:
     """Test creating ShallowRedisSaver with connection arguments."""
     with ShallowRedisSaver.from_conn_string(
-        redis_url=DEFAULT_REDIS_URI, connection_args={"decode_responses": True}
+        redis_url=redis_url, connection_args={"decode_responses": True}
     ) as saver:
         saver.setup()
         assert saver._redis.connection_pool.connection_kwargs["decode_responses"]
@@ -228,13 +234,13 @@ def test_from_conn_string_with_connection_args() -> None:
         assert isinstance(value, str)
 
 
-def test_from_conn_string_errors() -> None:
+def test_from_conn_string_errors(redis_url: str) -> None:
     """Test proper cleanup of Redis connections."""
-    with ShallowRedisSaver.from_conn_string(DEFAULT_REDIS_URI) as s:
+    with ShallowRedisSaver.from_conn_string(redis_url) as s:
         saver_redis = s._redis
         assert saver_redis.ping()
 
-    client = Redis.from_url(DEFAULT_REDIS_URI)
+    client = Redis.from_url(redis_url)
     try:
         with ShallowRedisSaver.from_conn_string(redis_client=client) as saver:
             assert saver._redis is client

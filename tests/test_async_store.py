@@ -17,14 +17,14 @@ from langgraph.store.base import (
     SearchOp,
 )
 from langgraph.store.redis import AsyncRedisStore
-from tests.conftest import DEFAULT_REDIS_URI, VECTOR_TYPES
+from tests.conftest import VECTOR_TYPES
 from tests.embed_test_utils import AsyncCharacterEmbeddings
 
 
 @pytest.fixture(autouse=True)
-async def clear_test_redis() -> None:
+async def clear_test_redis(redis_url: str) -> None:
     """Clear Redis before each test."""
-    client = Redis.from_url(DEFAULT_REDIS_URI)
+    client = Redis.from_url(redis_url)
     try:
         await client.flushall()
     finally:
@@ -33,14 +33,14 @@ async def clear_test_redis() -> None:
 
 
 @pytest.fixture
-async def store() -> AsyncGenerator[AsyncRedisStore, None]:
+async def store(redis_url: str) -> AsyncGenerator[AsyncRedisStore, None]:
     """Fixture providing configured AsyncRedisStore.
 
     Uses proper async cleanup and connection handling.
     """
     store = None
     try:
-        async with AsyncRedisStore.from_conn_string(DEFAULT_REDIS_URI) as astore:
+        async with AsyncRedisStore.from_conn_string(redis_url) as astore:
             await astore.setup()
             store = astore
             yield store
@@ -321,6 +321,7 @@ async def test_batch_order(store: AsyncRedisStore) -> None:
 )
 @pytest.mark.asyncio
 async def test_vector_search(
+    redis_url: str,
     fake_embeddings: AsyncCharacterEmbeddings,
     vector_type: str,
     distance_type: str,
@@ -335,9 +336,7 @@ async def test_vector_search(
         "distance_type": distance_type,
     }
 
-    async with AsyncRedisStore.from_conn_string(
-        DEFAULT_REDIS_URI, index=index_config
-    ) as store:
+    async with AsyncRedisStore.from_conn_string(redis_url, index=index_config) as store:
         await store.setup()
 
         docs = [
@@ -367,6 +366,7 @@ async def test_vector_search(
 )
 @pytest.mark.asyncio
 async def test_vector_update_with_score_verification(
+    redis_url: str,
     fake_embeddings: AsyncCharacterEmbeddings,
     vector_type: str,
     distance_type: str,
@@ -382,9 +382,7 @@ async def test_vector_update_with_score_verification(
         "distance_type": distance_type,
     }
 
-    async with AsyncRedisStore.from_conn_string(
-        DEFAULT_REDIS_URI, index=index_config
-    ) as store:
+    async with AsyncRedisStore.from_conn_string(redis_url, index=index_config) as store:
         await store.setup()
 
         # Add initial documents

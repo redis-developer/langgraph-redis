@@ -20,7 +20,6 @@ from langgraph.checkpoint.base import (
 )
 from langgraph.checkpoint.redis import BaseRedisSaver, RedisSaver
 from langgraph.prebuilt import create_react_agent
-from tests.conftest import DEFAULT_REDIS_URI
 
 
 @pytest.fixture
@@ -74,9 +73,9 @@ def test_data() -> dict[str, list[Any]]:
 
 
 @pytest.fixture(autouse=True)
-async def clear_test_redis() -> None:
+async def clear_test_redis(redis_url: str) -> None:
     """Clear Redis before each test."""
-    client = Redis.from_url("redis://localhost:6379")
+    client = Redis.from_url(redis_url)
     try:
         client.flushall()
     finally:
@@ -84,9 +83,9 @@ async def clear_test_redis() -> None:
 
 
 @contextmanager
-def _saver() -> Any:
+def _saver(redis_url: str) -> Any:
     """Fixture for regular saver testing."""
-    saver = RedisSaver(DEFAULT_REDIS_URI)
+    saver = RedisSaver(redis_url)
     saver.setup()
     try:
         yield saver
@@ -104,9 +103,12 @@ def _saver() -> Any:
     ],
 )
 def test_search(
-    query: dict[str, Any], expected_count: int, test_data: dict[str, list[Any]]
+    query: dict[str, Any],
+    expected_count: int,
+    test_data: dict[str, list[Any]],
+    redis_url: str,
 ) -> None:
-    with _saver() as saver:
+    with _saver(redis_url) as saver:
         configs = test_data["configs"]
         checkpoints = test_data["checkpoints"]
         metadata = test_data["metadata"]
@@ -125,8 +127,10 @@ def test_search(
         ("my_key", "\x00abc"),  # Null character in value
     ],
 )
-def test_null_chars(key: str, value: str, test_data: dict[str, list[Any]]) -> None:
-    with _saver() as saver:
+def test_null_chars(
+    key: str, value: str, test_data: dict[str, list[Any]], redis_url: str
+) -> None:
+    with _saver(redis_url) as saver:
         config = saver.put(
             test_data["configs"][0],
             test_data["checkpoints"][0],
@@ -141,9 +145,9 @@ def test_null_chars(key: str, value: str, test_data: dict[str, list[Any]]) -> No
         assert result.metadata[sanitized_key] == sanitized_value
 
 
-def test_put_writes(test_data: dict[str, list[Any]]) -> None:
+def test_put_writes(test_data: dict[str, list[Any]], redis_url: str) -> None:
     """Test storing writes in Redis."""
-    with _saver() as saver:
+    with _saver(redis_url) as saver:
         config = test_data["configs"][0]
         checkpoint = test_data["checkpoints"][0]
         metadata = test_data["metadata"][0]
@@ -175,9 +179,11 @@ def test_put_writes(test_data: dict[str, list[Any]]) -> None:
         assert ("__error__", "error_value") in found_writes
 
 
-def test_put_writes_json_structure(test_data: dict[str, list[Any]]) -> None:
+def test_put_writes_json_structure(
+    test_data: dict[str, list[Any]], redis_url: str
+) -> None:
     """Test that writes are properly stored in Redis JSON format."""
-    with _saver() as saver:
+    with _saver(redis_url) as saver:
         config = test_data["configs"][0]
         checkpoint = test_data["checkpoints"][0]
         metadata = test_data["metadata"][0]
@@ -213,9 +219,9 @@ def test_put_writes_json_structure(test_data: dict[str, list[Any]]) -> None:
         assert json_data["task_id"] == task_id
 
 
-def test_search_writes() -> None:
+def test_search_writes(redis_url: str) -> None:
     """Test searching writes using Redis Search."""
-    with _saver() as saver:
+    with _saver(redis_url) as saver:
         # Set up some test data
         # Create initial config with checkpoint and metadata
         config = {"configurable": {"thread_id": "thread1", "checkpoint_ns": "ns1"}}
@@ -266,18 +272,18 @@ def test_search_writes() -> None:
         assert doc3["blob"] == '"value3"'
 
 
-def test_from_conn_string_with_url() -> None:
+def test_from_conn_string_with_url(redis_url: str) -> None:
     """Test creating a RedisSaver with a connection URL."""
-    with RedisSaver.from_conn_string("redis://localhost:6379") as saver:
+    with RedisSaver.from_conn_string(redis_url) as saver:
         saver.setup()
         # Verify connection works by creating and checking a key
         saver._redis.set("test_key", "test_value")
         assert saver._redis.get("test_key") == b"test_value"
 
 
-def test_from_conn_string_with_client() -> None:
+def test_from_conn_string_with_client(redis_url: str) -> None:
     """Test creating a RedisSaver with an existing Redis client."""
-    client = Redis.from_url("redis://localhost:6379")
+    client = Redis.from_url(redis_url)
     try:
         with RedisSaver.from_conn_string(redis_client=client) as saver:
             saver.setup()
@@ -288,11 +294,11 @@ def test_from_conn_string_with_client() -> None:
         client.close()
 
 
-def test_from_conn_string_with_connection_args() -> None:
+def test_from_conn_string_with_connection_args(redis_url: str) -> None:
     """Test creating a RedisSaver with connection arguments."""
     # Test that decode_responses is propagated to Redis
     with RedisSaver.from_conn_string(
-        redis_url="redis://localhost:6379", connection_args={"decode_responses": True}
+        redis_url=redis_url, connection_args={"decode_responses": True}
     ) as saver:
         saver.setup()
         # Check the connection parameter was passed through
@@ -304,16 +310,16 @@ def test_from_conn_string_with_connection_args() -> None:
         assert isinstance(value, str)  # not bytes
 
 
-def test_from_conn_string_cleanup() -> None:
+def test_from_conn_string_cleanup(redis_url: str) -> None:
     """Test proper cleanup of Redis connections."""
     # Test with auto-created client
-    with RedisSaver.from_conn_string("redis://localhost:6379") as s:
+    with RedisSaver.from_conn_string(redis_url) as s:
         saver_redis = s._redis
         # Verify it works during context
         assert saver_redis.ping()
 
     # Test with provided client
-    client = Redis.from_url("redis://localhost:6379")
+    client = Redis.from_url(redis_url)
     try:
         with RedisSaver.from_conn_string(redis_client=client) as saver:
             # Verify both use the same client
@@ -351,9 +357,9 @@ def test_from_conn_string_errors() -> None:
             pass
 
 
-def test_large_batches(test_data: dict[str, Any]) -> None:
+def test_large_batches(test_data: dict[str, Any], redis_url: str) -> None:
     """Test handling large numbers of operations with thread pool."""
-    with RedisSaver.from_conn_string(DEFAULT_REDIS_URI) as saver:
+    with RedisSaver.from_conn_string(redis_url) as saver:
         saver.setup()
 
         N = 10  # Number of operations per batch
@@ -428,8 +434,10 @@ def model() -> ChatOpenAI:
     return ChatOpenAI(model="gpt-4-turbo-preview", temperature=0)
 
 
-def test_sync_redis_checkpointer(tools: list[BaseTool], model: ChatOpenAI) -> None:
-    with RedisSaver.from_conn_string(DEFAULT_REDIS_URI) as checkpointer:
+def test_sync_redis_checkpointer(
+    tools: list[BaseTool], model: ChatOpenAI, redis_url: str
+) -> None:
+    with RedisSaver.from_conn_string(redis_url) as checkpointer:
         checkpointer.setup()
         # Create agent with checkpointer
         graph = create_react_agent(model, tools=tools, checkpointer=checkpointer)

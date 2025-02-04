@@ -540,7 +540,6 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         redis_url: Optional[str] = None,
         *,
         redis_client: Optional[AsyncRedis] = None,
-        index_prefix: str = "checkpoint",
         connection_args: Optional[dict[str, Any]] = None,
     ) -> AsyncIterator[AsyncRedisSaver]:
         saver: Optional[AsyncRedisSaver] = None
