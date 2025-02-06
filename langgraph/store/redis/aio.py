@@ -179,23 +179,12 @@ class AsyncRedisStore(
         index: Optional[IndexConfig] = None,
     ) -> AsyncIterator[AsyncRedisStore]:
         """Create store from Redis connection string."""
-        store = cls(redis_url=conn_string, index=index)
-        try:
+        async with cls(redis_url=conn_string, index=index) as store:
             store._task = store.loop.create_task(
                 store._run_background_tasks(store._aqueue, weakref.ref(store))
             )
             await store.setup()
             yield store
-        finally:
-            if hasattr(store, "_task"):
-                store._task.cancel()
-                try:
-                    await store._task
-                except asyncio.CancelledError:
-                    pass
-            if store._owns_client:
-                await store._redis.aclose()  # type: ignore[attr-defined]
-                await store._redis.connection_pool.disconnect()
 
     def create_indexes(self) -> None:
         """Create async indices."""
@@ -221,8 +210,9 @@ class AsyncRedisStore(
             except asyncio.CancelledError:
                 pass
 
-        # if self._owns_client:
-        await self._redis.aclose()  # type: ignore[attr-defined]
+        if self._owns_client:
+            await self._redis.aclose()  # type: ignore[attr-defined]
+            await self._redis.connection_pool.disconnect()
 
     async def abatch(self, ops: Iterable[Op]) -> list[Result]:
         """Execute batch of operations asynchronously."""
@@ -301,11 +291,27 @@ class AsyncRedisStore(
     ) -> None:
         """Execute GET operations in batch asynchronously."""
         for query, _, namespace, items in self._get_batch_GET_ops_queries(get_ops):
-            res = await self.store_index.search(Query(query))
-            # Parse JSON from each document
-            key_to_row = {
-                json.loads(doc.json)["key"]: json.loads(doc.json) for doc in res.docs
-            }
+            # Use RedisVL AsyncSearchIndex search
+            search_query = FilterQuery(
+                filter_expression=query,
+                return_fields=["id"],  # Just need the document id
+                num_results=len(items),
+            )
+            res = await self.store_index.search(search_query)
+
+            # Use pipeline to get the actual JSON documents
+            pipeline = self._redis.pipeline(transaction=False)
+            doc_ids = []
+            for doc in res.docs:
+                # The id is already in the correct format (store:prefix:key)
+                pipeline.json().get(doc.id)
+                doc_ids.append(doc.id)
+
+            json_docs = await pipeline.execute()
+
+            # Convert to dictionary format
+            key_to_row = {doc["key"]: doc for doc in json_docs if doc}
+
             for idx, key in items:
                 if key in key_to_row:
                     results[idx] = _row_to_item(namespace, key_to_row[key])
@@ -482,7 +488,7 @@ class AsyncRedisStore(
                 )
 
                 # Get matching store docs in pipeline
-                pipeline = self._redis.pipeline()
+                pipeline = self._redis.pipeline(transaction=False)
                 result_map = {}  # Map store key to vector result with distances
 
                 for doc in vector_results:
