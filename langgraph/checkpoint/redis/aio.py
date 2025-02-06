@@ -10,6 +10,7 @@ from types import TracebackType
 from typing import Any, List, Optional, Sequence, Tuple, Type, cast
 
 from langchain_core.runnables import RunnableConfig
+from redis import WatchError
 from redisvl.index import AsyncSearchIndex
 from redisvl.query import FilterQuery
 from redisvl.query.filter import Num, Tag
@@ -418,38 +419,28 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             }
             writes_objects.append(write_obj)
 
-            # For each write, check existence and then perform appropriate operation
-            async with self.checkpoints_index.client.pipeline(
-                transaction=False
-            ) as pipeline:
-                for write_obj in writes_objects:
-                    key = self._make_redis_checkpoint_writes_key(
-                        thread_id,
-                        checkpoint_ns,
-                        checkpoint_id,
-                        task_id,
-                        write_obj["idx"],
-                    )
-
-                    # First check if key exists
-                    key_exists = await self._redis.exists(key) == 1
-
-                    if all(w[0] in WRITES_IDX_MAP for w in writes):
-                        # UPSERT case - only update specific fields
-                        if key_exists:
-                            # Update only channel, type, and blob fields
-                            pipeline.json().set(key, "$.channel", write_obj["channel"])
-                            pipeline.json().set(key, "$.type", write_obj["type"])
-                            pipeline.json().set(key, "$.blob", write_obj["blob"])
+            upsert_case = all(w[0] in WRITES_IDX_MAP for w in writes)
+            for write_obj in writes_objects:
+                key = self._make_redis_checkpoint_writes_key(
+                    thread_id,
+                    checkpoint_ns,
+                    checkpoint_id,
+                    task_id,
+                    write_obj["idx"],
+                )
+                async def tx(pipe, key=key, write_obj=write_obj, upsert_case=upsert_case):
+                    exists = await pipe.exists(key)
+                    if upsert_case:
+                        if exists:
+                            await pipe.json().set(key, "$.channel", write_obj["channel"])
+                            await pipe.json().set(key, "$.type", write_obj["type"])
+                            await pipe.json().set(key, "$.blob", write_obj["blob"])
                         else:
-                            # For new records, set the complete object
-                            pipeline.json().set(key, "$", write_obj)
+                            await pipe.json().set(key, "$", write_obj)
                     else:
-                        # INSERT case - only insert if doesn't exist
-                        if not key_exists:
-                            pipeline.json().set(key, "$", write_obj)
-
-                await pipeline.execute()
+                        if not exists:
+                            await pipe.json().set(key, "$", write_obj)
+                await self._redis.transaction(tx, key)
 
     def put_writes(
         self,
