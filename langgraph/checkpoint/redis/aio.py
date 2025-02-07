@@ -6,6 +6,7 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from functools import partial
 from types import TracebackType
 from typing import Any, List, Optional, Sequence, Tuple, Type, cast
 
@@ -27,6 +28,26 @@ from langgraph.checkpoint.base import (
 from langgraph.checkpoint.redis.base import BaseRedisSaver
 from langgraph.constants import TASKS
 from redis.asyncio import Redis as AsyncRedis
+from redis.asyncio.client import Pipeline
+
+
+async def _write_obj_tx(
+    pipe: Pipeline,
+    key: str,
+    write_obj: dict[str, Any],
+    upsert_case: bool,
+) -> None:
+    exists: int = await pipe.exists(key)
+    if upsert_case:
+        if exists:
+            await pipe.json().set(key, "$.channel", write_obj["channel"])
+            await pipe.json().set(key, "$.type", write_obj["type"])
+            await pipe.json().set(key, "$.blob", write_obj["blob"])
+        else:
+            await pipe.json().set(key, "$", write_obj)
+    else:
+        if not exists:
+            await pipe.json().set(key, "$", write_obj)
 
 
 class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
@@ -428,24 +449,9 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
                     task_id,
                     write_obj["idx"],
                 )
-
-                async def tx(
-                    pipe, key=key, write_obj=write_obj, upsert_case=upsert_case
-                ):
-                    exists = await pipe.exists(key)
-                    if upsert_case:
-                        if exists:
-                            await pipe.json().set(
-                                key, "$.channel", write_obj["channel"]
-                            )
-                            await pipe.json().set(key, "$.type", write_obj["type"])
-                            await pipe.json().set(key, "$.blob", write_obj["blob"])
-                        else:
-                            await pipe.json().set(key, "$", write_obj)
-                    else:
-                        if not exists:
-                            await pipe.json().set(key, "$", write_obj)
-
+                tx = partial(
+                    _write_obj_tx, key=key, write_obj=write_obj, upsert_case=upsert_case
+                )
                 await self._redis.transaction(tx, key)
 
     def put_writes(

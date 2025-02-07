@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator, Dict, List, Optional, Sequence, Tuple, cast
+from functools import partial
+from types import TracebackType
+from typing import Any, AsyncIterator, Dict, List, Optional, Sequence, Tuple, Type, cast
 
 from langchain_core.runnables import RunnableConfig
 from redisvl.index import AsyncSearchIndex
@@ -30,6 +32,7 @@ from langgraph.checkpoint.redis.base import (
 )
 from langgraph.constants import TASKS
 from redis.asyncio import Redis as AsyncRedis
+from redis.asyncio.client import Pipeline
 
 SCHEMAS = [
     {
@@ -77,6 +80,17 @@ SCHEMAS = [
 ]
 
 
+#        func: Callable[["Pipeline"], Union[Any, Awaitable[Any]]],
+async def _write_obj_tx(pipe: Pipeline, key: str, write_obj: dict[str, Any]) -> None:
+    exists: int = await pipe.exists(key)
+    if exists:
+        await pipe.json().set(key, "$.channel", write_obj["channel"])
+        await pipe.json().set(key, "$.type", write_obj["type"])
+        await pipe.json().set(key, "$.blob", write_obj["blob"])
+    else:
+        await pipe.json().set(key, "$", write_obj)
+
+
 class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
     """Async Redis implementation that only stores the most recent checkpoint."""
 
@@ -104,7 +118,12 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
     async def __aenter__(self) -> AsyncShallowRedisSaver:
         return self
 
-    async def __aexit__(self, exc_type, exc, tb) -> None:
+    async def __aexit__(
+        self,
+        exc_type: Optional[Type[BaseException]],
+        exc: Optional[BaseException],
+        tb: Optional[TracebackType],
+    ) -> None:
         if self._owns_its_client:
             await self._redis.aclose()  # type: ignore[attr-defined]
             await self._redis.connection_pool.disconnect()
@@ -403,18 +422,7 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
                     write_obj["idx"],
                 )
                 if upsert_case:
-
-                    async def tx(pipe, key=key, write_obj=write_obj):
-                        exists = await pipe.exists(key)
-                        if exists:
-                            await pipe.json().set(
-                                key, "$.channel", write_obj["channel"]
-                            )
-                            await pipe.json().set(key, "$.type", write_obj["type"])
-                            await pipe.json().set(key, "$.blob", write_obj["blob"])
-                        else:
-                            await pipe.json().set(key, "$", write_obj)
-
+                    tx = partial(_write_obj_tx, key=key, write_obj=write_obj)
                     await self._redis.transaction(tx, key)
                 else:
                     # Unlike AsyncRedisSaver, the shallow implementation always overwrites
