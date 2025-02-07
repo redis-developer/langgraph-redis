@@ -194,7 +194,6 @@ class AsyncRedisStore(
 
     async def __aenter__(self) -> AsyncRedisStore:
         """Async context manager enter."""
-        await self.setup()
         return self
 
     async def __aexit__(
