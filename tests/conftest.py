@@ -55,19 +55,22 @@ def pytest_addoption(parser):
         "--run-api-tests",
         action="store_true",
         default=False,
-        help="Run tests that require API keys"
+        help="Run tests that require API keys",
     )
+
 
 def pytest_configure(config):
     config.addinivalue_line(
-        "markers",
-        "requires_api_keys: mark test as requiring API keys"
+        "markers", "requires_api_keys: mark test as requiring API keys"
     )
+
 
 def pytest_collection_modifyitems(config, items):
     if config.getoption("--run-api-tests"):
         return
-    skip_api = pytest.mark.skip(reason="Skipping test because API keys are not provided. Use --run-api-tests to run these tests.")
+    skip_api = pytest.mark.skip(
+        reason="Skipping test because API keys are not provided. Use --run-api-tests to run these tests."
+    )
     for item in items:
         if item.get_closest_marker("requires_api_keys"):
             item.add_marker(skip_api)
