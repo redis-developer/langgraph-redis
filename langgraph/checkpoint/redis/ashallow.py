@@ -8,7 +8,6 @@ from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Dict, List, Optional, Sequence, Tuple, cast
 
 from langchain_core.runnables import RunnableConfig
-from redis import WatchError
 from redisvl.index import AsyncSearchIndex
 from redisvl.query import FilterQuery
 from redisvl.query.filter import Num, Tag
@@ -100,8 +99,21 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             redis_client=redis_client,
             connection_args=connection_args,
         )
-        # self.lock = asyncio.Lock()
         self.loop = asyncio.get_running_loop()
+
+    async def __aenter__(self) -> AsyncShallowRedisSaver:
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        if self._owns_its_client:
+            await self._redis.aclose()  # type: ignore[attr-defined]
+            await self._redis.connection_pool.disconnect()
+
+            # Prevent RedisVL from attempting to close the client
+            # on an event loop in a separate thread.
+            self.checkpoints_index._redis_client = None
+            self.checkpoint_blobs_index._redis_client = None
+            self.checkpoint_writes_index._redis_client = None
 
     @classmethod
     @asynccontextmanager
@@ -113,18 +125,12 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         connection_args: Optional[dict[str, Any]] = None,
     ) -> AsyncIterator[AsyncShallowRedisSaver]:
         """Create a new AsyncShallowRedisSaver instance."""
-        saver: Optional[AsyncShallowRedisSaver] = None
-        try:
-            saver = cls(
-                redis_url=redis_url,
-                redis_client=redis_client,
-                connection_args=connection_args,
-            )
+        async with cls(
+            redis_url=redis_url,
+            redis_client=redis_client,
+            connection_args=connection_args,
+        ) as saver:
             yield saver
-        finally:
-            if saver and saver._owns_its_client:
-                await saver._redis.aclose()  # type: ignore[attr-defined]
-                await saver._redis.connection_pool.disconnect()
 
     async def asetup(self) -> None:
         """Initialize Redis indexes asynchronously."""
@@ -397,6 +403,7 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
                     write_obj["idx"],
                 )
                 if upsert_case:
+
                     async def tx(pipe, key=key, write_obj=write_obj):
                         exists = await pipe.exists(key)
                         if exists:

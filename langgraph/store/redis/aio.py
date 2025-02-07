@@ -194,6 +194,7 @@ class AsyncRedisStore(
 
     async def __aenter__(self) -> AsyncRedisStore:
         """Async context manager enter."""
+        await self.setup()
         return self
 
     async def __aexit__(
@@ -291,26 +292,11 @@ class AsyncRedisStore(
     ) -> None:
         """Execute GET operations in batch asynchronously."""
         for query, _, namespace, items in self._get_batch_GET_ops_queries(get_ops):
-            # Use RedisVL AsyncSearchIndex search
-            search_query = FilterQuery(
-                filter_expression=query,
-                return_fields=["id"],  # Just need the document id
-                num_results=len(items),
-            )
-            res = await self.store_index.search(search_query)
-
-            # Use pipeline to get the actual JSON documents
-            pipeline = self._redis.pipeline(transaction=False)
-            doc_ids = []
-            for doc in res.docs:
-                # The id is already in the correct format (store:prefix:key)
-                pipeline.json().get(doc.id)
-                doc_ids.append(doc.id)
-
-            json_docs = await pipeline.execute()
-
-            # Convert to dictionary format
-            key_to_row = {doc["key"]: doc for doc in json_docs if doc}
+            res = await self.store_index.search(Query(query))
+            # Parse JSON from each document
+            key_to_row = {
+                json.loads(doc.json)["key"]: json.loads(doc.json) for doc in res.docs
+            }
 
             for idx, key in items:
                 if key in key_to_row:

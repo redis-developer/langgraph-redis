@@ -501,8 +501,11 @@ async def test_async_store_with_memory_persistence(
         "distance_type": "cosine",
     }
 
-    async with AsyncRedisStore.from_conn_string(redis_url, index=index_config) as store:
+    async with AsyncRedisStore.from_conn_string(
+        redis_url, index=index_config
+    ) as store, AsyncRedisSaver.from_conn_string(redis_url) as checkpointer:
         await store.setup()
+        await checkpointer.asetup()
 
         model = ChatAnthropic(model="claude-3-5-sonnet-20240620")  # type: ignore[call-arg]
 
@@ -531,11 +534,6 @@ async def test_async_store_with_memory_persistence(
         builder = StateGraph(MessagesState)
         builder.add_node("call_model", call_model)  # type:ignore[arg-type]
         builder.add_edge(START, "call_model")
-
-        checkpointer = None
-        async with AsyncRedisSaver.from_conn_string(redis_url) as cp:
-            await cp.asetup()
-            checkpointer = cp
 
         # Compile graph with store and checkpointer
         graph = builder.compile(checkpointer=checkpointer, store=store)

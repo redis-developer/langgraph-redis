@@ -10,7 +10,6 @@ from types import TracebackType
 from typing import Any, List, Optional, Sequence, Tuple, Type, cast
 
 from langchain_core.runnables import RunnableConfig
-from redis import WatchError
 from redisvl.index import AsyncSearchIndex
 from redisvl.query import FilterQuery
 from redisvl.query.filter import Num, Tag
@@ -74,6 +73,7 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
 
     async def __aenter__(self) -> AsyncRedisSaver:
         """Async context manager enter."""
+        await self.asetup()
         return self
 
     async def __aexit__(
@@ -83,15 +83,15 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         exc_tb: Optional[TracebackType],
     ) -> None:
         """Async context manager exit."""
-        # Close client connections
-        if hasattr(self, "checkpoint_index") and hasattr(
-            self.checkpoint_index, "client"
-        ):
-            await self.checkpoint_index.client.aclose()
-        if hasattr(self, "channel_index") and hasattr(self.channel_index, "client"):
-            await self.channel_index.client.aclose()
-        if hasattr(self, "writes_index") and hasattr(self.writes_index, "client"):
-            await self.writes_index.client.aclose()
+        if self._owns_its_client:
+            await self._redis.aclose()  # type: ignore[attr-defined]
+            await self._redis.connection_pool.disconnect()
+
+            # Prevent RedisVL from attempting to close the client
+            # on an event loop in a separate thread.
+            self.checkpoints_index._redis_client = None
+            self.checkpoint_blobs_index._redis_client = None
+            self.checkpoint_writes_index._redis_client = None
 
     async def asetup(self) -> None:
         """Initialize Redis indexes asynchronously."""
@@ -428,11 +428,16 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
                     task_id,
                     write_obj["idx"],
                 )
-                async def tx(pipe, key=key, write_obj=write_obj, upsert_case=upsert_case):
+
+                async def tx(
+                    pipe, key=key, write_obj=write_obj, upsert_case=upsert_case
+                ):
                     exists = await pipe.exists(key)
                     if upsert_case:
                         if exists:
-                            await pipe.json().set(key, "$.channel", write_obj["channel"])
+                            await pipe.json().set(
+                                key, "$.channel", write_obj["channel"]
+                            )
                             await pipe.json().set(key, "$.type", write_obj["type"])
                             await pipe.json().set(key, "$.blob", write_obj["blob"])
                         else:
@@ -440,6 +445,7 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
                     else:
                         if not exists:
                             await pipe.json().set(key, "$", write_obj)
+
                 await self._redis.transaction(tx, key)
 
     def put_writes(
@@ -533,18 +539,12 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         redis_client: Optional[AsyncRedis] = None,
         connection_args: Optional[dict[str, Any]] = None,
     ) -> AsyncIterator[AsyncRedisSaver]:
-        saver: Optional[AsyncRedisSaver] = None
-        try:
-            saver = cls(
-                redis_url=redis_url,
-                redis_client=redis_client,
-                connection_args=connection_args,
-            )
+        async with cls(
+            redis_url=redis_url,
+            redis_client=redis_client,
+            connection_args=connection_args,
+        ) as saver:
             yield saver
-        finally:
-            if saver and saver._owns_its_client:  # Ensure saver is not None
-                await saver._redis.aclose()  # type: ignore[attr-defined]
-                await saver._redis.connection_pool.disconnect()
 
     async def aget_channel_values(
         self, thread_id: str, checkpoint_ns: str = "", checkpoint_id: str = ""
