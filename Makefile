@@ -5,10 +5,13 @@
 ######################
 
 test:
-	poetry run pytest tests
+	poetry run pytest tests --run-api-tests
 
 test_watch:
 	poetry run ptw .
+	
+ci_test:
+	poetry run pytest tests
 
 ######################
 # LINTING AND FORMATTING

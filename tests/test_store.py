@@ -426,6 +426,7 @@ def test_vector_update_with_score_verification(
         assert not any(r.key == "doc4" for r in results_new)
 
 
+@pytest.mark.requires_api_keys
 def test_store_with_memory_persistence(redis_url: str) -> None:
     """Test store functionality with memory persistence.
 

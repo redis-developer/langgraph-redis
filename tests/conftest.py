@@ -48,3 +48,26 @@ async def clear_redis(redis_url: str) -> None:
     client = Redis.from_url(redis_url)
     await client.flushall()
     await client.aclose()  # type: ignore[attr-defined]
+
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--run-api-tests",
+        action="store_true",
+        default=False,
+        help="Run tests that require API keys"
+    )
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "requires_api_keys: mark test as requiring API keys"
+    )
+
+def pytest_collection_modifyitems(config, items):
+    if config.getoption("--run-api-tests"):
+        return
+    skip_api = pytest.mark.skip(reason="Skipping test because API keys are not provided. Use --run-api-tests to run these tests.")
+    for item in items:
+        if item.get_closest_marker("requires_api_keys"):
+            item.add_marker(skip_api)

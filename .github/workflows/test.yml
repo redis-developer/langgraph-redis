@@ -1,8 +1,8 @@
-
-name: Lint
+name: Test Suite
 
 on:
   pull_request:
+
   push:
     branches:
       - main
@@ -11,37 +11,49 @@ env:
   POETRY_VERSION: "1.8.3"
 
 jobs:
-  check:
-    name: Style-check ${{ matrix.python-version }}
+  test:
+    name: Python ${{ matrix.python-version }} - ${{ matrix.connection }} [redis-stack ${{matrix.redis-stack-version}}]
     runs-on: ubuntu-latest
+
     strategy:
+      fail-fast: false
       matrix:
-        # Only lint on the min and max supported Python versions.
-        # It's extremely unlikely that there's a lint issue on any version in between
-        # that doesn't show up on the min or max versions.
-        #
-        # GitHub rate-limits how many jobs can be running at any one time.
-        # Starting new jobs is also relatively slow,
-        # so linting on fewer versions makes CI faster.
-        python-version:
-          - "3.9"
-          - "3.10"
-          - "3.11"
-          - "3.12"
+        python-version: [3.9, '3.10', 3.11, 3.12]
+        connection: ['hiredis', 'plain']
+        redis-stack-version: ['6.2.6-v9', 'latest', 'edge']
+
+    services:
+      redis:
+        image: redis/redis-stack-server:${{matrix.redis-stack-version}}
+        ports:
+          - 6379:6379
 
     steps:
     - uses: actions/checkout@v2
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v2
+      uses: actions/setup-python@v4
       with:
         python-version: ${{ matrix.python-version }}
+        cache: 'pip'
+
     - name: Install Poetry
       uses: snok/install-poetry@v1
       with:
         version: ${{ env.POETRY_VERSION }}
+
     - name: Install dependencies
       run: |
         poetry install --all-extras
-    - name: runt tests
+
+    - name: Install hiredis if needed
+      if: matrix.connection == 'hiredis'
       run: |
-        make test
+        poetry add hiredis
+
+    - name: Set Redis version
+      run: |
+        echo "REDIS_VERSION=${{ matrix.redis-stack-version }}" >> $GITHUB_ENV
+
+    - name: Run tests
+      run: |
+        make ci_test

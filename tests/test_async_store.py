@@ -480,6 +480,7 @@ async def test_large_batches(store: AsyncRedisStore) -> None:
             )
 
 
+@pytest.mark.requires_api_keys
 @pytest.mark.asyncio
 async def test_async_store_with_memory_persistence(
     redis_url: str,

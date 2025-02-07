@@ -434,6 +434,7 @@ def model() -> ChatOpenAI:
     return ChatOpenAI(model="gpt-4-turbo-preview", temperature=0)
 
 
+@pytest.mark.requires_api_keys
 def test_sync_redis_checkpointer(
     tools: list[BaseTool], model: ChatOpenAI, redis_url: str
 ) -> None:
