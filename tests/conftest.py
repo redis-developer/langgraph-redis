@@ -50,7 +50,7 @@ async def clear_redis(redis_url: str) -> None:
     await client.aclose()  # type: ignore[attr-defined]
 
 
-def pytest_addoption(parser):
+def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addoption(
         "--run-api-tests",
         action="store_true",
@@ -59,13 +59,15 @@ def pytest_addoption(parser):
     )
 
 
-def pytest_configure(config):
+def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
         "markers", "requires_api_keys: mark test as requiring API keys"
     )
 
 
-def pytest_collection_modifyitems(config, items):
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: list[pytest.Item]
+) -> None:
     if config.getoption("--run-api-tests"):
         return
     skip_api = pytest.mark.skip(
