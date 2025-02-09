@@ -1,6 +1,5 @@
 """Tests for AsyncRedisStore."""
 
-import uuid
 from typing import Any, AsyncGenerator, Dict, Sequence, cast
 
 import pytest
@@ -9,6 +8,7 @@ from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_openai import OpenAIEmbeddings
 from redis.asyncio import Redis
+from ulid import ULID
 
 from langgraph.checkpoint.redis import AsyncRedisSaver
 from langgraph.constants import START
@@ -525,7 +525,7 @@ async def test_async_store_with_memory_persistence(
             # Store new memories if the user asks the model to remember
             if "remember" in last_message.content.lower():  # type:ignore[union-attr]
                 memory = "User name is Bob"
-                store.put(namespace, str(uuid.uuid4()), {"data": memory})
+                store.put(namespace, str(ULID()), {"data": memory})
 
             messages = [{"role": "system", "content": system_msg}]
             messages.extend([msg.model_dump() for msg in state["messages"]])

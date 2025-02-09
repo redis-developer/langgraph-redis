@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import math
-import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Iterable, Iterator, Optional, Sequence, cast
@@ -14,6 +13,7 @@ from redisvl.index import SearchIndex
 from redisvl.query import FilterQuery, VectorQuery
 from redisvl.redis.connection import RedisConnectionFactory
 from redisvl.utils.token_escaper import TokenEscaper
+from ulid import ULID
 
 from langgraph.store.base import (
     BaseStore,
@@ -223,7 +223,7 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
         # Generate IDs for PUT operations
         for _, op in put_ops:
             if op.value is not None:
-                generated_doc_id = uuid.uuid4().hex
+                generated_doc_id = str(ULID())
                 namespace = _namespace_to_text(op.namespace)
                 doc_ids[(namespace, op.key)] = generated_doc_id
 
