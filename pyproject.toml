@@ -21,8 +21,8 @@ python = ">=3.9,<3.13"
 langgraph-checkpoint = "^2.0.10"
 redisvl = "^0.3.9"
 redis = "^5.2.1"
+langgraph = "^0.2.70"
 
-isort = "^6.0.0"
 [tool.poetry.group.dev.dependencies]
 black = "^25.1.0"
 codespell = "^2.2.0"
@@ -35,9 +35,9 @@ mypy = "^1.10.0"
 types-redis = "^4.6.0.20241004"
 aioconsole = "^0.8.1"
 langchain-openai = "^0.3.2"
-langgraph = "^0.2.67"
 testcontainers = "^4.9.1"
 langchain-anthropic = "^0.3.5"
+isort = "^6.0.0"
 
 [tool.pytest.ini_options]
 # --strict-markers will raise errors on unknown marks.
