@@ -7,7 +7,6 @@ from collections.abc import Sequence
 from typing import Any, Generic, List, Optional, cast
 
 from langchain_core.runnables import RunnableConfig
-
 from langgraph.checkpoint.base import (
     WRITES_IDX_MAP,
     BaseCheckpointSaver,
@@ -200,12 +199,14 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
                     "checkpoint_ns": checkpoint_ns,
                     "channel": k,
                     "version": cast(str, ver),
-                    "type": self._get_type_and_blob(values[k])[0]
-                    if k in values
-                    else "empty",
-                    "blob": self._get_type_and_blob(values[k])[1]
-                    if k in values
-                    else None,
+                    "type": (
+                        self._get_type_and_blob(values[k])[0]
+                        if k in values
+                        else "empty"
+                    ),
+                    "blob": (
+                        self._get_type_and_blob(values[k])[1] if k in values else None
+                    ),
                 },
             )
             for k, ver in versions.items()

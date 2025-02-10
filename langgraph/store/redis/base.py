@@ -5,22 +5,9 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from datetime import datetime, timezone
-from typing import (
-    Any,
-    Generic,
-    Iterable,
-    Optional,
-    Sequence,
-    TypedDict,
-    TypeVar,
-    Union,
-)
+from typing import Any, Generic, Iterable, Optional, Sequence, TypedDict, TypeVar, Union
 
 from langchain_core.embeddings import Embeddings
-from redisvl.index import SearchIndex
-from redisvl.query.filter import Tag, Text
-from redisvl.utils.token_escaper import TokenEscaper
-
 from langgraph.store.base import (
     GetOp,
     IndexConfig,
@@ -36,6 +23,9 @@ from langgraph.store.base import (
 )
 from redis import Redis
 from redis.asyncio import Redis as AsyncRedis
+from redisvl.index import SearchIndex
+from redisvl.query.filter import Tag, Text
+from redisvl.utils.token_escaper import TokenEscaper
 
 from .token_unescaper import TokenUnescaper
 from .types import IndexType, RedisClientType

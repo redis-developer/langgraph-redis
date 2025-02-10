@@ -6,9 +6,6 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_openai import OpenAIEmbeddings
-from redis import Redis
-
-from langgraph.checkpoint.redis import RedisSaver
 from langgraph.graph import START, MessagesState, StateGraph
 from langgraph.store.base import (
     BaseStore,
@@ -22,6 +19,9 @@ from langgraph.store.base import (
     SearchItem,
     SearchOp,
 )
+from redis import Redis
+
+from langgraph.checkpoint.redis import RedisSaver
 from langgraph.store.redis import RedisStore
 from tests.conftest import VECTOR_TYPES
 from tests.embed_test_utils import CharacterEmbeddings

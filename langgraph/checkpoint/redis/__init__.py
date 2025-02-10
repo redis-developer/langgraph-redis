@@ -6,11 +6,6 @@ from contextlib import contextmanager
 from typing import Any, List, Optional, Tuple, cast
 
 from langchain_core.runnables import RunnableConfig
-from redisvl.index import SearchIndex
-from redisvl.query import FilterQuery
-from redisvl.query.filter import Num, Tag
-from redisvl.redis.connection import RedisConnectionFactory
-
 from langgraph.checkpoint.base import (
     ChannelVersions,
     Checkpoint,
@@ -18,13 +13,18 @@ from langgraph.checkpoint.base import (
     CheckpointTuple,
     get_checkpoint_id,
 )
+from langgraph.constants import TASKS
+from redis import Redis
+from redisvl.index import SearchIndex
+from redisvl.query import FilterQuery
+from redisvl.query.filter import Num, Tag
+from redisvl.redis.connection import RedisConnectionFactory
+
 from langgraph.checkpoint.redis.aio import AsyncRedisSaver
 from langgraph.checkpoint.redis.ashallow import AsyncShallowRedisSaver
 from langgraph.checkpoint.redis.base import BaseRedisSaver
 from langgraph.checkpoint.redis.shallow import ShallowRedisSaver
 from langgraph.checkpoint.redis.version import __lib_name__, __version__
-from langgraph.constants import TASKS
-from redis import Redis
 
 
 class RedisSaver(BaseRedisSaver[Redis, SearchIndex]):
@@ -152,9 +152,9 @@ class RedisSaver(BaseRedisSaver[Redis, SearchIndex]):
 
             # Ensure metadata matches CheckpointMetadata type
             sanitized_metadata = {
-                k.replace("\u0000", ""): v.replace("\u0000", "")
-                if isinstance(v, str)
-                else v
+                k.replace("\u0000", ""): (
+                    v.replace("\u0000", "") if isinstance(v, str) else v
+                )
                 for k, v in metadata_dict.items()
             }
             metadata = cast(CheckpointMetadata, sanitized_metadata)
@@ -318,9 +318,9 @@ class RedisSaver(BaseRedisSaver[Redis, SearchIndex]):
 
         # Ensure metadata matches CheckpointMetadata type
         sanitized_metadata = {
-            k.replace("\u0000", ""): v.replace("\u0000", "")
-            if isinstance(v, str)
-            else v
+            k.replace("\u0000", ""): (
+                v.replace("\u0000", "") if isinstance(v, str) else v
+            )
             for k, v in metadata_dict.items()
         }
         metadata = cast(CheckpointMetadata, sanitized_metadata)

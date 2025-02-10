@@ -11,11 +11,6 @@ from types import TracebackType
 from typing import Any, List, Optional, Sequence, Tuple, Type, cast
 
 from langchain_core.runnables import RunnableConfig
-from redisvl.index import AsyncSearchIndex
-from redisvl.query import FilterQuery
-from redisvl.query.filter import Num, Tag
-from redisvl.redis.connection import RedisConnectionFactory
-
 from langgraph.checkpoint.base import (
     WRITES_IDX_MAP,
     ChannelVersions,
@@ -25,10 +20,15 @@ from langgraph.checkpoint.base import (
     PendingWrite,
     get_checkpoint_id,
 )
-from langgraph.checkpoint.redis.base import BaseRedisSaver
 from langgraph.constants import TASKS
 from redis.asyncio import Redis as AsyncRedis
 from redis.asyncio.client import Pipeline
+from redisvl.index import AsyncSearchIndex
+from redisvl.query import FilterQuery
+from redisvl.query.filter import Num, Tag
+from redisvl.redis.connection import RedisConnectionFactory
+
+from langgraph.checkpoint.redis.base import BaseRedisSaver
 
 
 async def _write_obj_tx(
@@ -189,9 +189,9 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
 
         # Ensure metadata matches CheckpointMetadata type
         sanitized_metadata = {
-            k.replace("\u0000", ""): v.replace("\u0000", "")
-            if isinstance(v, str)
-            else v
+            k.replace("\u0000", ""): (
+                v.replace("\u0000", "") if isinstance(v, str) else v
+            )
             for k, v in metadata_dict.items()
         }
         metadata = cast(CheckpointMetadata, sanitized_metadata)
@@ -308,9 +308,9 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
 
             # Ensure metadata matches CheckpointMetadata type
             sanitized_metadata = {
-                k.replace("\u0000", ""): v.replace("\u0000", "")
-                if isinstance(v, str)
-                else v
+                k.replace("\u0000", ""): (
+                    v.replace("\u0000", "") if isinstance(v, str) else v
+                )
                 for k, v in metadata_dict.items()
             }
             metadata = cast(CheckpointMetadata, sanitized_metadata)

@@ -10,11 +10,6 @@ from types import TracebackType
 from typing import Any, AsyncIterator, Dict, List, Optional, Sequence, Tuple, Type, cast
 
 from langchain_core.runnables import RunnableConfig
-from redisvl.index import AsyncSearchIndex
-from redisvl.query import FilterQuery
-from redisvl.query.filter import Num, Tag
-from redisvl.redis.connection import RedisConnectionFactory
-
 from langgraph.checkpoint.base import (
     WRITES_IDX_MAP,
     ChannelVersions,
@@ -23,6 +18,14 @@ from langgraph.checkpoint.base import (
     CheckpointTuple,
     PendingWrite,
 )
+from langgraph.constants import TASKS
+from redis.asyncio import Redis as AsyncRedis
+from redis.asyncio.client import Pipeline
+from redisvl.index import AsyncSearchIndex
+from redisvl.query import FilterQuery
+from redisvl.query.filter import Num, Tag
+from redisvl.redis.connection import RedisConnectionFactory
+
 from langgraph.checkpoint.redis.base import (
     CHECKPOINT_BLOB_PREFIX,
     CHECKPOINT_PREFIX,
@@ -30,9 +33,6 @@ from langgraph.checkpoint.redis.base import (
     REDIS_KEY_SEPARATOR,
     BaseRedisSaver,
 )
-from langgraph.constants import TASKS
-from redis.asyncio import Redis as AsyncRedis
-from redis.asyncio.client import Pipeline
 
 SCHEMAS = [
     {

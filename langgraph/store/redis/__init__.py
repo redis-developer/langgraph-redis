@@ -10,11 +10,6 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Iterable, Iterator, Optional, Sequence, cast
 
-from redisvl.index import SearchIndex
-from redisvl.query import FilterQuery, VectorQuery
-from redisvl.redis.connection import RedisConnectionFactory
-from redisvl.utils.token_escaper import TokenEscaper
-
 from langgraph.store.base import (
     BaseStore,
     GetOp,
@@ -25,6 +20,13 @@ from langgraph.store.base import (
     Result,
     SearchOp,
 )
+from redis import Redis
+from redis.commands.search.query import Query
+from redisvl.index import SearchIndex
+from redisvl.query import FilterQuery, VectorQuery
+from redisvl.redis.connection import RedisConnectionFactory
+from redisvl.utils.token_escaper import TokenEscaper
+
 from langgraph.store.redis.aio import AsyncRedisStore
 from langgraph.store.redis.base import (
     REDIS_KEY_SEPARATOR,
@@ -38,8 +40,6 @@ from langgraph.store.redis.base import (
     _row_to_item,
     _row_to_search_item,
 )
-from redis import Redis
-from redis.commands.search.query import Query
 
 from .token_unescaper import TokenUnescaper
 
@@ -253,9 +253,9 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
                         "prefix": ns,
                         "key": key,
                         "field_name": path,
-                        "embedding": vector.tolist()
-                        if hasattr(vector, "tolist")
-                        else vector,
+                        "embedding": (
+                            vector.tolist() if hasattr(vector, "tolist") else vector
+                        ),
                         "created_at": datetime.now(timezone.utc).timestamp(),
                         "updated_at": datetime.now(timezone.utc).timestamp(),
                     }

@@ -1,4 +1,0 @@
-# .gitignore for /docs directory
-.ipynb_checkpoints
-*.pyc
-__pycache__

@@ -8,9 +8,6 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_openai import OpenAIEmbeddings
-from redis.asyncio import Redis
-
-from langgraph.checkpoint.redis import AsyncRedisSaver
 from langgraph.constants import START
 from langgraph.graph import MessagesState, StateGraph
 from langgraph.store.base import (
@@ -25,6 +22,9 @@ from langgraph.store.base import (
     SearchItem,
     SearchOp,
 )
+from redis.asyncio import Redis
+
+from langgraph.checkpoint.redis import AsyncRedisSaver
 from langgraph.store.redis import AsyncRedisStore
 from tests.conftest import VECTOR_TYPES
 from tests.embed_test_utils import AsyncCharacterEmbeddings
@@ -502,9 +502,10 @@ async def test_async_store_with_memory_persistence(
         "distance_type": "cosine",
     }
 
-    async with AsyncRedisStore.from_conn_string(
-        redis_url, index=index_config
-    ) as store, AsyncRedisSaver.from_conn_string(redis_url) as checkpointer:
+    async with (
+        AsyncRedisStore.from_conn_string(redis_url, index=index_config) as store,
+        AsyncRedisSaver.from_conn_string(redis_url) as checkpointer,
+    ):
         await store.setup()
         await checkpointer.asetup()
 
