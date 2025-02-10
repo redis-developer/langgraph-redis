@@ -5,11 +5,6 @@ from contextlib import contextmanager
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple, cast
 
 from langchain_core.runnables import RunnableConfig
-from redisvl.index import SearchIndex
-from redisvl.query import FilterQuery
-from redisvl.query.filter import Num, Tag
-from redisvl.redis.connection import RedisConnectionFactory
-
 from langgraph.checkpoint.base import (
     WRITES_IDX_MAP,
     ChannelVersions,
@@ -17,6 +12,13 @@ from langgraph.checkpoint.base import (
     CheckpointMetadata,
     CheckpointTuple,
 )
+from langgraph.constants import TASKS
+from redis import Redis
+from redisvl.index import SearchIndex
+from redisvl.query import FilterQuery
+from redisvl.query.filter import Num, Tag
+from redisvl.redis.connection import RedisConnectionFactory
+
 from langgraph.checkpoint.redis.base import (
     CHECKPOINT_BLOB_PREFIX,
     CHECKPOINT_PREFIX,
@@ -24,8 +26,6 @@ from langgraph.checkpoint.redis.base import (
     REDIS_KEY_SEPARATOR,
     BaseRedisSaver,
 )
-from langgraph.constants import TASKS
-from redis import Redis
 
 SCHEMAS = [
     {
@@ -250,9 +250,9 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
 
             # Ensure metadata matches CheckpointMetadata type
             sanitized_metadata = {
-                k.replace("\u0000", ""): v.replace("\u0000", "")
-                if isinstance(v, str)
-                else v
+                k.replace("\u0000", ""): (
+                    v.replace("\u0000", "") if isinstance(v, str) else v
+                )
                 for k, v in metadata_dict.items()
             }
             metadata = cast(CheckpointMetadata, sanitized_metadata)
@@ -342,9 +342,9 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
 
         # Ensure metadata matches CheckpointMetadata type
         sanitized_metadata = {
-            k.replace("\u0000", ""): v.replace("\u0000", "")
-            if isinstance(v, str)
-            else v
+            k.replace("\u0000", ""): (
+                v.replace("\u0000", "") if isinstance(v, str) else v
+            )
             for k, v in metadata_dict.items()
         }
         metadata = cast(CheckpointMetadata, sanitized_metadata)
@@ -478,12 +478,14 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
                     "thread_id": thread_id,
                     "checkpoint_ns": checkpoint_ns,
                     "channel": k,
-                    "type": self._get_type_and_blob(values[k])[0]
-                    if k in values
-                    else "empty",
-                    "blob": self._get_type_and_blob(values[k])[1]
-                    if k in values
-                    else None,
+                    "type": (
+                        self._get_type_and_blob(values[k])[0]
+                        if k in values
+                        else "empty"
+                    ),
+                    "blob": (
+                        self._get_type_and_blob(values[k])[1] if k in values else None
+                    ),
                 },
             )
             for k, ver in versions.items()

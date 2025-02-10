@@ -2,36 +2,43 @@
 name = "langgraph-checkpoint-redis"
 version = "0.0.1"
 description = "Library with a Redis implementation of LangGraph checkpoint saver."
-authors = []
+authors = ["Redis Inc. <applied.ai@redis.com>"]
 license = "MIT"
 readme = "README.md"
-repository = "https://www.github.com/langchain-ai/langgraph"
+repository = "https://www.github.com/redis-developer/langgraph-redis"
+keywords = ["ai", "redis", "redis-client", "vector-database", "vector-search"]
+classifiers = [
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "License :: OSI Approved :: MIT License",
+]
 packages = [{ include = "langgraph" }]
 
 [tool.poetry.dependencies]
 python = ">=3.9,<3.13"
 langgraph-checkpoint = "^2.0.10"
-redisvl = "^0.3.7"
+redisvl = "^0.3.9"
 redis = "^5.2.1"
 python-ulid = "^3.0.0"
+langgraph = "^0.2.70"
 
 [tool.poetry.group.dev.dependencies]
-ruff = "^0.6.2"
+black = "^25.1.0"
 codespell = "^2.2.0"
 pytest = "^7.2.1"
 anyio = "^4.4.0"
 pytest-asyncio = "^0.21.1"
+pytest-xdist = {extras = ["psutil"], version = "^3.6.1"}
 pytest-mock = "^3.11.1"
-pytest-watch = "^4.2.0"
 mypy = "^1.10.0"
-psycopg = {extras = ["binary"], version = ">=3.0.0"}
-# langgraph-checkpoint = {path = "../checkpoint", develop = true}
 types-redis = "^4.6.0.20241004"
 aioconsole = "^0.8.1"
 langchain-openai = "^0.3.2"
-langgraph = "^0.2.67"
 testcontainers = "^4.9.1"
 langchain-anthropic = "^0.3.5"
+isort = "^6.0.0"
 
 [tool.pytest.ini_options]
 # --strict-markers will raise errors on unknown marks.
@@ -43,20 +50,37 @@ langchain-anthropic = "^0.3.5"
 addopts = "--strict-markers --strict-config --durations=5 -vv"
 asyncio_mode = "auto"
 
+[tool.poetry.scripts]
+format = "scripts:format"
+check-format = "scripts:check_format"
+sort-imports = "scripts:sort_imports"
+check-sort-imports = "scripts:check_sort_imports"
+check-lint = "scripts:check_lint"
+check-mypy = "scripts:check_mypy"
+test = "scripts:test"
+test-verbose = "scripts:test_verbose"
 
 [build-system]
-requires = ["poetry-core"]
+requires = ["poetry-core>=1.0.0"]
 build-backend = "poetry.core.masonry.api"
 
-[tool.ruff]
-lint.select = [
-  "E",  # pycodestyle
-  "F",  # Pyflakes
-  "UP", # pyupgrade
-  "B",  # flake8-bugbear
-  "I",  # isort
-]
-lint.ignore = ["E501", "B008", "UP007", "UP006"]
+[tool.black]
+target-version = ['py39', 'py310', 'py311', 'py312', 'py313']
+exclude = '''
+(
+  | \.egg
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.nox
+  | \.tox
+  | \.venv
+  | _build
+  | build
+  | dist
+  | setup.py
+)
+'''
 
 [tool.mypy]
 # https://mypy.readthedocs.io/en/stable/config_file.html

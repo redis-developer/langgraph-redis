@@ -3,15 +3,15 @@ from typing import Any
 
 import pytest
 from langchain_core.runnables import RunnableConfig
-from redis import Redis
-from redis.exceptions import ConnectionError as RedisConnectionError
-
 from langgraph.checkpoint.base import (
     Checkpoint,
     CheckpointMetadata,
     create_checkpoint,
     empty_checkpoint,
 )
+from redis import Redis
+from redis.exceptions import ConnectionError as RedisConnectionError
+
 from langgraph.checkpoint.redis.shallow import ShallowRedisSaver
 
 

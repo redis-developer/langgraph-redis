@@ -56,4 +56,4 @@ jobs:
 
     - name: Run tests
       run: |
-        make ci_test
+        make test

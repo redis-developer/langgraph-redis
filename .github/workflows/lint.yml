@@ -42,6 +42,6 @@ jobs:
     - name: Install dependencies
       run: |
         poetry install --all-extras
-    - name: run lint
+    - name: lint
       run: |
         make lint

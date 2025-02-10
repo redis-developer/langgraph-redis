@@ -7,11 +7,6 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from types import TracebackType
 from typing import Any, AsyncIterator, Iterable, Optional, Sequence, cast
-
-from redisvl.index import AsyncSearchIndex
-from redisvl.query import FilterQuery, VectorQuery
-from redisvl.redis.connection import RedisConnectionFactory
-from redisvl.utils.token_escaper import TokenEscaper
 from ulid import ULID
 
 from langgraph.store.base import (
@@ -28,6 +23,13 @@ from langgraph.store.base import (
     tokenize_path,
 )
 from langgraph.store.base.batch import AsyncBatchedBaseStore, _dedupe_ops
+from redis.asyncio import Redis as AsyncRedis
+from redis.commands.search.query import Query
+from redisvl.index import AsyncSearchIndex
+from redisvl.query import FilterQuery, VectorQuery
+from redisvl.redis.connection import RedisConnectionFactory
+from redisvl.utils.token_escaper import TokenEscaper
+
 from langgraph.store.redis.base import (
     REDIS_KEY_SEPARATOR,
     STORE_PREFIX,
@@ -41,8 +43,6 @@ from langgraph.store.redis.base import (
     _row_to_item,
     _row_to_search_item,
 )
-from redis.asyncio import Redis as AsyncRedis
-from redis.commands.search.query import Query
 
 from .token_unescaper import TokenUnescaper
 
@@ -428,9 +428,9 @@ class AsyncRedisStore(
                         "prefix": ns,
                         "key": key,
                         "field_name": path,
-                        "embedding": vector.tolist()
-                        if hasattr(vector, "tolist")
-                        else vector,
+                        "embedding": (
+                            vector.tolist() if hasattr(vector, "tolist") else vector
+                        ),
                         "created_at": datetime.now(timezone.utc).timestamp(),
                         "updated_at": datetime.now(timezone.utc).timestamp(),
                     }

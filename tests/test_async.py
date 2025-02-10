@@ -10,9 +10,6 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from langchain_core.tools.base import BaseTool
 from langchain_openai import ChatOpenAI
-from redis.asyncio import Redis
-from redis.exceptions import ConnectionError as RedisConnectionError
-
 from langgraph.checkpoint.base import (
     WRITES_IDX_MAP,
     Checkpoint,
@@ -20,9 +17,12 @@ from langgraph.checkpoint.base import (
     create_checkpoint,
     empty_checkpoint,
 )
+from langgraph.prebuilt import create_react_agent
+from redis.asyncio import Redis
+from redis.exceptions import ConnectionError as RedisConnectionError
+
 from langgraph.checkpoint.redis import BaseRedisSaver
 from langgraph.checkpoint.redis.aio import AsyncRedisSaver
-from langgraph.prebuilt import create_react_agent
 
 
 @pytest.fixture
