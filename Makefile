@@ -1,38 +1,35 @@
-.PHONY: test test_watch lint format
+.PHONY: install format lint test clean redis-start redis-stop check-types check
 
-######################
-# TESTING AND COVERAGE
-######################
+install:
+	poetry install --all-extras
 
-test:
-	poetry run pytest tests --run-api-tests
+redis-start:
+	docker run -d --name redis-stack -p 6379:6379 -p 8001:8001 redis/redis-stack:latest
 
-test_watch:
-	poetry run ptw .
+redis-stop:
+	docker stop redis-stack
+
+format:
+	poetry run format
+	poetry run sort-imports
+
+check-types:
+	poetry run check-mypy
+
+lint: format check-types
 	
-ci_test:
-	poetry run pytest tests
+test:
+	poetry run test-verbose
 
-######################
-# LINTING AND FORMATTING
-######################
+check: lint test
 
-# Define a variable for Python and notebook files.
-PYTHON_FILES=.
-MYPY_CACHE=.mypy_cache
-lint format: PYTHON_FILES=.
-lint_diff format_diff: PYTHON_FILES=$(shell git diff --name-only --relative --diff-filter=d main . | grep -E '\.py$$|\.ipynb$$')
-lint_package: PYTHON_FILES=langgraph
-lint_tests: PYTHON_FILES=tests
-lint_tests: MYPY_CACHE=.mypy_cache_test
-
-lint lint_diff lint_package lint_tests:
-	poetry run ruff check .
-	[ "$(PYTHON_FILES)" = "" ] || poetry run ruff format $(PYTHON_FILES) --diff
-	[ "$(PYTHON_FILES)" = "" ] || poetry run ruff check --select I $(PYTHON_FILES)
-	[ "$(PYTHON_FILES)" = "" ] || mkdir -p $(MYPY_CACHE)
-	[ "$(PYTHON_FILES)" = "" ] || poetry run mypy $(PYTHON_FILES) --cache-dir $(MYPY_CACHE)
-
-format format_diff:
-	poetry run ruff format $(PYTHON_FILES)
-	poetry run ruff check --select I --fix $(PYTHON_FILES)
+clean:
+	find . -type d -name "__pycache__" -exec rm -rf {} +
+	find . -type d -name ".pytest_cache" -exec rm -rf {} +
+	find . -type d -name ".mypy_cache" -exec rm -rf {} +
+	find . -type d -name ".coverage" -delete
+	find . -type d -name "htmlcov" -exec rm -rf {} +
+	find . -type d -name "dist" -exec rm -rf {} +
+	find . -type d -name "build" -exec rm -rf {} +
+	find . -type d -name "*.egg-info" -exec rm -rf {} +
+	find . -type d -name "_build" -exec rm -rf {} +
