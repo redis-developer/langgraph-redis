@@ -121,8 +121,9 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
             ]
 
         # Initialize search indices
-        self.store_index = SearchIndex.from_dict(self.SCHEMAS[0])
-        self.store_index.set_client(self._redis)
+        self.store_index = SearchIndex.from_dict(
+            self.SCHEMAS[0], redis_client=self._redis
+        )
 
         # Configure vector index if needed
         if self.index_config:
@@ -156,8 +157,9 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
                 if "ann_index_config" in self.index_config:
                     vector_field["attrs"].update(self.index_config["ann_index_config"])
 
-            self.vector_index = SearchIndex.from_dict(vector_schema)
-            self.vector_index.set_client(self._redis)
+            self.vector_index = SearchIndex.from_dict(
+                vector_schema, redis_client=self._redis
+            )
 
     def _get_batch_GET_ops_queries(
         self,
