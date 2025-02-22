@@ -153,11 +153,6 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
 
     async def asetup(self) -> None:
         """Initialize Redis indexes asynchronously."""
-        # Connect Redis client to indices asynchronously
-        await self.checkpoints_index.set_client(self._redis)
-        await self.checkpoint_blobs_index.set_client(self._redis)
-        await self.checkpoint_writes_index.set_client(self._redis)
-
         # Create indexes in Redis asynchronously
         await self.checkpoints_index.create(overwrite=False)
         await self.checkpoint_blobs_index.create(overwrite=False)
@@ -557,9 +552,15 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
 
     def create_indexes(self) -> None:
         """Create indexes without connecting to Redis."""
-        self.checkpoints_index = AsyncSearchIndex.from_dict(self.SCHEMAS[0])
-        self.checkpoint_blobs_index = AsyncSearchIndex.from_dict(self.SCHEMAS[1])
-        self.checkpoint_writes_index = AsyncSearchIndex.from_dict(self.SCHEMAS[2])
+        self.checkpoints_index = AsyncSearchIndex.from_dict(
+            self.SCHEMAS[0], redis_client=self._redis
+        )
+        self.checkpoint_blobs_index = AsyncSearchIndex.from_dict(
+            self.SCHEMAS[1], redis_client=self._redis
+        )
+        self.checkpoint_writes_index = AsyncSearchIndex.from_dict(
+            self.SCHEMAS[2], redis_client=self._redis
+        )
 
     def setup(self) -> None:
         """Initialize the checkpoint_index in Redis."""
