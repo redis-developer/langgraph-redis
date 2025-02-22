@@ -1,5 +1,4 @@
 import os
-import subprocess
 
 import pytest
 from redis.asyncio import Redis
@@ -8,55 +7,28 @@ from testcontainers.compose import DockerCompose
 
 VECTOR_TYPES = ["vector", "halfvec"]
 
-# try:
-#     from testcontainers.compose import DockerCompose
-
-#     TESTCONTAINERS_AVAILABLE = True
-# except ImportError:
-#     TESTCONTAINERS_AVAILABLE = False
-
-# if TESTCONTAINERS_AVAILABLE:
-
 
 @pytest.fixture(autouse=True)
 def set_tokenizers_parallelism():
     """Disable tokenizers parallelism in tests to avoid deadlocks"""
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-    # @pytest.fixture(scope="session", autouse=True)
-    # def redis_container() -> DockerCompose:
-    #     # Set the default Redis version if not already set
-    #     os.environ.setdefault("REDIS_VERSION", "edge")
-
-    #     try:
-    #         compose = DockerCompose(
-    #             "tests", compose_file_name="docker-compose.yml", pull=True
-    #         )
-    #         compose.start()
-
-    #         redis_host, redis_port = compose.get_service_host_and_port("redis", 6379)
-    #         redis_url = f"redis://{redis_host}:{redis_port}"
-    #         os.environ["DEFAULT_REDIS_URI"] = redis_url
-
-    #         yield compose
-
-    #         compose.stop()
-    #     except subprocess.CalledProcessError:
-    #         yield None
-
 
 @pytest.fixture(scope="session", autouse=True)
 def redis_container(request):
     """
-    Create a unique Compose project for each xdist worker by setting
-    COMPOSE_PROJECT_NAME. That prevents collisions on container/volume names.
+    If using xdist, create a unique Compose project for each xdist worker by
+    setting COMPOSE_PROJECT_NAME. That prevents collisions on container/volume
+    names.
     """
     # In xdist, the config has "workerid" in workerinput
-    worker_id = request.config.workerinput.get("workerid", "master")
+    workerinput = getattr(request.config, "workerinput", {})
+    worker_id = workerinput.get("workerid", "master")
 
     # Set the Compose project name so containers do not clash across workers
     os.environ["COMPOSE_PROJECT_NAME"] = f"redis_test_{worker_id}"
-    os.environ.setdefault("REDIS_VERSION", "edge")
+    os.environ.setdefault("REDIS_VERSION", "latest")
+    os.environ.setdefault("REDIS_IMAGE", "redis/redis-stack-server:latest")
 
     compose = DockerCompose(
         context="tests",
@@ -70,11 +42,6 @@ def redis_container(request):
     compose.stop()
 
 
-# @pytest.fixture(scope="session")
-# def redis_url() -> str:
-#     return os.getenv("DEFAULT_REDIS_URI", "redis://localhost:6379")
-
-
 @pytest.fixture(scope="session")
 def redis_url(redis_container):
     """
@@ -83,6 +50,15 @@ def redis_url(redis_container):
     """
     host, port = redis_container.get_service_host_and_port("redis", 6379)
     return f"redis://{host}:{port}"
+
+
+@pytest.fixture
+async def async_client(redis_url):
+    """
+    An async Redis client that uses the dynamic `redis_url`.
+    """
+    async with await RedisConnectionFactory._get_aredis_connection(redis_url) as client:
+        yield client
 
 
 @pytest.fixture

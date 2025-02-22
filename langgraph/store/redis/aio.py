@@ -7,7 +7,6 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from types import TracebackType
 from typing import Any, AsyncIterator, Iterable, Optional, Sequence, cast
-from ulid import ULID
 
 from langgraph.store.base import (
     BaseStore,
@@ -29,6 +28,7 @@ from redisvl.index import AsyncSearchIndex
 from redisvl.query import FilterQuery, VectorQuery
 from redisvl.redis.connection import RedisConnectionFactory
 from redisvl.utils.token_escaper import TokenEscaper
+from ulid import ULID
 
 from langgraph.store.redis.base import (
     REDIS_KEY_SEPARATOR,
@@ -57,7 +57,7 @@ class AsyncRedisStore(
 
     store_index: AsyncSearchIndex
     vector_index: AsyncSearchIndex
-    _owns_client: bool
+    _owns_its_client: bool
 
     def __init__(
         self,
@@ -65,6 +65,7 @@ class AsyncRedisStore(
         *,
         redis_client: Optional[AsyncRedis] = None,
         index: Optional[IndexConfig] = None,
+        connection_args: Optional[dict[str, Any]] = None,
     ) -> None:
         """Initialize store with Redis connection and optional index config."""
         if redis_url is None and redis_client is None:
@@ -94,10 +95,16 @@ class AsyncRedisStore(
             ]
 
         # Configure client
-        self.configure_client(redis_url=redis_url, redis_client=redis_client)
+        self.configure_client(
+            redis_url=redis_url,
+            redis_client=redis_client,
+            connection_args=connection_args or {},
+        )
 
         # Create store index
-        self.store_index = AsyncSearchIndex.from_dict(self.SCHEMAS[0])
+        self.store_index = AsyncSearchIndex.from_dict(
+            self.SCHEMAS[0], redis_client=self._redis
+        )
 
         # Configure vector index if needed
         if self.index_config:
@@ -131,7 +138,9 @@ class AsyncRedisStore(
                     vector_field["attrs"].update(self.index_config["ann_index_config"])
 
             try:
-                self.vector_index = AsyncSearchIndex.from_dict(vector_schema)
+                self.vector_index = AsyncSearchIndex.from_dict(
+                    vector_schema, redis_client=self._redis
+                )
             except Exception as e:
                 raise ValueError(
                     f"Failed to create vector index with schema: {vector_schema}. Error: {str(e)}"
@@ -145,11 +154,12 @@ class AsyncRedisStore(
         self,
         redis_url: Optional[str] = None,
         redis_client: Optional[AsyncRedis] = None,
+        connection_args: Optional[dict[str, Any]] = None,
     ) -> None:
         """Configure the Redis client."""
-        self._owns_client = redis_client is None
+        self._owns_its_client = redis_client is None
         self._redis = redis_client or RedisConnectionFactory.get_async_redis_connection(
-            redis_url
+            redis_url, **connection_args
         )
 
     async def setup(self) -> None:
@@ -159,11 +169,6 @@ class AsyncRedisStore(
             self.embeddings = ensure_embeddings(
                 self.index_config.get("embed"),
             )
-
-        # Now connect Redis client to indices
-        await self.store_index.set_client(self._redis)
-        if self.index_config:
-            await self.vector_index.set_client(self._redis)
 
         # Create indices in Redis
         await self.store_index.create(overwrite=False)
@@ -188,9 +193,13 @@ class AsyncRedisStore(
 
     def create_indexes(self) -> None:
         """Create async indices."""
-        self.store_index = AsyncSearchIndex.from_dict(self.SCHEMAS[0])
+        self.store_index = AsyncSearchIndex.from_dict(
+            self.SCHEMAS[0], redis_client=self._redis
+        )
         if self.index_config:
-            self.vector_index = AsyncSearchIndex.from_dict(self.SCHEMAS[1])
+            self.vector_index = AsyncSearchIndex.from_dict(
+                self.SCHEMAS[1], redis_client=self._redis
+            )
 
     async def __aenter__(self) -> AsyncRedisStore:
         """Async context manager enter."""
@@ -210,7 +219,7 @@ class AsyncRedisStore(
             except asyncio.CancelledError:
                 pass
 
-        if self._owns_client:
+        if self._owns_its_client:
             await self._redis.aclose()  # type: ignore[attr-defined]
             await self._redis.connection_pool.disconnect()
 

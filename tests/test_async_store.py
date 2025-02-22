@@ -7,10 +7,6 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_openai import OpenAIEmbeddings
-from redis.asyncio import Redis
-from ulid import ULID
-
-from langgraph.checkpoint.redis import AsyncRedisSaver
 from langgraph.constants import START
 from langgraph.graph import MessagesState, StateGraph
 from langgraph.store.base import (
@@ -26,6 +22,7 @@ from langgraph.store.base import (
     SearchOp,
 )
 from redis.asyncio import Redis
+from ulid import ULID
 
 from langgraph.checkpoint.redis import AsyncRedisSaver
 from langgraph.store.redis import AsyncRedisStore
@@ -58,7 +55,7 @@ async def store(redis_url: str) -> AsyncGenerator[AsyncRedisStore, None]:
             yield store
     finally:
         if store:
-            if store._owns_client:
+            if store._owns_its_client:
                 await store._redis.aclose()  # type: ignore[attr-defined]
                 await store._redis.connection_pool.disconnect()
 
