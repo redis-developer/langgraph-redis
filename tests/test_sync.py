@@ -486,3 +486,61 @@ def test_sync_redis_checkpointer(
         checkpoints = list(checkpointer.list(config))
         assert len(checkpoints) > 0
         assert checkpoints[-1].checkpoint["id"] == latest["id"]
+
+
+@pytest.mark.requires_api_keys
+def test_root_graph_checkpoint(
+    tools: list[BaseTool], model: ChatOpenAI, redis_url: str
+) -> None:
+    """
+    A regression test for a bug where queries for checkpoints from the
+    root graph were failing to find valid checkpoints. When called from
+    a root graph, the `checkpoint_id` and `checkpoint_ns` keys are not
+    in the config object.
+    """
+    with RedisSaver.from_conn_string(redis_url) as checkpointer:
+        checkpointer.setup()
+        # Create agent with checkpointer
+        graph = create_react_agent(model, tools=tools, checkpointer=checkpointer)
+
+        # Test initial query
+        config: RunnableConfig = {
+            "configurable": {
+                "thread_id": "test1",
+            }
+        }
+        res = graph.invoke(
+            {"messages": [("human", "what's the weather in sf")]}, config
+        )
+
+        assert res is not None
+
+        # Test checkpoint retrieval
+        latest = checkpointer.get(config)
+
+        assert latest is not None
+        assert all(
+            k in latest
+            for k in [
+                "v",
+                "ts",
+                "id",
+                "channel_values",
+                "channel_versions",
+                "versions_seen",
+            ]
+        )
+        assert "messages" in latest["channel_values"]
+        assert (
+            len(latest["channel_values"]["messages"]) == 4
+        )  # Initial + LLM + Tool + Final
+
+        # Test checkpoint tuple
+        tuple_result = checkpointer.get_tuple(config)
+        assert tuple_result is not None
+        assert tuple_result.checkpoint == latest
+
+        # Test listing checkpoints
+        checkpoints = list(checkpointer.list(config))
+        assert len(checkpoints) > 0
+        assert checkpoints[-1].checkpoint["id"] == latest["id"]

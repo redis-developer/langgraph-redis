@@ -592,3 +592,65 @@ async def test_async_redis_checkpointer(
         checkpoints = [c async for c in checkpointer.alist(config)]
         assert len(checkpoints) > 0
         assert checkpoints[-1].checkpoint["id"] == latest["id"]
+
+
+@pytest.mark.requires_api_keys
+@pytest.mark.asyncio
+async def test_root_graph_checkpoint(
+    redis_url: str, tools: List[BaseTool], model: ChatOpenAI
+) -> None:
+    """
+    A regression test for a bug where queries for checkpoints from the
+    root graph were failing to find valid checkpoints. When called from
+    a root graph, the `checkpoint_id` and `checkpoint_ns` keys are not
+    in the config object.
+    """
+
+    async with AsyncRedisSaver.from_conn_string(redis_url) as checkpointer:
+        await checkpointer.asetup()
+        # Create agent with checkpointer
+        graph = create_react_agent(model, tools=tools, checkpointer=checkpointer)
+
+        # Test initial query
+        config: RunnableConfig = {
+            "configurable": {
+                "thread_id": "test1",
+                "checkpoint_ns": "",
+                "checkpoint_id": "",
+            }
+        }
+        res = await graph.ainvoke(
+            {"messages": [("human", "what's the weather in sf")]}, config
+        )
+
+        assert res is not None
+
+        # Test checkpoint retrieval
+        latest = await checkpointer.aget(config)
+
+        assert latest is not None
+        assert all(
+            k in latest
+            for k in [
+                "v",
+                "ts",
+                "id",
+                "channel_values",
+                "channel_versions",
+                "versions_seen",
+            ]
+        )
+        assert "messages" in latest["channel_values"]
+        assert (
+            len(latest["channel_values"]["messages"]) == 4
+        )  # Initial + LLM + Tool + Final
+
+        # Test checkpoint tuple
+        tuple_result = await checkpointer.aget_tuple(config)
+        assert tuple_result is not None
+        assert tuple_result.checkpoint == latest
+
+        # Test listing checkpoints
+        checkpoints = [c async for c in checkpointer.alist(config)]
+        assert len(checkpoints) > 0
+        assert checkpoints[-1].checkpoint["id"] == latest["id"]

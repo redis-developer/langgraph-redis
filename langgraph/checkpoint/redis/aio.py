@@ -132,16 +132,11 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         checkpoint_id = get_checkpoint_id(config)
         checkpoint_ns = config["configurable"].get("checkpoint_ns", "")
 
+        checkpoint_filter_expression = Tag("thread_id") == thread_id
         if checkpoint_id:
-            checkpoint_filter_expression = (
-                (Tag("thread_id") == thread_id)
-                & (Tag("checkpoint_ns") == checkpoint_ns)
-                & (Tag("checkpoint_id") == checkpoint_id)
-            )
-        else:
-            checkpoint_filter_expression = (Tag("thread_id") == thread_id) & (
-                Tag("checkpoint_ns") == checkpoint_ns
-            )
+            checkpoint_filter_expression &= Tag("checkpoint_id") == str(checkpoint_id)
+        if checkpoint_ns:
+            checkpoint_filter_expression &= Tag("checkpoint_ns") == checkpoint_ns
 
         # Construct the query
         checkpoints_query = FilterQuery(
