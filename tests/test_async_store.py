@@ -3,10 +3,9 @@
 from typing import Any, AsyncGenerator, Dict, Sequence, cast
 
 import pytest
-from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
-from langchain_openai import OpenAIEmbeddings
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langgraph.constants import START
 from langgraph.graph import MessagesState, StateGraph
 from langgraph.store.base import (
@@ -511,7 +510,7 @@ async def test_async_store_with_memory_persistence(
         await store.setup()
         await checkpointer.asetup()
 
-        model = ChatAnthropic(model="claude-3-5-sonnet-20240620")  # type: ignore[call-arg]
+        model = ChatOpenAI(model="gpt-4o-2024-08-06", temperature=0)  # type: ignore[call-arg]
 
         def call_model(
             state: MessagesState, config: RunnableConfig, *, store: BaseStore
@@ -549,7 +548,7 @@ async def test_async_store_with_memory_persistence(
         input_message = HumanMessage(content="Hi! Remember: my name is Bob")
         response = await graph.ainvoke({"messages": [input_message]}, config)
 
-        assert "I'll remember that your name is Bob" in response["messages"][1].content
+        assert "Hi Bob" in response["messages"][1].content
 
         # Test 2: inspect the Redis store and verify that we have in fact saved the memories for the user
         memories = await store.asearch(("memories", "1"))
