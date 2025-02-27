@@ -25,7 +25,7 @@ from redisvl.index import SearchIndex
 from redisvl.query import FilterQuery, VectorQuery
 from redisvl.redis.connection import RedisConnectionFactory
 from redisvl.utils.token_escaper import TokenEscaper
-from ulid import ULID
+from redisvl.utils.utils import create_ulid
 
 from langgraph.store.redis.aio import AsyncRedisStore
 from langgraph.store.redis.base import (
@@ -223,7 +223,7 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
         # Generate IDs for PUT operations
         for _, op in put_ops:
             if op.value is not None:
-                generated_doc_id = str(ULID())
+                generated_doc_id = create_ulid()
                 namespace = _namespace_to_text(op.namespace)
                 doc_ids[(namespace, op.key)] = generated_doc_id
 

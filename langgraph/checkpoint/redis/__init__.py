@@ -303,7 +303,7 @@ class RedisSaver(BaseRedisSaver[Redis, SearchIndex]):
 
         # Fetch pending_sends from parent checkpoint
         pending_sends = []
-        if doc["parent_checkpoint_id"]:
+        if "parent_checkpoint_id" in doc:
             pending_sends = self._load_pending_sends(
                 thread_id=thread_id,
                 checkpoint_ns=checkpoint_ns,
