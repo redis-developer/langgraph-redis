@@ -1,14 +1,10 @@
 from typing import Any, Dict, Sequence, cast
 
 import pytest
-from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
-from langchain_openai import OpenAIEmbeddings
-from redis import Redis
-from ulid import ULID
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
-from langgraph.checkpoint.redis import RedisSaver
 from langgraph.graph import START, MessagesState, StateGraph
 from langgraph.store.base import (
     BaseStore,
@@ -22,6 +18,10 @@ from langgraph.store.base import (
     SearchItem,
     SearchOp,
 )
+from redis import Redis
+from ulid import ULID
+
+from langgraph.checkpoint.redis import RedisSaver
 from langgraph.store.redis import RedisStore
 from tests.conftest import VECTOR_TYPES
 from tests.embed_test_utils import CharacterEmbeddings
@@ -447,7 +447,7 @@ def test_store_with_memory_persistence(redis_url: str) -> None:
 
     with RedisStore.from_conn_string(redis_url, index=index_config) as store:
         store.setup()
-        model = ChatAnthropic(model="claude-3-5-sonnet-20240620")  # type: ignore[call-arg]
+        model = ChatOpenAI(model="gpt-4o-2024-08-06", temperature=0)
 
         def call_model(
             state: MessagesState, config: RunnableConfig, *, store: BaseStore
@@ -490,7 +490,7 @@ def test_store_with_memory_persistence(redis_url: str) -> None:
         input_message = HumanMessage(content="Hi! Remember: my name is Bob")
         response = graph.invoke({"messages": [input_message]}, config)
 
-        assert "I'll remember that your name is Bob" in response["messages"][1].content
+        assert "Hi Bob" in response["messages"][1].content
 
         # Test 2: inspect the Redis store and verify that we have in fact saved the memories for the user
         for memory in store.search(("memories", "1")):

@@ -8,6 +8,8 @@ from langgraph.checkpoint.base import (
     create_checkpoint,
     empty_checkpoint,
 )
+from redis.asyncio import Redis
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from langgraph.checkpoint.redis.ashallow import AsyncShallowRedisSaver
 
@@ -208,3 +210,50 @@ async def test_sequential_writes(
     assert result.pending_writes is not None
     assert len(result.pending_writes) == 1
     assert result.pending_writes[0] == ("task1", "channel2", "value2")
+
+
+@pytest.mark.asyncio
+async def test_from_conn_string_errors(redis_url: str) -> None:
+    """Test proper cleanup of Redis connections."""
+    async with AsyncShallowRedisSaver.from_conn_string(redis_url) as s:
+        saver_redis = s._redis
+        assert await saver_redis.ping()
+
+    client = Redis.from_url(redis_url)
+    try:
+        async with AsyncShallowRedisSaver.from_conn_string(
+            redis_client=client
+        ) as saver:
+            assert saver._redis is client
+            assert await saver._redis.ping()
+        assert await client.ping()
+    finally:
+        await client.close()
+
+    """Test error conditions for from_conn_string."""
+    # Test with neither URL nor client provided
+    with pytest.raises(
+        ValueError, match="Either redis_url or redis_client must be provided"
+    ):
+        async with AsyncShallowRedisSaver.from_conn_string() as saver:
+            await saver.asetup()
+
+    # Test with invalid connection URL
+    with pytest.raises(RedisConnectionError):
+        async with AsyncShallowRedisSaver.from_conn_string(
+            "redis://nonexistent:6379"
+        ) as saver:
+            await saver.asetup()
+
+    # Test with non-responding client
+    client = Redis(host="nonexistent", port=6379)
+    with pytest.raises(RedisConnectionError):
+        async with AsyncShallowRedisSaver.from_conn_string(
+            redis_client=client
+        ) as saver:
+            await saver.asetup()
+
+    # Test with empty URL
+    with pytest.raises(ValueError, match="REDIS_URL env var not set"):
+        async with AsyncShallowRedisSaver.from_conn_string("") as saver:
+            await saver.asetup()

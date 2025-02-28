@@ -254,21 +254,21 @@ def test_from_conn_string_errors(redis_url: str) -> None:
     with pytest.raises(
         ValueError, match="Either redis_url or redis_client must be provided"
     ):
-        with ShallowRedisSaver.from_conn_string() as _:
-            pass
+        with ShallowRedisSaver.from_conn_string() as saver:
+            saver.setup()
 
     # Test with invalid connection URL
     with pytest.raises(RedisConnectionError):
-        with ShallowRedisSaver.from_conn_string("redis://nonexistent:6379") as _:
-            pass
+        with ShallowRedisSaver.from_conn_string("redis://nonexistent:6379") as saver:
+            saver.setup()
 
     # Test with non-responding client
     client = Redis(host="nonexistent", port=6379)
     with pytest.raises(RedisConnectionError):
-        with ShallowRedisSaver.from_conn_string(redis_client=client) as _:
-            pass
+        with ShallowRedisSaver.from_conn_string(redis_client=client) as saver:
+            saver.setup()
 
     # Test with empty URL
     with pytest.raises(ValueError, match="REDIS_URL env var not set"):
-        with ShallowRedisSaver.from_conn_string("") as _:
-            pass
+        with ShallowRedisSaver.from_conn_string("") as saver:
+            saver.setup()

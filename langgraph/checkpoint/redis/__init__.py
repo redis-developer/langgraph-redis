@@ -51,20 +51,20 @@ class RedisSaver(BaseRedisSaver[Redis, SearchIndex]):
     ) -> None:
         """Configure the Redis client."""
         self._owns_its_client = redis_client is None
-
         self._redis = redis_client or RedisConnectionFactory.get_redis_connection(
             redis_url, **connection_args
         )
 
     def create_indexes(self) -> None:
-        self.checkpoints_index = SearchIndex.from_dict(self.SCHEMAS[0])
-        self.checkpoint_blobs_index = SearchIndex.from_dict(self.SCHEMAS[1])
-        self.checkpoint_writes_index = SearchIndex.from_dict(self.SCHEMAS[2])
-
-        # Connect Redis client to indices
-        self.checkpoints_index.set_client(self._redis)
-        self.checkpoint_blobs_index.set_client(self._redis)
-        self.checkpoint_writes_index.set_client(self._redis)
+        self.checkpoints_index = SearchIndex.from_dict(
+            self.SCHEMAS[0], redis_client=self._redis
+        )
+        self.checkpoint_blobs_index = SearchIndex.from_dict(
+            self.SCHEMAS[1], redis_client=self._redis
+        )
+        self.checkpoint_writes_index = SearchIndex.from_dict(
+            self.SCHEMAS[2], redis_client=self._redis
+        )
 
     def list(
         self,

@@ -12,14 +12,15 @@ classifiers = [
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "License :: OSI Approved :: MIT License",
 ]
 packages = [{ include = "langgraph" }]
 
 [tool.poetry.dependencies]
-python = ">=3.9,<3.13"
+python = ">=3.9,<3.14"
 langgraph-checkpoint = "^2.0.10"
-redisvl = "^0.3.9"
+redisvl = "^0.4.1"
 redis = "^5.2.1"
 python-ulid = "^3.0.0"
 langgraph = "^0.2.70"
@@ -37,8 +38,8 @@ types-redis = "^4.6.0.20241004"
 aioconsole = "^0.8.1"
 langchain-openai = "^0.3.2"
 testcontainers = "^4.9.1"
-langchain-anthropic = "^0.3.5"
 isort = "^6.0.0"
+cryptography = { version = ">=44.0.1", markers = "python_version > '3.9.1'" }
 
 [tool.pytest.ini_options]
 # --strict-markers will raise errors on unknown marks.

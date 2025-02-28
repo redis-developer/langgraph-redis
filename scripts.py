@@ -1,4 +1,5 @@
 import subprocess
+import sys
 
 
 def format():
@@ -29,10 +30,18 @@ def check_mypy():
 
 
 def test():
-    subprocess.run(["python", "-m", "pytest", "-n", "auto", "--log-level=CRITICAL"], check=True)
+    test_cmd = ["python", "-m", "pytest", "-n", "auto", "--log-level=CRITICAL"]
+    # Get any extra arguments passed to the script
+    extra_args = sys.argv[1:]
+    if extra_args:
+        test_cmd.extend(extra_args)
+    subprocess.run(test_cmd, check=True)
 
 
 def test_verbose():
-    subprocess.run(
-        ["python", "-m", "pytest", "-n", "auto", "-vv", "-s", "--log-level=CRITICAL"], check=True
-    )
+    test_cmd = ["python", "-m", "pytest", "-n", "auto", "-vv", "-s", "--log-level=CRITICAL"]
+    # Get any extra arguments passed to the script
+    extra_args = sys.argv[1:]
+    if extra_args:
+        test_cmd.extend(extra_args)
+    subprocess.run(test_cmd, check=True)

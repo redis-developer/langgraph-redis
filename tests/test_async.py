@@ -287,24 +287,26 @@ async def test_from_conn_string_errors() -> None:
     with pytest.raises(
         ValueError, match="Either redis_url or redis_client must be provided"
     ):
-        async with AsyncRedisSaver.from_conn_string() as _:
-            pass
+        async with AsyncRedisSaver.from_conn_string() as saver:
+            await saver.asetup()
 
     # Test with empty URL - should fail
     with pytest.raises(ValueError, match="REDIS_URL env var not set"):
-        async with AsyncRedisSaver.from_conn_string("") as _:
-            pass
+        async with AsyncRedisSaver.from_conn_string("") as saver:
+            await saver.asetup()
 
     # Test with invalid connection URL
     with pytest.raises(RedisConnectionError):
-        async with AsyncRedisSaver.from_conn_string("redis://nonexistent:6379") as _:
-            await _.asetup()  # Force connection attempt
+        async with AsyncRedisSaver.from_conn_string(
+            "redis://nonexistent:6379"
+        ) as saver:
+            await saver.asetup()
 
     # Test with non-functional client
     client = Redis.from_url("redis://nonexistent:6379")
     with pytest.raises(RedisConnectionError):
-        async with AsyncRedisSaver.from_conn_string(redis_client=client) as _:
-            await _.asetup()  # Force connection attempt
+        async with AsyncRedisSaver.from_conn_string(redis_client=client) as saver:
+            await saver.asetup()
 
 
 @pytest.mark.asyncio

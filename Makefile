@@ -1,4 +1,4 @@
-.PHONY: install format lint test clean redis-start redis-stop check-types check
+.PHONY: install format lint test test-all clean redis-start redis-stop check-types check
 
 install:
 	poetry install --all-extras
@@ -20,6 +20,9 @@ lint: format check-types
 	
 test:
 	poetry run test-verbose
+
+test-all:
+	poetry run test-verbose --run-api-tests
 
 check: lint test
 

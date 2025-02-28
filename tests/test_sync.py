@@ -8,9 +8,6 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from langchain_core.tools.base import BaseTool
 from langchain_openai import ChatOpenAI
-from redis import Redis
-from redis.exceptions import ConnectionError as RedisConnectionError
-
 from langgraph.checkpoint.base import (
     WRITES_IDX_MAP,
     Checkpoint,
@@ -18,8 +15,11 @@ from langgraph.checkpoint.base import (
     create_checkpoint,
     empty_checkpoint,
 )
-from langgraph.checkpoint.redis import BaseRedisSaver, RedisSaver
 from langgraph.prebuilt import create_react_agent
+from redis import Redis
+from redis.exceptions import ConnectionError as RedisConnectionError
+
+from langgraph.checkpoint.redis import BaseRedisSaver, RedisSaver
 
 
 @pytest.fixture
@@ -337,24 +337,24 @@ def test_from_conn_string_errors() -> None:
     with pytest.raises(
         ValueError, match="Either redis_url or redis_client must be provided"
     ):
-        with RedisSaver.from_conn_string() as _:
-            pass
+        with RedisSaver.from_conn_string() as saver:
+            saver.setup()
 
     # Test with empty URL
     with pytest.raises(ValueError, match="REDIS_URL env var not set"):
-        with RedisSaver.from_conn_string("") as _:
-            pass
+        with RedisSaver.from_conn_string("") as saver:
+            saver.setup()
 
     # Test with invalid connection URL
     with pytest.raises(RedisConnectionError):
-        with RedisSaver.from_conn_string("redis://nonexistent:6379") as _:
-            pass
+        with RedisSaver.from_conn_string("redis://nonexistent:6379") as saver:
+            saver.setup()
 
     # Test with non-responding client
     client = Redis(host="nonexistent", port=6379)
     with pytest.raises(RedisConnectionError):
-        with RedisSaver.from_conn_string(redis_client=client) as _:
-            pass
+        with RedisSaver.from_conn_string(redis_client=client) as saver:
+            saver.setup()
 
 
 def test_large_batches(test_data: dict[str, Any], redis_url: str) -> None:
