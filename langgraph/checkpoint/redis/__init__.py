@@ -79,18 +79,15 @@ class RedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         filter_expression = []
         if config:
             thread_id = config["configurable"]["thread_id"]
-            checkpoint_ns = config["configurable"].get("checkpoint_ns", "")
+            checkpoint_ns = config["configurable"].get("checkpoint_ns")
             checkpoint_id = get_checkpoint_id(config)
             filter_expression.append(Tag("thread_id") == thread_id)
 
-            # Following the Postgres implementation, we only want to filter by
-            # checkpoint_ns if it's set. This is slightly different than the
-            # get_tuple() logic, where we always query for checkpoint_ns.
-            if checkpoint_ns:
+            # Reproducing logic from the Postgres implementation.
+            if checkpoint_ns is not None:
                 filter_expression.append(Tag("checkpoint_ns") == checkpoint_ns)
-            # We want to find all checkpoints for the thread matching the other
-            # filters, with any checkpoint_id.
-            filter_expression.append(Tag("checkpoint_id") == checkpoint_id)
+            if checkpoint_id:
+                filter_expression.append(Tag("checkpoint_id") == checkpoint_id)
 
         if filter:
             for k, v in filter.items():
@@ -267,6 +264,7 @@ class RedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         checkpoint_id = get_checkpoint_id(config)
         checkpoint_ns = config["configurable"].get("checkpoint_ns", "")
 
+        # Reproducing logic from the Postgres implementation.
         if checkpoint_id:
             checkpoint_filter_expression = (
                 (Tag("thread_id") == thread_id)
