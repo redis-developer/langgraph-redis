@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "langgraph-checkpoint-redis"
-version = "0.0.1"
+version = "0.0.2"
 description = "Library with a Redis implementation of LangGraph checkpoint saver."
 authors = ["Redis Inc. <applied.ai@redis.com>"]
 license = "MIT"
