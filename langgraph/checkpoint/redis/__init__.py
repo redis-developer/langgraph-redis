@@ -78,13 +78,19 @@ class RedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         # Construct the filter expression
         filter_expression = []
         if config:
-            filter_expression.append(
-                Tag("thread_id") == config["configurable"]["thread_id"]
-            )
-            if checkpoint_ns := config["configurable"].get("checkpoint_ns"):
+            thread_id = config["configurable"]["thread_id"]
+            checkpoint_ns = config["configurable"].get("checkpoint_ns", "")
+            checkpoint_id = get_checkpoint_id(config)
+            filter_expression.append(Tag("thread_id") == thread_id)
+
+            # Following the Postgres implementation, we only want to filter by
+            # checkpoint_ns if it's set. This is slightly different than the
+            # get_tuple() logic, where we always query for checkpoint_ns.
+            if checkpoint_ns:
                 filter_expression.append(Tag("checkpoint_ns") == checkpoint_ns)
-            if checkpoint_id := get_checkpoint_id(config):
-                filter_expression.append(Tag("checkpoint_id") == checkpoint_id)
+            # We want to find all checkpoints for the thread matching the other
+            # filters, with any checkpoint_id.
+            filter_expression.append(Tag("checkpoint_id") == checkpoint_id)
 
         if filter:
             for k, v in filter.items():
@@ -195,9 +201,9 @@ class RedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         """Store a checkpoint to Redis."""
         configurable = config["configurable"].copy()
         thread_id = configurable.pop("thread_id")
-        checkpoint_ns = configurable.pop("checkpoint_ns")
+        checkpoint_ns = configurable.pop("checkpoint_ns", "")
         checkpoint_id = configurable.pop(
-            "checkpoint_id", configurable.pop("thread_ts", None)
+            "checkpoint_id", configurable.pop("thread_ts", "")
         )
 
         copy = checkpoint.copy()
@@ -211,10 +217,10 @@ class RedisSaver(BaseRedisSaver[Redis, SearchIndex]):
 
         # Store checkpoint data
         checkpoint_data = {
-            "thread_id": thread_id,
-            "checkpoint_ns": checkpoint_ns,
-            "checkpoint_id": checkpoint["id"],
-            "parent_checkpoint_id": checkpoint_id,
+            "thread_id": thread_id or "",
+            "checkpoint_ns": checkpoint_ns or "",
+            "checkpoint_id": checkpoint["id"] or "",
+            "parent_checkpoint_id": checkpoint_id or "",
             "checkpoint": self._dump_checkpoint(copy),
             "metadata": self._dump_metadata(metadata),
         }
@@ -261,11 +267,16 @@ class RedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         checkpoint_id = get_checkpoint_id(config)
         checkpoint_ns = config["configurable"].get("checkpoint_ns", "")
 
-        checkpoint_filter_expression = Tag("thread_id") == thread_id
         if checkpoint_id:
-            checkpoint_filter_expression &= Tag("checkpoint_id") == str(checkpoint_id)
-        if checkpoint_ns:
-            checkpoint_filter_expression &= Tag("checkpoint_ns") == checkpoint_ns
+            checkpoint_filter_expression = (
+                (Tag("thread_id") == thread_id)
+                & (Tag("checkpoint_ns") == checkpoint_ns)
+                & (Tag("checkpoint_id") == str(checkpoint_id))
+            )
+        else:
+            checkpoint_filter_expression = (Tag("thread_id") == thread_id) & (
+                Tag("checkpoint_ns") == checkpoint_ns
+            )
 
         # Construct the query
         checkpoints_query = FilterQuery(
@@ -289,20 +300,25 @@ class RedisSaver(BaseRedisSaver[Redis, SearchIndex]):
 
         doc = results.docs[0]
 
+        doc_thread_id = doc["thread_id"]
+        doc_checkpoint_ns = doc["checkpoint_ns"]
+        doc_checkpoint_id = doc["checkpoint_id"]
+        doc_parent_checkpoint_id = doc["parent_checkpoint_id"]
+
         # Fetch channel_values
         channel_values = self.get_channel_values(
-            thread_id=doc["thread_id"],
-            checkpoint_ns=doc["checkpoint_ns"],
-            checkpoint_id=doc["checkpoint_id"],
+            thread_id=doc_thread_id,
+            checkpoint_ns=doc_checkpoint_ns,
+            checkpoint_id=doc_checkpoint_id,
         )
 
         # Fetch pending_sends from parent checkpoint
         pending_sends = []
-        if doc["parent_checkpoint_id"]:
+        if doc_parent_checkpoint_id:
             pending_sends = self._load_pending_sends(
-                thread_id=thread_id,
-                checkpoint_ns=checkpoint_ns,
-                parent_checkpoint_id=doc["parent_checkpoint_id"],
+                thread_id=doc_thread_id,
+                checkpoint_ns=doc_checkpoint_ns,
+                parent_checkpoint_id=doc_parent_checkpoint_id,
             )
 
         # Fetch and parse metadata
@@ -324,7 +340,7 @@ class RedisSaver(BaseRedisSaver[Redis, SearchIndex]):
             "configurable": {
                 "thread_id": thread_id,
                 "checkpoint_ns": checkpoint_ns,
-                "checkpoint_id": doc["checkpoint_id"],
+                "checkpoint_id": doc_checkpoint_id,
             }
         }
 
@@ -335,7 +351,7 @@ class RedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         )
 
         pending_writes = self._load_pending_writes(
-            thread_id, checkpoint_ns, checkpoint_id
+            thread_id, checkpoint_ns, doc_checkpoint_id
         )
 
         return CheckpointTuple(
