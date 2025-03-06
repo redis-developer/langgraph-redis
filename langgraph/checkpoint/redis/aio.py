@@ -7,7 +7,6 @@ import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from functools import partial
-from sys import thread_info
 from types import TracebackType
 from typing import Any, List, Optional, Sequence, Tuple, Type, cast
 
@@ -375,10 +374,20 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
     ) -> RunnableConfig:
         """Store a checkpoint to Redis."""
         configurable = config["configurable"].copy()
+
         thread_id = configurable.pop("thread_id")
         checkpoint_ns = configurable.pop("checkpoint_ns")
         thread_ts = configurable.pop("thread_ts", "")
-        checkpoint_id = configurable.pop("checkpoint_id", thread_ts) or thread_ts
+        checkpoint_id = (
+            configurable.pop("checkpoint_id", configurable.pop("thread_ts", ""))
+            or thread_ts
+        )
+
+        # For values we store in Redis, we need to convert empty strings to the
+        # sentinel value.
+        storage_safe_thread_id = to_storage_safe_id(thread_id)
+        storage_safe_checkpoint_ns = to_storage_safe_str(checkpoint_ns)
+        storage_safe_checkpoint_id = to_storage_safe_id(checkpoint_id)
 
         copy = checkpoint.copy()
         next_config = {
@@ -391,10 +400,10 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
 
         # Store checkpoint data
         checkpoint_data = {
-            "thread_id": thread_id,
-            "checkpoint_ns": to_storage_safe_str(checkpoint_ns),
-            "checkpoint_id": to_storage_safe_id(checkpoint_id),
-            "parent_checkpoint_id": to_storage_safe_id(checkpoint_id),
+            "thread_id": storage_safe_thread_id,
+            "checkpoint_ns": storage_safe_checkpoint_ns,
+            "checkpoint_id": storage_safe_checkpoint_id,
+            "parent_checkpoint_id": storage_safe_checkpoint_id,
             "checkpoint": self._dump_checkpoint(copy),
             "metadata": self._dump_metadata(metadata),
         }
@@ -408,15 +417,17 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             [checkpoint_data],
             keys=[
                 BaseRedisSaver._make_redis_checkpoint_key(
-                    thread_id, checkpoint_ns, checkpoint_id
+                    storage_safe_thread_id,
+                    storage_safe_checkpoint_ns,
+                    storage_safe_checkpoint_id,
                 )
             ],
         )
 
         # Store blob values
         blobs = self._dump_blobs(
-            thread_id,
-            checkpoint_ns,
+            storage_safe_thread_id,
+            storage_safe_checkpoint_ns,
             copy.get("channel_values", {}),
             new_versions,
         )

@@ -457,9 +457,9 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         return REDIS_KEY_SEPARATOR.join(
             [
                 CHECKPOINT_PREFIX,
-                to_storage_safe_id(thread_id),
+                str(to_storage_safe_id(thread_id)),
                 to_storage_safe_str(checkpoint_ns),
-                to_storage_safe_id(checkpoint_id),
+                str(to_storage_safe_id(checkpoint_id)),
             ]
         )
 
@@ -470,7 +470,7 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         return REDIS_KEY_SEPARATOR.join(
             [
                 CHECKPOINT_BLOB_PREFIX,
-                to_storage_safe_str(thread_id),
+                str(to_storage_safe_id(thread_id)),
                 to_storage_safe_str(checkpoint_ns),
                 channel,
                 version,
@@ -485,9 +485,9 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         task_id: str,
         idx: Optional[int],
     ) -> str:
-        storage_safe_thread_id = to_storage_safe_str(thread_id)
+        storage_safe_thread_id = str(to_storage_safe_id(thread_id))
         storage_safe_checkpoint_ns = to_storage_safe_str(checkpoint_ns)
-        storage_safe_checkpoint_id = to_storage_safe_str(checkpoint_id)
+        storage_safe_checkpoint_id = str(to_storage_safe_id(checkpoint_id))
 
         if idx is None:
             return REDIS_KEY_SEPARATOR.join(

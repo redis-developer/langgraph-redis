@@ -214,8 +214,10 @@ class RedisSaver(BaseRedisSaver[Redis, SearchIndex]):
 
         thread_id = configurable.pop("thread_id")
         checkpoint_ns = configurable.pop("checkpoint_ns")
-        checkpoint_id = checkpoint_id = configurable.pop(
-            "checkpoint_id", configurable.pop("thread_ts", "")
+        thread_ts = configurable.pop("thread_ts", "")
+        checkpoint_id = (
+            configurable.pop("checkpoint_id", configurable.pop("thread_ts", ""))
+            or thread_ts
         )
 
         # For values we store in Redis, we need to convert empty strings to the
