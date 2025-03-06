@@ -471,7 +471,7 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
                     checkpoint_ns,
                     checkpoint_id,
                     task_id,
-                    write_obj["idx"],
+                    write_obj["idx"],  # type: ignore[arg-type]
                 )
                 tx = partial(
                     _write_obj_tx, key=key, write_obj=write_obj, upsert_case=upsert_case

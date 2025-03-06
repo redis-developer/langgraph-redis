@@ -360,7 +360,11 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         with self._redis.json().pipeline(transaction=False) as pipeline:
             for write_obj in writes_objects:
                 key = self._make_redis_checkpoint_writes_key(
-                    thread_id, checkpoint_ns, checkpoint_id, task_id, write_obj["idx"]
+                    thread_id,
+                    checkpoint_ns,
+                    checkpoint_id,
+                    task_id,
+                    write_obj["idx"],  # type: ignore[arg-type]
                 )
 
                 # First check if key exists
@@ -370,9 +374,9 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
                     # UPSERT case - only update specific fields
                     if key_exists:
                         # Update only channel, type, and blob fields
-                        pipeline.set(key, "$.channel", write_obj["channel"])
-                        pipeline.set(key, "$.type", write_obj["type"])
-                        pipeline.set(key, "$.blob", write_obj["blob"])
+                        pipeline.set(key, "$.channel", write_obj["channel"])  # type: ignore[arg-type]
+                        pipeline.set(key, "$.type", write_obj["type"])  # type: ignore[arg-type]
+                        pipeline.set(key, "$.blob", write_obj["blob"])  # type: ignore[arg-type]
                     else:
                         # For new records, set the complete object
                         pipeline.set(key, "$", write_obj)  # type: ignore[arg-type]

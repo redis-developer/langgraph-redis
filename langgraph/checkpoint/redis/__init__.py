@@ -248,7 +248,7 @@ class RedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         # store at top-level for filters in list()
         if all(key in metadata for key in ["source", "step"]):
             checkpoint_data["source"] = metadata["source"]
-            checkpoint_data["step"] = metadata["step"]
+            checkpoint_data["step"] = metadata["step"]  # type: ignore
 
         self.checkpoints_index.load(
             [checkpoint_data],
