@@ -4,7 +4,6 @@ import pytest
 from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-
 from langgraph.graph import START, MessagesState, StateGraph
 from langgraph.store.base import (
     BaseStore,

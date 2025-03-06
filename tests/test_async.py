@@ -617,8 +617,6 @@ async def test_root_graph_checkpoint(
         config: RunnableConfig = {
             "configurable": {
                 "thread_id": "test1",
-                "checkpoint_ns": "",
-                "checkpoint_id": "",
             }
         }
         res = await graph.ainvoke(

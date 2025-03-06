@@ -18,6 +18,11 @@ from langgraph.checkpoint.base import (
 from langgraph.checkpoint.serde.base import SerializerProtocol
 from langgraph.checkpoint.serde.types import ChannelProtocol
 
+from langgraph.checkpoint.redis.util import (
+    to_storage_safe_id,
+    to_storage_safe_str,
+)
+
 from .jsonplus_redis import JsonPlusRedisSerializer
 from .types import IndexType, RedisClientType
 
@@ -189,14 +194,20 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         if not versions:
             return []
 
+        storage_safe_thread_id = to_storage_safe_id(thread_id)
+        storage_safe_checkpoint_ns = to_storage_safe_str(checkpoint_ns)
+
         return [
             (
                 BaseRedisSaver._make_redis_checkpoint_blob_key(
-                    thread_id, checkpoint_ns, k, cast(str, ver)
+                    storage_safe_thread_id,
+                    storage_safe_checkpoint_ns,
+                    k,
+                    cast(str, ver),
                 ),
                 {
-                    "thread_id": thread_id,
-                    "checkpoint_ns": checkpoint_ns,
+                    "thread_id": storage_safe_thread_id,
+                    "checkpoint_ns": storage_safe_checkpoint_ns,
                     "channel": k,
                     "version": cast(str, ver),
                     "type": (
@@ -223,9 +234,9 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         """Convert write operations for Redis storage."""
         return [
             {
-                "thread_id": thread_id,
-                "checkpoint_ns": checkpoint_ns,
-                "checkpoint_id": checkpoint_id,
+                "thread_id": to_storage_safe_id(thread_id),
+                "checkpoint_ns": to_storage_safe_str(checkpoint_ns),
+                "checkpoint_id": to_storage_safe_id(checkpoint_id),
                 "task_id": task_id,
                 "idx": WRITES_IDX_MAP.get(channel, idx),
                 "channel": channel,
@@ -333,9 +344,9 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         for idx, (channel, value) in enumerate(writes):
             type_, blob = self.serde.dumps_typed(value)
             write_obj = {
-                "thread_id": thread_id,
-                "checkpoint_ns": checkpoint_ns,
-                "checkpoint_id": checkpoint_id,
+                "thread_id": to_storage_safe_id(thread_id),
+                "checkpoint_ns": to_storage_safe_str(checkpoint_ns),
+                "checkpoint_id": to_storage_safe_id(checkpoint_id),
                 "task_id": task_id,
                 "task_path": task_path,
                 "idx": WRITES_IDX_MAP.get(channel, idx),
@@ -379,7 +390,11 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
             return []  # Early return if no checkpoint_id
 
         writes_key = BaseRedisSaver._make_redis_checkpoint_writes_key(
-            thread_id, checkpoint_ns, checkpoint_id, "*", None
+            to_storage_safe_id(thread_id),
+            to_storage_safe_str(checkpoint_ns),
+            to_storage_safe_id(checkpoint_id),
+            "*",
+            None,
         )
 
         # Cast the result to List[bytes] to help type checker
@@ -424,9 +439,9 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
             raise ValueError("Expected checkpoint key to start with 'checkpoint'")
 
         return {
-            "thread_id": thread_id,
-            "checkpoint_ns": checkpoint_ns,
-            "checkpoint_id": checkpoint_id,
+            "thread_id": to_storage_safe_str(thread_id),
+            "checkpoint_ns": to_storage_safe_str(checkpoint_ns),
+            "checkpoint_id": to_storage_safe_str(checkpoint_id),
             "task_id": task_id,
             "idx": idx,
         }
@@ -436,7 +451,12 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         thread_id: str, checkpoint_ns: str, checkpoint_id: str
     ) -> str:
         return REDIS_KEY_SEPARATOR.join(
-            [CHECKPOINT_PREFIX, thread_id, checkpoint_ns, checkpoint_id]
+            [
+                CHECKPOINT_PREFIX,
+                to_storage_safe_id(thread_id),
+                to_storage_safe_str(checkpoint_ns),
+                to_storage_safe_id(checkpoint_id),
+            ]
         )
 
     @staticmethod
@@ -444,7 +464,13 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         thread_id: str, checkpoint_ns: str, channel: str, version: str
     ) -> str:
         return REDIS_KEY_SEPARATOR.join(
-            [CHECKPOINT_BLOB_PREFIX, thread_id, checkpoint_ns, channel, version]
+            [
+                CHECKPOINT_BLOB_PREFIX,
+                to_storage_safe_str(thread_id),
+                to_storage_safe_str(checkpoint_ns),
+                channel,
+                version,
+            ]
         )
 
     @staticmethod
@@ -455,13 +481,17 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         task_id: str,
         idx: Optional[int],
     ) -> str:
+        storage_safe_thread_id = to_storage_safe_str(thread_id)
+        storage_safe_checkpoint_ns = to_storage_safe_str(checkpoint_ns)
+        storage_safe_checkpoint_id = to_storage_safe_str(checkpoint_id)
+
         if idx is None:
             return REDIS_KEY_SEPARATOR.join(
                 [
                     CHECKPOINT_WRITE_PREFIX,
-                    thread_id,
-                    checkpoint_ns,
-                    checkpoint_id,
+                    storage_safe_thread_id,
+                    storage_safe_checkpoint_ns,
+                    storage_safe_checkpoint_id,
                     task_id,
                 ]
             )
@@ -469,9 +499,9 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         return REDIS_KEY_SEPARATOR.join(
             [
                 CHECKPOINT_WRITE_PREFIX,
-                thread_id,
-                checkpoint_ns,
-                checkpoint_id,
+                storage_safe_thread_id,
+                storage_safe_checkpoint_ns,
+                storage_safe_checkpoint_id,
                 task_id,
                 str(idx),
             ]

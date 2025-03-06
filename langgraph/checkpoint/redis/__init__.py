@@ -24,6 +24,13 @@ from langgraph.checkpoint.redis.aio import AsyncRedisSaver
 from langgraph.checkpoint.redis.ashallow import AsyncShallowRedisSaver
 from langgraph.checkpoint.redis.base import BaseRedisSaver
 from langgraph.checkpoint.redis.shallow import ShallowRedisSaver
+from langgraph.checkpoint.redis.util import (
+    EMPTY_ID_SENTINEL,
+    from_storage_safe_id,
+    from_storage_safe_str,
+    to_storage_safe_id,
+    to_storage_safe_str,
+)
 from langgraph.checkpoint.redis.version import __lib_name__, __version__
 
 
@@ -78,16 +85,22 @@ class RedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         # Construct the filter expression
         filter_expression = []
         if config:
-            thread_id = config["configurable"]["thread_id"]
-            checkpoint_ns = config["configurable"].get("checkpoint_ns")
-            checkpoint_id = get_checkpoint_id(config)
-            filter_expression.append(Tag("thread_id") == thread_id)
+            filter_expression.append(
+                Tag("thread_id")
+                == to_storage_safe_id(config["configurable"]["thread_id"])
+            )
 
-            # Reproducing logic from the Postgres implementation.
-            if checkpoint_ns is not None:
-                filter_expression.append(Tag("checkpoint_ns") == checkpoint_ns)
-            if checkpoint_id:
-                filter_expression.append(Tag("checkpoint_id") == checkpoint_id)
+            # Reproducing the logic from the Postgres implementation, we'll
+            # search for checkpoints with any namespace, including an empty
+            # string, while `checkpoint_id` has to have a value.
+            if checkpoint_ns := config["configurable"].get("checkpoint_ns"):
+                filter_expression.append(
+                    Tag("checkpoint_ns") == to_storage_safe_str(checkpoint_ns)
+                )
+            if checkpoint_id := get_checkpoint_id(config):
+                filter_expression.append(
+                    Tag("checkpoint_id") == to_storage_safe_id(checkpoint_id)
+                )
 
         if filter:
             for k, v in filter.items():
@@ -125,9 +138,10 @@ class RedisSaver(BaseRedisSaver[Redis, SearchIndex]):
 
         # Process the results
         for doc in results.docs:
-            thread_id = str(getattr(doc, "thread_id", ""))
-            checkpoint_ns = str(getattr(doc, "checkpoint_ns", ""))
-            checkpoint_id = str(getattr(doc, "checkpoint_id", ""))
+            thread_id = from_storage_safe_id(doc["thread_id"])
+            checkpoint_ns = from_storage_safe_str(doc["checkpoint_ns"])
+            checkpoint_id = from_storage_safe_id(doc["checkpoint_id"])
+            parent_checkpoint_id = from_storage_safe_id(doc["parent_checkpoint_id"])
 
             # Fetch channel_values
             channel_values = self.get_channel_values(
@@ -138,11 +152,11 @@ class RedisSaver(BaseRedisSaver[Redis, SearchIndex]):
 
             # Fetch pending_sends from parent checkpoint
             pending_sends = []
-            if doc["parent_checkpoint_id"]:
+            if parent_checkpoint_id:
                 pending_sends = self._load_pending_sends(
                     thread_id=thread_id,
                     checkpoint_ns=checkpoint_ns,
-                    parent_checkpoint_id=doc["parent_checkpoint_id"],
+                    parent_checkpoint_id=parent_checkpoint_id,
                 )
 
             # Fetch and parse metadata
@@ -166,7 +180,7 @@ class RedisSaver(BaseRedisSaver[Redis, SearchIndex]):
                 "configurable": {
                     "thread_id": thread_id,
                     "checkpoint_ns": checkpoint_ns,
-                    "checkpoint_id": doc["checkpoint_id"],
+                    "checkpoint_id": checkpoint_id,
                 }
             }
 
@@ -197,27 +211,36 @@ class RedisSaver(BaseRedisSaver[Redis, SearchIndex]):
     ) -> RunnableConfig:
         """Store a checkpoint to Redis."""
         configurable = config["configurable"].copy()
+
         thread_id = configurable.pop("thread_id")
-        checkpoint_ns = configurable.pop("checkpoint_ns", "")
-        checkpoint_id = configurable.pop(
+        checkpoint_ns = configurable.pop("checkpoint_ns")
+        checkpoint_id = checkpoint_id = configurable.pop(
             "checkpoint_id", configurable.pop("thread_ts", "")
         )
 
+        # For values we store in Redis, we need to convert empty strings to the
+        # sentinel value.
+        storage_safe_thread_id = to_storage_safe_id(thread_id)
+        storage_safe_checkpoint_ns = to_storage_safe_str(checkpoint_ns)
+        storage_safe_checkpoint_id = to_storage_safe_id(checkpoint_id)
+
         copy = checkpoint.copy()
+        # When we return the config, we need to preserve empty strings that
+        # were passed in, instead of the sentinel value.
         next_config = {
             "configurable": {
                 "thread_id": thread_id,
                 "checkpoint_ns": checkpoint_ns,
-                "checkpoint_id": checkpoint["id"],
+                "checkpoint_id": checkpoint_id,
             }
         }
 
-        # Store checkpoint data
+        # Store checkpoint data.
         checkpoint_data = {
-            "thread_id": thread_id or "",
-            "checkpoint_ns": checkpoint_ns or "",
-            "checkpoint_id": checkpoint["id"] or "",
-            "parent_checkpoint_id": checkpoint_id or "",
+            "thread_id": storage_safe_thread_id,
+            "checkpoint_ns": storage_safe_checkpoint_ns,
+            "checkpoint_id": storage_safe_checkpoint_id,
+            "parent_checkpoint_id": storage_safe_checkpoint_id,
             "checkpoint": self._dump_checkpoint(copy),
             "metadata": self._dump_metadata(metadata),
         }
@@ -231,15 +254,17 @@ class RedisSaver(BaseRedisSaver[Redis, SearchIndex]):
             [checkpoint_data],
             keys=[
                 BaseRedisSaver._make_redis_checkpoint_key(
-                    thread_id, checkpoint_ns, checkpoint["id"]
+                    storage_safe_thread_id,
+                    storage_safe_checkpoint_ns,
+                    storage_safe_checkpoint_id,
                 )
             ],
         )
 
-        # Store blob values
+        # Store blob values.
         blobs = self._dump_blobs(
-            thread_id,
-            checkpoint_ns,
+            storage_safe_thread_id,
+            storage_safe_checkpoint_ns,
             copy.get("channel_values", {}),
             new_versions,
         )
@@ -264,17 +289,19 @@ class RedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         checkpoint_id = get_checkpoint_id(config)
         checkpoint_ns = config["configurable"].get("checkpoint_ns", "")
 
-        # Reproducing logic from the Postgres implementation.
-        if checkpoint_id:
+        ascending = True
+
+        if checkpoint_id and checkpoint_id != EMPTY_ID_SENTINEL:
             checkpoint_filter_expression = (
-                (Tag("thread_id") == thread_id)
-                & (Tag("checkpoint_ns") == checkpoint_ns)
-                & (Tag("checkpoint_id") == str(checkpoint_id))
+                (Tag("thread_id") == to_storage_safe_id(thread_id))
+                & (Tag("checkpoint_ns") == to_storage_safe_str(checkpoint_ns))
+                & (Tag("checkpoint_id") == to_storage_safe_id(checkpoint_id))
             )
         else:
-            checkpoint_filter_expression = (Tag("thread_id") == thread_id) & (
-                Tag("checkpoint_ns") == checkpoint_ns
-            )
+            checkpoint_filter_expression = (
+                Tag("thread_id") == to_storage_safe_id(thread_id)
+            ) & (Tag("checkpoint_ns") == to_storage_safe_str(checkpoint_ns))
+            ascending = False
 
         # Construct the query
         checkpoints_query = FilterQuery(
@@ -289,7 +316,7 @@ class RedisSaver(BaseRedisSaver[Redis, SearchIndex]):
             ],
             num_results=1,
         )
-        checkpoints_query.sort_by("checkpoint_id", asc=False)
+        checkpoints_query.sort_by("checkpoint_id", asc=ascending)
 
         # Execute the query
         results = self.checkpoints_index.search(checkpoints_query)
@@ -297,11 +324,10 @@ class RedisSaver(BaseRedisSaver[Redis, SearchIndex]):
             return None
 
         doc = results.docs[0]
-
-        doc_thread_id = doc["thread_id"]
-        doc_checkpoint_ns = doc["checkpoint_ns"]
-        doc_checkpoint_id = doc["checkpoint_id"]
-        doc_parent_checkpoint_id = doc["parent_checkpoint_id"]
+        doc_thread_id = from_storage_safe_id(doc["thread_id"])
+        doc_checkpoint_ns = from_storage_safe_str(doc["checkpoint_ns"])
+        doc_checkpoint_id = from_storage_safe_id(doc["checkpoint_id"])
+        doc_parent_checkpoint_id = from_storage_safe_id(doc["parent_checkpoint_id"])
 
         # Fetch channel_values
         channel_values = self.get_channel_values(
@@ -388,10 +414,14 @@ class RedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         self, thread_id: str, checkpoint_ns: str = "", checkpoint_id: str = ""
     ) -> dict[str, Any]:
         """Retrieve channel_values dictionary with properly constructed message objects."""
+        storage_safe_thread_id = to_storage_safe_id(thread_id)
+        storage_safe_checkpoint_ns = to_storage_safe_str(checkpoint_ns)
+        storage_safe_checkpoint_id = to_storage_safe_id(checkpoint_id)
+
         checkpoint_query = FilterQuery(
-            filter_expression=(Tag("thread_id") == thread_id)
-            & (Tag("checkpoint_ns") == checkpoint_ns)
-            & (Tag("checkpoint_id") == checkpoint_id),
+            filter_expression=(Tag("thread_id") == storage_safe_thread_id)
+            & (Tag("checkpoint_ns") == storage_safe_checkpoint_ns)
+            & (Tag("checkpoint_id") == storage_safe_checkpoint_id),
             return_fields=["$.checkpoint.channel_versions"],
             num_results=1,
         )
@@ -409,8 +439,8 @@ class RedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         channel_values = {}
         for channel, version in channel_versions.items():
             blob_query = FilterQuery(
-                filter_expression=(Tag("thread_id") == thread_id)
-                & (Tag("checkpoint_ns") == checkpoint_ns)
+                filter_expression=(Tag("thread_id") == storage_safe_thread_id)
+                & (Tag("checkpoint_ns") == storage_safe_checkpoint_ns)
                 & (Tag("channel") == channel)
                 & (Tag("version") == version),
                 return_fields=["type", "$.blob"],
@@ -446,11 +476,15 @@ class RedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         Returns:
             List of (type, blob) tuples representing pending sends
         """
+        storage_safe_thread_id = to_storage_safe_str(thread_id)
+        storage_safe_checkpoint_ns = to_storage_safe_str(checkpoint_ns)
+        storage_safe_parent_checkpoint_id = to_storage_safe_str(parent_checkpoint_id)
+
         # Query checkpoint_writes for parent checkpoint's TASKS channel
         parent_writes_query = FilterQuery(
-            filter_expression=(Tag("thread_id") == thread_id)
-            & (Tag("checkpoint_ns") == checkpoint_ns)
-            & (Tag("checkpoint_id") == parent_checkpoint_id)
+            filter_expression=(Tag("thread_id") == storage_safe_thread_id)
+            & (Tag("checkpoint_ns") == storage_safe_checkpoint_ns)
+            & (Tag("checkpoint_id") == storage_safe_parent_checkpoint_id)
             & (Tag("channel") == TASKS),
             return_fields=["type", "blob", "task_path", "task_id", "idx"],
             num_results=100,  # Adjust as needed
