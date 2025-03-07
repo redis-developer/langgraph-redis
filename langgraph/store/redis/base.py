@@ -44,7 +44,8 @@ SCHEMAS = [
     {
         "index": {
             "name": "store",
-            "prefix": STORE_PREFIX + REDIS_KEY_SEPARATOR,
+            "prefix": STORE_PREFIX,
+            "key_separator": REDIS_KEY_SEPARATOR,
             "storage_type": "json",
         },
         "fields": [
@@ -57,7 +58,8 @@ SCHEMAS = [
     {
         "index": {
             "name": "store_vectors",
-            "prefix": STORE_VECTOR_PREFIX + REDIS_KEY_SEPARATOR,
+            "prefix": STORE_VECTOR_PREFIX,
+            "key_separator": REDIS_KEY_SEPARATOR,
             "storage_type": "json",
         },
         "fields": [
