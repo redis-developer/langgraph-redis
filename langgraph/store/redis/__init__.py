@@ -18,6 +18,7 @@ from langgraph.store.base import (
     PutOp,
     Result,
     SearchOp,
+    TTLConfig,
 )
 from redis import Redis
 from redis.commands.search.query import Query
@@ -70,14 +71,19 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
     vector similarity search support.
     """
 
+    # Enable TTL support
+    supports_ttl = True
+    ttl_config: Optional[TTLConfig] = None
+
     def __init__(
         self,
         conn: Redis,
         *,
         index: Optional[IndexConfig] = None,
+        ttl: Optional[dict[str, Any]] = None,
     ) -> None:
         BaseStore.__init__(self)
-        BaseRedisStore.__init__(self, conn, index=index)
+        BaseRedisStore.__init__(self, conn, index=index, ttl=ttl)
 
     @classmethod
     @contextmanager
@@ -86,12 +92,13 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
         conn_string: str,
         *,
         index: Optional[IndexConfig] = None,
+        ttl: Optional[dict[str, Any]] = None,
     ) -> Iterator[RedisStore]:
         """Create store from Redis connection string."""
         client = None
         try:
             client = RedisConnectionFactory.get_redis_connection(conn_string)
-            yield cls(client, index=index)
+            yield cls(client, index=index, ttl=ttl)
         finally:
             if client:
                 client.close()
@@ -186,15 +193,64 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
         results: list[Result],
     ) -> None:
         """Execute GET operations in batch."""
+        refresh_keys_by_idx: dict[int, list[str]] = (
+            {}
+        )  # Track keys that need TTL refreshed by op index
+
         for query, _, namespace, items in self._get_batch_GET_ops_queries(get_ops):
             res = self.store_index.search(Query(query))
             # Parse JSON from each document
             key_to_row = {
-                json.loads(doc.json)["key"]: json.loads(doc.json) for doc in res.docs
+                json.loads(doc.json)["key"]: (json.loads(doc.json), doc.id)
+                for doc in res.docs
             }
+
             for idx, key in items:
                 if key in key_to_row:
-                    results[idx] = _row_to_item(namespace, key_to_row[key])
+                    data, doc_id = key_to_row[key]
+                    results[idx] = _row_to_item(namespace, data)
+
+                    # Find the corresponding operation by looking it up in the operation list
+                    # This is needed because idx is the index in the overall operation list
+                    op_idx = None
+                    for i, (local_idx, op) in enumerate(get_ops):
+                        if local_idx == idx:
+                            op_idx = i
+                            break
+
+                    if op_idx is not None:
+                        op = get_ops[op_idx][1]
+                        if hasattr(op, "refresh_ttl") and op.refresh_ttl:
+                            if idx not in refresh_keys_by_idx:
+                                refresh_keys_by_idx[idx] = []
+                            refresh_keys_by_idx[idx].append(doc_id)
+
+                            # Also add vector keys for the same document
+                            doc_uuid = doc_id.split(":")[-1]
+                            vector_key = (
+                                f"{STORE_VECTOR_PREFIX}{REDIS_KEY_SEPARATOR}{doc_uuid}"
+                            )
+                            refresh_keys_by_idx[idx].append(vector_key)
+
+        # Now refresh TTLs for any keys that need it
+        if refresh_keys_by_idx and self.ttl_config:
+            # Get default TTL from config
+            ttl_minutes = None
+            if "default_ttl" in self.ttl_config:
+                ttl_minutes = self.ttl_config.get("default_ttl")
+
+            if ttl_minutes is not None:
+                ttl_seconds = int(ttl_minutes * 60)
+                pipeline = self._redis.pipeline()
+
+                for keys in refresh_keys_by_idx.values():
+                    for key in keys:
+                        # Only refresh TTL if the key exists and has a TTL
+                        ttl = self._redis.ttl(key)
+                        if ttl > 0:  # Only refresh if key exists and has TTL
+                            pipeline.expire(key, ttl_seconds)
+
+                pipeline.execute()
 
     def _batch_put_ops(
         self,
@@ -219,6 +275,9 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
         doc_ids: dict[tuple[str, str], str] = {}
         store_docs: list[RedisDocument] = []
         store_keys: list[str] = []
+        ttl_tracking: dict[str, tuple[list[str], Optional[float]]] = (
+            {}
+        )  # Tracks keys that need TTL + their TTL values
 
         # Generate IDs for PUT operations
         for _, op in put_ops:
@@ -226,13 +285,25 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
                 generated_doc_id = str(ULID())
                 namespace = _namespace_to_text(op.namespace)
                 doc_ids[(namespace, op.key)] = generated_doc_id
+                # Track TTL for this document if specified
+                if hasattr(op, "ttl") and op.ttl is not None:
+                    main_key = f"{STORE_PREFIX}{REDIS_KEY_SEPARATOR}{generated_doc_id}"
+                    ttl_tracking[main_key] = ([], op.ttl)
 
         # Load store docs with explicit keys
         for doc in operations:
             store_key = (doc["prefix"], doc["key"])
             doc_id = doc_ids[store_key]
+            # Remove TTL fields - they're not needed with Redis native TTL
+            if "ttl_minutes" in doc:
+                doc.pop("ttl_minutes", None)
+            if "expires_at" in doc:
+                doc.pop("expires_at", None)
+
             store_docs.append(doc)
-            store_keys.append(f"{STORE_PREFIX}{REDIS_KEY_SEPARATOR}{doc_id}")
+            redis_key = f"{STORE_PREFIX}{REDIS_KEY_SEPARATOR}{doc_id}"
+            store_keys.append(redis_key)
+
         if store_docs:
             self.store_index.load(store_docs, keys=store_keys)
 
@@ -260,11 +331,20 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
                         "updated_at": datetime.now(timezone.utc).timestamp(),
                     }
                 )
-                vector_keys.append(
-                    f"{STORE_VECTOR_PREFIX}{REDIS_KEY_SEPARATOR}{doc_id}"
-                )
+                vector_key = f"{STORE_VECTOR_PREFIX}{REDIS_KEY_SEPARATOR}{doc_id}"
+                vector_keys.append(vector_key)
+
+                # Add this vector key to the related keys list for TTL
+                main_key = f"{STORE_PREFIX}{REDIS_KEY_SEPARATOR}{doc_id}"
+                if main_key in ttl_tracking:
+                    ttl_tracking[main_key][0].append(vector_key)
+
             if vector_docs:
                 self.vector_index.load(vector_docs, keys=vector_keys)
+
+        # Now apply TTLs after all documents are loaded
+        for main_key, (related_keys, ttl_minutes) in ttl_tracking.items():
+            self._apply_ttl_to_keys(main_key, related_keys, ttl_minutes)
 
     def _batch_search_ops(
         self,
@@ -316,6 +396,8 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
 
                 # Process results maintaining order and applying filters
                 items = []
+                refresh_keys = []  # Track keys that need TTL refreshed
+
                 for store_key, store_doc in zip(result_map.keys(), store_docs):
                     if store_doc:
                         vector_result = result_map[store_key]
@@ -345,6 +427,16 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
                             if not matches:
                                 continue
 
+                        # If refresh_ttl is true, add to list for refreshing
+                        if op.refresh_ttl:
+                            refresh_keys.append(store_key)
+                            # Also find associated vector keys with same ID
+                            doc_id = store_key.split(":")[-1]
+                            vector_key = (
+                                f"{STORE_VECTOR_PREFIX}{REDIS_KEY_SEPARATOR}{doc_id}"
+                            )
+                            refresh_keys.append(vector_key)
+
                         items.append(
                             _row_to_search_item(
                                 _decode_ns(store_doc["prefix"]),
@@ -353,6 +445,23 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
                             )
                         )
 
+                # Refresh TTL if requested
+                if op.refresh_ttl and refresh_keys and self.ttl_config:
+                    # Get default TTL from config
+                    ttl_minutes = None
+                    if "default_ttl" in self.ttl_config:
+                        ttl_minutes = self.ttl_config.get("default_ttl")
+
+                    if ttl_minutes is not None:
+                        ttl_seconds = int(ttl_minutes * 60)
+                        pipeline = self._redis.pipeline()
+                        for key in refresh_keys:
+                            # Only refresh TTL if the key exists and has a TTL
+                            ttl = self._redis.ttl(key)
+                            if ttl > 0:  # Only refresh if key exists and has TTL
+                                pipeline.expire(key, ttl_seconds)
+                        pipeline.execute()
+
                 results[idx] = items
             else:
                 # Regular search
@@ -360,6 +469,7 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
                 # Get all potential matches for filtering
                 res = self.store_index.search(query)
                 items = []
+                refresh_keys = []  # Track keys that need TTL refreshed
 
                 for doc in res.docs:
                     data = json.loads(doc.json)
@@ -378,12 +488,40 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
                                 break
                         if not matches:
                             continue
+
+                    # If refresh_ttl is true, add the key to refresh list
+                    if op.refresh_ttl:
+                        refresh_keys.append(doc.id)
+                        # Also find associated vector keys with same ID
+                        doc_id = doc.id.split(":")[-1]
+                        vector_key = (
+                            f"{STORE_VECTOR_PREFIX}{REDIS_KEY_SEPARATOR}{doc_id}"
+                        )
+                        refresh_keys.append(vector_key)
+
                     items.append(_row_to_search_item(_decode_ns(data["prefix"]), data))
 
                 # Apply pagination after filtering
                 if params:
                     limit, offset = params
                     items = items[offset : offset + limit]
+
+                # Refresh TTL if requested
+                if op.refresh_ttl and refresh_keys and self.ttl_config:
+                    # Get default TTL from config
+                    ttl_minutes = None
+                    if "default_ttl" in self.ttl_config:
+                        ttl_minutes = self.ttl_config.get("default_ttl")
+
+                    if ttl_minutes is not None:
+                        ttl_seconds = int(ttl_minutes * 60)
+                        pipeline = self._redis.pipeline()
+                        for key in refresh_keys:
+                            # Only refresh TTL if the key exists and has a TTL
+                            ttl = self._redis.ttl(key)
+                            if ttl > 0:  # Only refresh if key exists and has TTL
+                                pipeline.expire(key, ttl_seconds)
+                        pipeline.execute()
 
                 results[idx] = items
 

@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import weakref
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import TracebackType
 from typing import Any, AsyncIterator, Iterable, Optional, Sequence, cast
 
@@ -17,6 +18,7 @@ from langgraph.store.base import (
     PutOp,
     Result,
     SearchOp,
+    TTLConfig,
     ensure_embeddings,
     get_text_at_path,
     tokenize_path,
@@ -58,6 +60,11 @@ class AsyncRedisStore(
     store_index: AsyncSearchIndex
     vector_index: AsyncSearchIndex
     _owns_its_client: bool
+    supports_ttl: bool = True
+    # Use a different name to avoid conflicting with the base class attribute
+    _async_ttl_stop_event: asyncio.Event | None = None
+    _ttl_sweeper_task: asyncio.Task | None = None
+    ttl_config: Optional[TTLConfig] = None
 
     def __init__(
         self,
@@ -66,6 +73,7 @@ class AsyncRedisStore(
         redis_client: Optional[AsyncRedis] = None,
         index: Optional[IndexConfig] = None,
         connection_args: Optional[dict[str, Any]] = None,
+        ttl: Optional[dict[str, Any]] = None,
     ) -> None:
         """Initialize store with Redis connection and optional index config."""
         if redis_url is None and redis_client is None:
@@ -74,8 +82,10 @@ class AsyncRedisStore(
         # Initialize base classes
         AsyncBatchedBaseStore.__init__(self)
 
-        # Set up index config first
+        # Set up store configuration
         self.index_config = index
+        self.ttl_config = ttl  # type: ignore
+
         if self.index_config:
             self.index_config = self.index_config.copy()
             self.embeddings = ensure_embeddings(
@@ -146,10 +156,6 @@ class AsyncRedisStore(
                     f"Failed to create vector index with schema: {vector_schema}. Error: {str(e)}"
                 ) from e
 
-        # Set up async components
-        self.loop = asyncio.get_running_loop()
-        self._aqueue: dict[asyncio.Future[Any], Op] = {}
-
     def configure_client(
         self,
         redis_url: Optional[str] = None,
@@ -158,9 +164,16 @@ class AsyncRedisStore(
     ) -> None:
         """Configure the Redis client."""
         self._owns_its_client = redis_client is None
-        self._redis = redis_client or RedisConnectionFactory.get_async_redis_connection(
-            redis_url, **connection_args
-        )
+
+        # Use direct AsyncRedis.from_url to avoid the deprecated get_async_redis_connection
+        if redis_client is None:
+            if not redis_url:
+                redis_url = os.environ.get("REDIS_URL")
+                if not redis_url:
+                    raise ValueError("REDIS_URL env var not set")
+            self._redis = AsyncRedis.from_url(redis_url, **(connection_args or {}))
+        else:
+            self._redis = redis_client
 
     async def setup(self) -> None:
         """Initialize store indices."""
@@ -175,6 +188,81 @@ class AsyncRedisStore(
         if self.index_config:
             await self.vector_index.create(overwrite=False)
 
+    # This can't be properly typed due to covariance issues with async methods
+    async def _apply_ttl_to_keys(
+        self,
+        main_key: str,
+        related_keys: list[str] = None,
+        ttl_minutes: Optional[float] = None,
+    ) -> Any:
+        """Apply Redis native TTL to keys asynchronously.
+
+        Args:
+            main_key: The primary Redis key
+            related_keys: Additional Redis keys that should expire at the same time
+            ttl_minutes: Time-to-live in minutes
+        """
+        if ttl_minutes is None:
+            # Check if there's a default TTL in config
+            if self.ttl_config and "default_ttl" in self.ttl_config:
+                ttl_minutes = self.ttl_config.get("default_ttl")
+
+        if ttl_minutes is not None:
+            ttl_seconds = int(ttl_minutes * 60)
+            pipeline = self._redis.pipeline()
+
+            # Set TTL for main key
+            await pipeline.expire(main_key, ttl_seconds)
+
+            # Set TTL for related keys
+            if related_keys:
+                for key in related_keys:
+                    await pipeline.expire(key, ttl_seconds)
+
+            await pipeline.execute()
+
+    # This can't be properly typed due to covariance issues with async methods
+    async def sweep_ttl(self) -> int:  # type: ignore[override]
+        """Clean up any remaining expired items.
+
+        This is not needed with Redis native TTL, but kept for API compatibility.
+        Redis automatically removes expired keys.
+
+        Returns:
+            int: Always returns 0 as Redis handles expiration automatically
+        """
+        return 0
+
+    # This can't be properly typed due to covariance issues with async methods
+    async def start_ttl_sweeper(  # type: ignore[override]
+        self, sweep_interval_minutes: Optional[int] = None
+    ) -> None:
+        """Start TTL sweeper.
+
+        This is a no-op with Redis native TTL, but kept for API compatibility.
+        Redis automatically removes expired keys.
+
+        Args:
+            sweep_interval_minutes: Ignored parameter, kept for API compatibility
+        """
+        # No-op: Redis handles TTL expiration automatically
+        pass
+
+    # This can't be properly typed due to covariance issues with async methods
+    async def stop_ttl_sweeper(self, timeout: Optional[float] = None) -> bool:  # type: ignore[override]
+        """Stop TTL sweeper.
+
+        This is a no-op with Redis native TTL, but kept for API compatibility.
+
+        Args:
+            timeout: Ignored parameter, kept for API compatibility
+
+        Returns:
+            bool: Always True as there's no sweeper to stop
+        """
+        # No-op: Redis handles TTL expiration automatically
+        return True
+
     @classmethod
     @asynccontextmanager
     async def from_conn_string(
@@ -182,12 +270,10 @@ class AsyncRedisStore(
         conn_string: str,
         *,
         index: Optional[IndexConfig] = None,
+        ttl: Optional[dict[str, Any]] = None,
     ) -> AsyncIterator[AsyncRedisStore]:
         """Create store from Redis connection string."""
-        async with cls(redis_url=conn_string, index=index) as store:
-            store._task = store.loop.create_task(
-                store._run_background_tasks(store._aqueue, weakref.ref(store))
-            )
+        async with cls(redis_url=conn_string, index=index, ttl=ttl) as store:
             await store.setup()
             yield store
 
@@ -212,13 +298,15 @@ class AsyncRedisStore(
         traceback: Optional[TracebackType] = None,
     ) -> None:
         """Async context manager exit."""
-        if hasattr(self, "_task"):
+        # Cancel the background task created by AsyncBatchedBaseStore
+        if hasattr(self, "_task") and not self._task.done():
             self._task.cancel()
             try:
                 await self._task
             except asyncio.CancelledError:
                 pass
 
+        # Close Redis connections if we own them
         if self._owns_its_client:
             await self._redis.aclose()  # type: ignore[attr-defined]
             await self._redis.connection_pool.disconnect()
@@ -282,7 +370,7 @@ class AsyncRedisStore(
             asyncio.InvalidStateError: If called from the main event loop
         """
         try:
-            if asyncio.get_running_loop() is self.loop:
+            if asyncio.get_running_loop():
                 raise asyncio.InvalidStateError(
                     "Synchronous calls to AsyncRedisStore are only allowed from a "
                     "different thread. From the main thread, use the async interface."
@@ -291,7 +379,9 @@ class AsyncRedisStore(
                 )
         except RuntimeError:
             pass
-        return asyncio.run_coroutine_threadsafe(self.abatch(ops), self.loop).result()
+        return asyncio.run_coroutine_threadsafe(
+            self.abatch(ops), asyncio.get_event_loop()
+        ).result()
 
     async def _batch_get_ops(
         self,
@@ -299,16 +389,64 @@ class AsyncRedisStore(
         results: list[Result],
     ) -> None:
         """Execute GET operations in batch asynchronously."""
+        refresh_keys_by_idx: dict[int, list[str]] = (
+            {}
+        )  # Track keys that need TTL refreshed by op index
+
         for query, _, namespace, items in self._get_batch_GET_ops_queries(get_ops):
             res = await self.store_index.search(Query(query))
             # Parse JSON from each document
             key_to_row = {
-                json.loads(doc.json)["key"]: json.loads(doc.json) for doc in res.docs
+                json.loads(doc.json)["key"]: (json.loads(doc.json), doc.id)
+                for doc in res.docs
             }
 
             for idx, key in items:
                 if key in key_to_row:
-                    results[idx] = _row_to_item(namespace, key_to_row[key])
+                    data, doc_id = key_to_row[key]
+                    results[idx] = _row_to_item(namespace, data)
+
+                    # Find the corresponding operation by looking it up in the operation list
+                    # This is needed because idx is the index in the overall operation list
+                    op_idx = None
+                    for i, (local_idx, op) in enumerate(get_ops):
+                        if local_idx == idx:
+                            op_idx = i
+                            break
+
+                    if op_idx is not None:
+                        op = get_ops[op_idx][1]
+                        if hasattr(op, "refresh_ttl") and op.refresh_ttl:
+                            if idx not in refresh_keys_by_idx:
+                                refresh_keys_by_idx[idx] = []
+                            refresh_keys_by_idx[idx].append(doc_id)
+
+                            # Also add vector keys for the same document
+                            doc_uuid = doc_id.split(":")[-1]
+                            vector_key = (
+                                f"{STORE_VECTOR_PREFIX}{REDIS_KEY_SEPARATOR}{doc_uuid}"
+                            )
+                            refresh_keys_by_idx[idx].append(vector_key)
+
+        # Now refresh TTLs for any keys that need it
+        if refresh_keys_by_idx and self.ttl_config:
+            # Get default TTL from config
+            ttl_minutes = None
+            if "default_ttl" in self.ttl_config:
+                ttl_minutes = self.ttl_config.get("default_ttl")
+
+            if ttl_minutes is not None:
+                ttl_seconds = int(ttl_minutes * 60)
+                pipeline = self._redis.pipeline()
+
+                for keys in refresh_keys_by_idx.values():
+                    for key in keys:
+                        # Only refresh TTL if the key exists and has a TTL
+                        ttl = await self._redis.ttl(key)
+                        if ttl > 0:  # Only refresh if key exists and has TTL
+                            await pipeline.expire(key, ttl_seconds)
+
+                await pipeline.execute()
 
     async def _aprepare_batch_PUT_queries(
         self,
@@ -347,12 +485,26 @@ class AsyncRedisStore(
         if inserts:
             for op in inserts:
                 now = int(datetime.now(timezone.utc).timestamp() * 1_000_000)
+
+                # Handle TTL
+                ttl_minutes = None
+                expires_at = None
+                if op.ttl is not None:
+                    ttl_minutes = op.ttl
+                    expires_at = int(
+                        (
+                            datetime.now(timezone.utc) + timedelta(minutes=op.ttl)
+                        ).timestamp()
+                    )
+
                 doc = RedisDocument(
                     prefix=_namespace_to_text(op.namespace),
                     key=op.key,
                     value=op.value,
                     created_at=now,
                     updated_at=now,
+                    ttl_minutes=ttl_minutes,
+                    expires_at=expires_at,
                 )
                 operations.append(doc)
 
@@ -403,6 +555,9 @@ class AsyncRedisStore(
         doc_ids: dict[tuple[str, str], str] = {}
         store_docs: list[RedisDocument] = []
         store_keys: list[str] = []
+        ttl_tracking: dict[str, tuple[list[str], Optional[float]]] = (
+            {}
+        )  # Tracks keys that need TTL + their TTL values
 
         # Generate IDs for PUT operations
         for _, op in put_ops:
@@ -410,13 +565,25 @@ class AsyncRedisStore(
                 generated_doc_id = str(ULID())
                 namespace = _namespace_to_text(op.namespace)
                 doc_ids[(namespace, op.key)] = generated_doc_id
+                # Track TTL for this document if specified
+                if hasattr(op, "ttl") and op.ttl is not None:
+                    main_key = f"{STORE_PREFIX}{REDIS_KEY_SEPARATOR}{generated_doc_id}"
+                    ttl_tracking[main_key] = ([], op.ttl)
 
         # Load store docs with explicit keys
         for doc in operations:
             store_key = (doc["prefix"], doc["key"])
             doc_id = doc_ids[store_key]
+            # Remove TTL fields - they're not needed with Redis native TTL
+            if "ttl_minutes" in doc:
+                doc.pop("ttl_minutes", None)
+            if "expires_at" in doc:
+                doc.pop("expires_at", None)
+
             store_docs.append(doc)
-            store_keys.append(f"{STORE_PREFIX}{REDIS_KEY_SEPARATOR}{doc_id}")
+            redis_key = f"{STORE_PREFIX}{REDIS_KEY_SEPARATOR}{doc_id}"
+            store_keys.append(redis_key)
+
         if store_docs:
             await self.store_index.load(store_docs, keys=store_keys)
 
@@ -444,11 +611,20 @@ class AsyncRedisStore(
                         "updated_at": datetime.now(timezone.utc).timestamp(),
                     }
                 )
-                vector_keys.append(
-                    f"{STORE_VECTOR_PREFIX}{REDIS_KEY_SEPARATOR}{doc_id}"
-                )
+                vector_key = f"{STORE_VECTOR_PREFIX}{REDIS_KEY_SEPARATOR}{doc_id}"
+                vector_keys.append(vector_key)
+
+                # Add this vector key to the related keys list for TTL
+                main_key = f"{STORE_PREFIX}{REDIS_KEY_SEPARATOR}{doc_id}"
+                if main_key in ttl_tracking:
+                    ttl_tracking[main_key][0].append(vector_key)
+
             if vector_docs:
                 await self.vector_index.load(vector_docs, keys=vector_keys)
+
+        # Now apply TTLs after all documents are loaded
+        for main_key, (related_keys, ttl_minutes) in ttl_tracking.items():
+            await self._apply_ttl_to_keys(main_key, related_keys, ttl_minutes)
 
     async def _batch_search_ops(
         self,
@@ -620,43 +796,4 @@ class AsyncRedisStore(
 
             results[idx] = sorted_namespaces
 
-    async def _run_background_tasks(
-        self,
-        aqueue: dict[asyncio.Future[Any], Op],
-        store: weakref.ReferenceType[BaseStore],
-    ) -> None:
-        """Run background tasks for processing operations.
-
-        Args:
-            aqueue: Queue of operations to process
-            store: Weakref to the store instance
-        """
-        while True:
-            await asyncio.sleep(0)
-            if not aqueue:
-                continue
-
-            if s := store():
-                # get the operations to run
-                taken = aqueue.copy()
-                # action each operation
-                try:
-                    values = list(taken.values())
-                    listen, dedupped = _dedupe_ops(values)
-                    results = await s.abatch(dedupped)
-                    if listen is not None:
-                        results = [results[ix] for ix in listen]
-
-                    # set the results of each operation
-                    for fut, result in zip(taken, results):
-                        fut.set_result(result)
-                except Exception as e:
-                    for fut in taken:
-                        fut.set_exception(e)
-                # remove the operations from the queue
-                for fut in taken:
-                    del aqueue[fut]
-            else:
-                break
-            # remove strong ref to store
-            del s
+    # We don't need _run_background_tasks anymore as AsyncBatchedBaseStore provides this

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from contextlib import asynccontextmanager
 from functools import partial
 from types import TracebackType
@@ -546,9 +547,16 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
     ) -> None:
         """Configure the Redis client."""
         self._owns_its_client = redis_client is None
-        self._redis = redis_client or RedisConnectionFactory.get_async_redis_connection(
-            redis_url, **connection_args
-        )
+
+        # Use direct AsyncRedis.from_url to avoid the deprecated get_async_redis_connection
+        if redis_client is None:
+            if not redis_url:
+                redis_url = os.environ.get("REDIS_URL")
+                if not redis_url:
+                    raise ValueError("REDIS_URL env var not set")
+            self._redis = AsyncRedis.from_url(redis_url, **(connection_args or {}))
+        else:
+            self._redis = redis_client
 
     def create_indexes(self) -> None:
         """Create indexes without connecting to Redis."""
