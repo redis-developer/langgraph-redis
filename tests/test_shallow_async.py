@@ -228,7 +228,7 @@ async def test_from_conn_string_errors(redis_url: str) -> None:
             assert await saver._redis.ping()
         assert await client.ping()
     finally:
-        await client.close()
+        await client.aclose()
 
     """Test error conditions for from_conn_string."""
     # Test with neither URL nor client provided

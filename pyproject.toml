@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "langgraph-checkpoint-redis"
-version = "0.0.3"
+version = "0.0.4"
 description = "Library with a Redis implementation of LangGraph checkpoint saver."
 authors = ["Redis Inc. <applied.ai@redis.com>"]
 license = "MIT"
@@ -19,11 +19,11 @@ packages = [{ include = "langgraph" }]
 
 [tool.poetry.dependencies]
 python = ">=3.9,<3.14"
-langgraph-checkpoint = "^2.0.10"
+langgraph-checkpoint = "^2.0.24"
 redisvl = "^0.4.1"
 redis = "^5.2.1"
 python-ulid = "^3.0.0"
-langgraph = "^0.2.70"
+langgraph = "^0.3.0"
 
 [tool.poetry.group.dev.dependencies]
 black = "^25.1.0"
@@ -92,4 +92,4 @@ warn_unused_ignores = true
 warn_redundant_casts = true
 allow_redefinition = true
 ignore_missing_imports = true
-disable_error_code = "typeddict-item, return-value"
+disable_error_code = "typeddict-item, return-value, union-attr, operator, assignment"

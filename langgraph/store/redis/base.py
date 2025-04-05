@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import logging
+import threading
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Generic, Iterable, Optional, Sequence, TypedDict, TypeVar, Union
 
 from langchain_core.embeddings import Embeddings
@@ -17,6 +18,7 @@ from langgraph.store.base import (
     PutOp,
     SearchItem,
     SearchOp,
+    TTLConfig,
     ensure_embeddings,
     get_text_at_path,
     tokenize_path,
@@ -52,6 +54,8 @@ SCHEMAS = [
             {"name": "key", "type": "tag"},
             {"name": "created_at", "type": "numeric"},
             {"name": "updated_at", "type": "numeric"},
+            {"name": "ttl_minutes", "type": "numeric"},
+            {"name": "expires_at", "type": "numeric"},
         ],
     },
     {
@@ -67,6 +71,8 @@ SCHEMAS = [
             {"name": "embedding", "type": "vector"},
             {"name": "created_at", "type": "numeric"},
             {"name": "updated_at", "type": "numeric"},
+            {"name": "ttl_minutes", "type": "numeric"},
+            {"name": "expires_at", "type": "numeric"},
         ],
     },
 ]
@@ -82,12 +88,14 @@ def _ensure_string_or_literal(value: Any) -> str:
 C = TypeVar("C", bound=Union[Redis, AsyncRedis])
 
 
-class RedisDocument(TypedDict):
+class RedisDocument(TypedDict, total=False):
     prefix: str
     key: str
     value: Optional[str]
     created_at: int
     updated_at: int
+    ttl_minutes: Optional[float]
+    expires_at: Optional[int]
 
 
 class BaseRedisStore(Generic[RedisClientType, IndexType]):
@@ -96,17 +104,93 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
     _redis: RedisClientType
     store_index: IndexType
     vector_index: IndexType
+    _ttl_sweeper_thread: Optional[threading.Thread] = None
+    _ttl_stop_event: threading.Event | None = None
 
     SCHEMAS = SCHEMAS
+
+    supports_ttl: bool = True
+    ttl_config: Optional[TTLConfig] = None
+
+    def _apply_ttl_to_keys(
+        self,
+        main_key: str,
+        related_keys: list[str] = None,
+        ttl_minutes: Optional[float] = None,
+    ) -> Any:
+        """Apply Redis native TTL to keys.
+
+        Args:
+            main_key: The primary Redis key
+            related_keys: Additional Redis keys that should expire at the same time
+            ttl_minutes: Time-to-live in minutes
+        """
+        if ttl_minutes is None:
+            # Check if there's a default TTL in config
+            if self.ttl_config and "default_ttl" in self.ttl_config:
+                ttl_minutes = self.ttl_config.get("default_ttl")
+
+        if ttl_minutes is not None:
+            ttl_seconds = int(ttl_minutes * 60)
+            pipeline = self._redis.pipeline()
+
+            # Set TTL for main key
+            pipeline.expire(main_key, ttl_seconds)
+
+            # Set TTL for related keys
+            if related_keys:
+                for key in related_keys:
+                    pipeline.expire(key, ttl_seconds)
+
+            pipeline.execute()
+
+    def sweep_ttl(self) -> int:
+        """Clean up any remaining expired items.
+
+        This is not needed with Redis native TTL, but kept for API compatibility.
+        Redis automatically removes expired keys.
+
+        Returns:
+            int: Always returns 0 as Redis handles expiration automatically
+        """
+        return 0
+
+    def start_ttl_sweeper(self, sweep_interval_minutes: Optional[int] = None) -> None:
+        """Start TTL sweeper.
+
+        This is a no-op with Redis native TTL, but kept for API compatibility.
+        Redis automatically removes expired keys.
+
+        Args:
+            sweep_interval_minutes: Ignored parameter, kept for API compatibility
+        """
+        # No-op: Redis handles TTL expiration automatically
+        pass
+
+    def stop_ttl_sweeper(self, timeout: Optional[float] = None) -> bool:
+        """Stop TTL sweeper.
+
+        This is a no-op with Redis native TTL, but kept for API compatibility.
+
+        Args:
+            timeout: Ignored parameter, kept for API compatibility
+
+        Returns:
+            bool: Always True as there's no sweeper to stop
+        """
+        # No-op: Redis handles TTL expiration automatically
+        return True
 
     def __init__(
         self,
         conn: RedisClientType,
         index: Optional[IndexConfig] = None,
+        ttl: Optional[dict[str, Any]] = None,
     ) -> None:
         """Initialize store with Redis connection and optional index config."""
         self._redis = conn
         self.index_config = index
+        self.ttl_config = ttl  # type: ignore
         self.embeddings: Optional[Embeddings] = None
         if self.index_config:
             self.index_config = self.index_config.copy()
@@ -220,12 +304,29 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
         if inserts:
             for op in inserts:
                 now = int(datetime.now(timezone.utc).timestamp() * 1_000_000)
+
+                # With native Redis TTL, we don't need to store TTL in document
+                # but store it for backward compatibility and metadata purposes
+                ttl_minutes = None
+                expires_at = None
+                if hasattr(op, "ttl") and op.ttl is not None:
+                    ttl_minutes = op.ttl
+                    # Calculate expiration but don't rely on it for actual expiration
+                    # as we'll use Redis native TTL
+                    expires_at = int(
+                        (
+                            datetime.now(timezone.utc) + timedelta(minutes=op.ttl)
+                        ).timestamp()
+                    )
+
                 doc = RedisDocument(
                     prefix=_namespace_to_text(op.namespace),
                     key=op.key,
                     value=op.value,
                     created_at=now,
                     updated_at=now,
+                    ttl_minutes=ttl_minutes,
+                    expires_at=expires_at,
                 )
                 operations.append(doc)
 
