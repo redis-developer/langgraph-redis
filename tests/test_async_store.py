@@ -291,9 +291,58 @@ async def test_list_namespaces(store: AsyncRedisStore) -> None:
 
 @pytest.mark.asyncio
 async def test_batch_order(store: AsyncRedisStore) -> None:
-    """Test batch operations order with async store."""
-    # Skip test for v0.0.1 release
-    pytest.skip("Skipping for v0.0.1 release")
+    """Test batch operations with async store.
+    
+    This test focuses on verifying that multiple operations can be executed
+    successfully in a batch, rather than testing strict sequential ordering.
+    """
+    namespace = ("test", "batch")
+    
+    # First, put multiple items in a batch
+    put_ops = [
+        PutOp(namespace=namespace, key=f"key{i}", value={"data": f"value{i}"})
+        for i in range(5)
+    ]
+    
+    # Execute the batch of puts
+    put_results = await store.abatch(put_ops)
+    assert len(put_results) == 5
+    assert all(result is None for result in put_results)
+    
+    # Then get multiple items in a batch
+    get_ops = [
+        GetOp(namespace=namespace, key=f"key{i}")
+        for i in range(5)
+    ]
+    
+    # Execute the batch of gets
+    get_results = await store.abatch(get_ops)
+    assert len(get_results) == 5
+    
+    # Verify all items were retrieved correctly
+    for i, result in enumerate(get_results):
+        assert isinstance(result, Item)
+        assert result.key == f"key{i}"
+        assert result.value == {"data": f"value{i}"}
+        
+    # Create additional items individually
+    namespace2 = ("test", "batch_mixed")
+    await store.aput(namespace2, "item1", {"category": "fruit", "name": "apple"})
+    await store.aput(namespace2, "item2", {"category": "fruit", "name": "banana"})
+    await store.aput(namespace2, "item3", {"category": "vegetable", "name": "carrot"})
+    
+    # Now search for items in a separate operation
+    fruit_items = await store.asearch(namespace2, filter={"category": "fruit"})
+    assert isinstance(fruit_items, list)
+    assert len(fruit_items) == 2
+    assert all(item.value["category"] == "fruit" for item in fruit_items)
+    
+    # Cleanup - delete all the items we created
+    for i in range(5):
+        await store.adelete(namespace, f"key{i}")
+    await store.adelete(namespace2, "item1")
+    await store.adelete(namespace2, "item2")
+    await store.adelete(namespace2, "item3")
 
 
 @pytest.mark.asyncio
@@ -458,12 +507,38 @@ async def test_store_ttl(store: AsyncRedisStore) -> None:
 
 
 @pytest.mark.asyncio
-async def test_async_store_with_memory_persistence() -> None:
-    """Test in-memory Redis database without external dependencies.
-
-    Note: This test is skipped by default as it requires special setup.
+async def test_async_store_with_memory_persistence(redis_url: str) -> None:
+    """Test basic persistence operations with Redis.
+    
+    This test verifies that data persists in Redis after
+    creating a new store connection.
     """
-    pytest.skip("Skipping in-memory Redis test")
+    # Create a unique namespace for this test
+    namespace = ("test", "persistence", str(uuid4()))
+    key = "persisted_item"
+    value = {"data": "persist_me", "timestamp": time.time()}
+    
+    # First store instance - write data
+    async with AsyncRedisStore.from_conn_string(redis_url) as store1:
+        await store1.setup()
+        await store1.aput(namespace, key, value)
+        
+        # Verify the data was written
+        item = await store1.aget(namespace, key)
+        assert item is not None
+        assert item.value == value
+    
+    # Second store instance - verify data persisted
+    async with AsyncRedisStore.from_conn_string(redis_url) as store2:
+        await store2.setup()
+        
+        # Read the item with the new store instance
+        persisted_item = await store2.aget(namespace, key)
+        assert persisted_item is not None
+        assert persisted_item.value == value
+        
+        # Cleanup
+        await store2.adelete(namespace, key)
 
 
 @pytest.mark.asyncio
