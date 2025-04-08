@@ -331,6 +331,113 @@ def test_from_conn_string_cleanup(redis_url: str) -> None:
         client.close()
 
 
+def test_client_info_setting(redis_url: str, monkeypatch) -> None:
+    """Test that client_setinfo is called with correct library information."""
+    from langgraph.checkpoint.redis.version import __full_lib_name__
+    
+    # Create a mock to track if client_setinfo was called with our library name
+    client_info_called = False
+    lib_calls = []
+    original_client_setinfo = Redis.client_setinfo
+    
+    def mock_client_setinfo(self, key, value):
+        nonlocal client_info_called, lib_calls
+        if key == "LIB-NAME":
+            lib_calls.append(value)
+            # Note: RedisVL might call this with its own lib name first
+            # We only track calls with our lib name
+            if __full_lib_name__ in value:
+                client_info_called = True
+        return original_client_setinfo(self, key, value)
+    
+    # Apply the mock
+    monkeypatch.setattr(Redis, "client_setinfo", mock_client_setinfo)
+    
+    # Test client info setting when creating a new saver
+    with RedisSaver.from_conn_string(redis_url) as saver:
+        # Call set_client_info directly to ensure it's called
+        saver.set_client_info()
+    
+    # Print debug info
+    print(f"Library name values seen: {lib_calls}")
+    
+    # Verify client_setinfo was called with our library info
+    assert client_info_called, "client_setinfo was not called with our library name"
+
+
+def test_client_info_fallback_to_echo(redis_url: str, monkeypatch) -> None:
+    """Test that when client_setinfo is not available, fall back to echo."""
+    from langgraph.checkpoint.redis.version import __full_lib_name__
+    from redis.exceptions import ResponseError
+    
+    # Create a Redis client directly first - this bypasses RedisVL validation
+    client = Redis.from_url(redis_url)
+    
+    # Remove client_setinfo to simulate older Redis version
+    def mock_client_setinfo(self, key, value):
+        raise ResponseError("ERR unknown command")
+    
+    # Track if echo was called with our lib name
+    echo_called = False
+    echo_messages = []
+    original_echo = Redis.echo
+    
+    def mock_echo(self, message):
+        nonlocal echo_called, echo_messages
+        echo_messages.append(message)
+        if __full_lib_name__ in message:
+            echo_called = True
+        return original_echo(self, message)
+    
+    # Apply the mocks
+    monkeypatch.setattr(Redis, "client_setinfo", mock_client_setinfo)
+    monkeypatch.setattr(Redis, "echo", mock_echo)
+    
+    try:
+        # Test direct fallback without RedisVL interference
+        with RedisSaver.from_conn_string(redis_client=client) as saver:
+            # Force another call to set_client_info
+            saver.set_client_info()
+            
+        # Print debug info
+        print(f"Echo messages seen: {echo_messages}")
+        
+        # Verify echo was called as fallback with our library info
+        assert echo_called, "echo was not called as fallback with our library name"
+    finally:
+        client.close()
+
+
+def test_client_info_graceful_failure(redis_url: str, monkeypatch) -> None:
+    """Test graceful failure when both client_setinfo and echo fail."""
+    from redis.exceptions import ResponseError
+    
+    # Create a Redis client directly first - this bypasses RedisVL validation
+    client = Redis.from_url(redis_url)
+    
+    # Simulate failures for both methods
+    def mock_client_setinfo(self, key, value):
+        raise ResponseError("ERR unknown command")
+    
+    def mock_echo(self, message):
+        raise ResponseError("ERR broken connection")
+    
+    # Apply the mocks
+    monkeypatch.setattr(Redis, "client_setinfo", mock_client_setinfo)
+    monkeypatch.setattr(Redis, "echo", mock_echo)
+    
+    try:
+        # Should not raise any exceptions when both methods fail
+        with RedisSaver.from_conn_string(redis_client=client) as saver:
+            # Explicitly call set_client_info which should handle the errors
+            saver.set_client_info()
+            pass
+    except Exception as e:
+        assert False, f"set_client_info did not handle failure gracefully: {e}"
+    finally:
+        client.close()
+
+
 def test_from_conn_string_errors() -> None:
     """Test error conditions for from_conn_string."""
     # Test with neither URL nor client provided

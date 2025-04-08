@@ -275,6 +275,8 @@ class AsyncRedisStore(
         """Create store from Redis connection string."""
         async with cls(redis_url=conn_string, index=index, ttl=ttl) as store:
             await store.setup()
+            # Set client information after setup
+            await store.aset_client_info()
             yield store
 
     def create_indexes(self) -> None:
@@ -289,6 +291,9 @@ class AsyncRedisStore(
 
     async def __aenter__(self) -> AsyncRedisStore:
         """Async context manager enter."""
+        # Client info was already set in __init__, 
+        # but we'll set it again here to be consistent with checkpoint code
+        await self.aset_client_info()
         return self
 
     async def __aexit__(

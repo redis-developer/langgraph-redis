@@ -272,3 +272,74 @@ def test_from_conn_string_errors(redis_url: str) -> None:
     with pytest.raises(ValueError, match="REDIS_URL env var not set"):
         with ShallowRedisSaver.from_conn_string("") as saver:
             saver.setup()
+
+
+def test_shallow_client_info_setting(redis_url: str, monkeypatch) -> None:
+    """Test that ShallowRedisSaver sets client info correctly."""
+    from langgraph.checkpoint.redis.version import __full_lib_name__
+    from redis.exceptions import ResponseError
+    
+    # Create a mock to track if client_setinfo was called with our library name
+    client_info_called = False
+    original_client_setinfo = Redis.client_setinfo
+    
+    def mock_client_setinfo(self, key, value):
+        nonlocal client_info_called
+        # Note: RedisVL might call this with its own lib name first
+        # We only track calls with our full lib name
+        if key == "LIB-NAME" and __full_lib_name__ in value:
+            client_info_called = True
+        return original_client_setinfo(self, key, value)
+    
+    # Apply the mock
+    monkeypatch.setattr(Redis, "client_setinfo", mock_client_setinfo)
+    
+    # Test client info setting when creating a new shallow saver
+    with ShallowRedisSaver.from_conn_string(redis_url) as saver:
+        pass
+    
+    # Verify client_setinfo was called with our library info
+    assert client_info_called, "client_setinfo was not called with our library name"
+
+
+def test_shallow_client_info_fallback(redis_url: str, monkeypatch) -> None:
+    """Test that ShallowRedisSaver falls back to echo when client_setinfo is not available."""
+    from langgraph.checkpoint.redis.version import __full_lib_name__
+    from redis.exceptions import ResponseError
+    
+    # Create a Redis client directly first - this bypasses RedisVL validation
+    client = Redis.from_url(redis_url)
+    
+    # Remove client_setinfo to simulate older Redis version
+    def mock_client_setinfo(self, key, value):
+        raise ResponseError("ERR unknown command")
+    
+    # Track if echo was called with our lib name
+    echo_called = False
+    echo_messages = []
+    original_echo = Redis.echo
+    
+    def mock_echo(self, message):
+        nonlocal echo_called, echo_messages
+        echo_messages.append(message)
+        if __full_lib_name__ in message:
+            echo_called = True
+        return original_echo(self, message)
+    
+    # Apply the mocks
+    monkeypatch.setattr(Redis, "client_setinfo", mock_client_setinfo)
+    monkeypatch.setattr(Redis, "echo", mock_echo)
+    
+    try:
+        # Test direct fallback without RedisVL interference
+        with ShallowRedisSaver.from_conn_string(redis_client=client) as saver:
+            # Force another call to set_client_info
+            saver.set_client_info()
+            
+        # Print debug info
+        print(f"Echo messages seen: {echo_messages}")
+        
+        # Verify echo was called as fallback with our library info
+        assert echo_called, "echo was not called as fallback with our library name"
+    finally:
+        client.close()

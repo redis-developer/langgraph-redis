@@ -116,6 +116,10 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
     async def __aenter__(self) -> AsyncRedisSaver:
         """Async context manager enter."""
         await self.asetup()
+
+        # Set client info once Redis is set up
+        await self.aset_client_info()
+
         return self
 
     async def __aexit__(

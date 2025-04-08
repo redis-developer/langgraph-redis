@@ -132,6 +132,41 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
     ) -> None:
         """Configure the Redis client."""
         pass
+        
+    def set_client_info(self) -> None:
+        """Set client info for Redis monitoring."""
+        from redis.exceptions import ResponseError
+        from langgraph.checkpoint.redis.version import __full_lib_name__
+        
+        try:
+            # Try to use client_setinfo command if available
+            self._redis.client_setinfo("LIB-NAME", __full_lib_name__)  # type: ignore
+        except (ResponseError, AttributeError):
+            # Fall back to a simple echo if client_setinfo is not available
+            try:
+                self._redis.echo(__full_lib_name__)
+            except Exception:
+                # Silently fail if even echo doesn't work
+                pass
+                
+    async def aset_client_info(self) -> None:
+        """Set client info for Redis monitoring asynchronously."""
+        from redis.exceptions import ResponseError
+        from langgraph.checkpoint.redis.version import __full_lib_name__
+        
+        try:
+            # Try to use client_setinfo command if available
+            await self._redis.client_setinfo("LIB-NAME", __full_lib_name__)  # type: ignore
+        except (ResponseError, AttributeError):
+            # Fall back to a simple echo if client_setinfo is not available
+            try:
+                # Call with await to ensure it's an async call
+                echo_result = self._redis.echo(__full_lib_name__)
+                if hasattr(echo_result, "__await__"):
+                    await echo_result
+            except Exception:
+                # Silently fail if even echo doesn't work
+                pass
 
     def setup(self) -> None:
         """Initialize the indices in Redis."""

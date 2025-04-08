@@ -257,3 +257,81 @@ async def test_from_conn_string_errors(redis_url: str) -> None:
     with pytest.raises(ValueError, match="REDIS_URL env var not set"):
         async with AsyncShallowRedisSaver.from_conn_string("") as saver:
             await saver.asetup()
+            
+            
+@pytest.mark.asyncio
+async def test_async_shallow_client_info_setting(redis_url: str, monkeypatch) -> None:
+    """Test that client_setinfo is called with correct library information in AsyncShallowRedisSaver."""
+    from langgraph.checkpoint.redis.version import __full_lib_name__
+    
+    # Track if client_setinfo was called with the right parameters
+    client_info_called = False
+    
+    # Store the original method
+    original_client_setinfo = Redis.client_setinfo
+    
+    # Create a mock function for client_setinfo
+    async def mock_client_setinfo(self, key, value):
+        nonlocal client_info_called
+        # Note: RedisVL might call this with its own lib name first
+        # We only track calls with our full lib name
+        if key == "LIB-NAME" and __full_lib_name__ in value:
+            client_info_called = True
+        # Call original method to ensure normal function
+        return await original_client_setinfo(self, key, value)
+    
+    # Apply the mock
+    monkeypatch.setattr(Redis, "client_setinfo", mock_client_setinfo)
+    
+    # Test client info setting when creating a new async shallow saver
+    async with AsyncShallowRedisSaver.from_conn_string(redis_url) as saver:
+        await saver.asetup()
+    
+    # Verify client_setinfo was called with our library info
+    assert client_info_called, "client_setinfo was not called with our library name"
+
+
+@pytest.mark.asyncio
+async def test_async_shallow_client_info_fallback(redis_url: str, monkeypatch) -> None:
+    """Test that AsyncShallowRedisSaver falls back to echo when client_setinfo is not available."""
+    from langgraph.checkpoint.redis.version import __full_lib_name__
+    from redis.exceptions import ResponseError
+    from redis.asyncio import Redis
+    
+    # Create a Redis client directly first - this bypasses RedisVL validation
+    client = Redis.from_url(redis_url)
+    
+    # Remove client_setinfo to simulate older Redis version
+    async def mock_client_setinfo(self, key, value):
+        raise ResponseError("ERR unknown command")
+    
+    # Track if echo was called with our lib name
+    echo_called = False
+    echo_messages = []
+    original_echo = Redis.echo
+    
+    # Create mock for echo
+    async def mock_echo(self, message):
+        nonlocal echo_called, echo_messages
+        echo_messages.append(message)
+        if __full_lib_name__ in message:
+            echo_called = True
+        return await original_echo(self, message) if hasattr(original_echo, "__await__") else None
+    
+    # Apply the mocks
+    monkeypatch.setattr(Redis, "client_setinfo", mock_client_setinfo)
+    monkeypatch.setattr(Redis, "echo", mock_echo)
+    
+    try:
+        # Test direct fallback without RedisVL interference
+        async with AsyncShallowRedisSaver.from_conn_string(redis_client=client) as saver:
+            # Force another call to set_client_info
+            await saver.aset_client_info()
+            
+        # Print debug info
+        print(f"Echo messages seen: {echo_messages}")
+        
+        # Verify echo was called as fallback with our library info
+        assert echo_called, "echo was not called as fallback with our library name"
+    finally:
+        await client.aclose()
