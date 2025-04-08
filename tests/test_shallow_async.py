@@ -335,3 +335,224 @@ async def test_async_shallow_client_info_fallback(redis_url: str, monkeypatch) -
         assert echo_called, "echo was not called as fallback with our library name"
     finally:
         await client.aclose()
+        
+        
+@pytest.mark.asyncio
+async def test_shallow_redis_saver_blob_cleanup(redis_url: str) -> None:
+    """Test that the AsyncShallowRedisSaver properly cleans up old blobs and writes.
+    
+    This test verifies that the fix for the GitHub issue is working correctly.
+    The issue was that AsyncShallowRedisSaver was not cleaning up old checkpoint_blob
+    and checkpoint_writes entries, causing them to accumulate in Redis even though
+    they were no longer referenced by the current checkpoint.
+    
+    After the fix, old blobs and writes should be automatically deleted when new
+    versions are created, keeping only the necessary current objects in Redis.
+    """
+    from langgraph.checkpoint.redis.aio import AsyncRedisSaver
+    from langgraph.checkpoint.redis.ashallow import AsyncShallowRedisSaver
+    from langgraph.checkpoint.redis.base import (
+        CHECKPOINT_BLOB_PREFIX,
+        CHECKPOINT_WRITE_PREFIX,
+    )
+    from redis.asyncio import Redis
+    
+    # Set up test parameters
+    thread_id = "test-thread-blob-accumulation"
+    checkpoint_ns = "test-ns"
+    
+    # Create a test config
+    test_config = {
+        "configurable": {
+            "thread_id": thread_id,
+            "checkpoint_ns": checkpoint_ns,
+        }
+    }
+    
+    # Test AsyncShallowRedisSaver to see if it accumulates blobs and writes
+    async with AsyncShallowRedisSaver.from_conn_string(redis_url) as shallow_saver:
+        await shallow_saver.asetup()
+        
+        # Create a client to check Redis directly
+        redis_client = Redis.from_url(redis_url)
+        
+        try:
+            # We need to do a few updates to create multiple versions of blobs
+            for i in range(3):
+                checkpoint_id = f"id-{i}"
+                
+                # Create checkpoint
+                checkpoint = {
+                    "id": checkpoint_id,
+                    "ts": f"1234567890{i}",
+                    "v": 1,
+                    "channel_values": {"messages": f"message-{i}"},
+                    "channel_versions": {"messages": f"version-{i}"},
+                    "versions_seen": {},
+                    "pending_sends": [],
+                }
+                
+                metadata = {
+                    "source": "test",
+                    "step": i,
+                    "writes": {},
+                }
+                
+                # Define new_versions to force blob creation
+                new_versions = {"messages": f"version-{i}"}
+                
+                # Save the checkpoint
+                config = await shallow_saver.aput(
+                    test_config,
+                    checkpoint,
+                    metadata,
+                    new_versions,
+                )
+                
+                # Add write for this checkpoint
+                await shallow_saver.aput_writes(
+                    config,
+                    [(f"channel{i}", f"value{i}")],
+                    f"task{i}",
+                )
+            
+            # Let's dump the Redis database to see what's stored
+            # First count the number of entries for each data type
+            all_keys = await redis_client.keys("*")
+            # Explicitly print to stdout to ensure visibility
+            import sys
+            sys.stdout.write(f"All Redis keys: {all_keys}\n")
+            sys.stdout.flush()
+            
+            # Count the number of blobs and writes in Redis
+            # For blobs
+            blob_keys_pattern = f"{CHECKPOINT_BLOB_PREFIX}:*"
+            blob_keys = await redis_client.keys(blob_keys_pattern)
+            blob_count = len(blob_keys)
+            
+            # Get content of each blob key
+            blob_contents = []
+            for key in blob_keys:
+                blob_data = await redis_client.json().get(key.decode())
+                blob_contents.append(f"{key.decode()}: {str(blob_data)[:100]}...")
+            
+            # For writes
+            writes_keys_pattern = f"{CHECKPOINT_WRITE_PREFIX}:*"
+            writes_keys = await redis_client.keys(writes_keys_pattern)
+            writes_count = len(writes_keys)
+            
+            # Get content of each write key
+            write_contents = []
+            for key in writes_keys:
+                write_data = await redis_client.json().get(key.decode())
+                write_contents.append(f"{key.decode()}: {str(write_data)[:100]}...")
+            
+            # Print debug info about the keys found
+            sys.stdout.write(f"Shallow Saver - Blob keys count: {blob_count}, keys: {blob_keys}\n")
+            sys.stdout.write(f"Shallow Saver - Blob contents: {blob_contents}\n")
+            sys.stdout.write(f"Shallow Saver - Writes keys count: {writes_count}, keys: {writes_keys}\n")
+            sys.stdout.write(f"Shallow Saver - Write contents: {write_contents}\n")
+            sys.stdout.flush()
+            
+            # Look at stored checkpoint, which should have the latest values
+            latest_checkpoint = await shallow_saver.aget(test_config)
+            print(f"Latest checkpoint: {latest_checkpoint}")
+            
+            # Verify the fix works:
+            # 1. We should only have one blob entry - the latest version
+            assert blob_count == 1, "AsyncShallowRedisSaver should only keep the latest blob version"
+            
+            # 2. We should only have one write entry - for the latest checkpoint
+            assert writes_count == 1, "AsyncShallowRedisSaver should only keep writes for the latest checkpoint"
+            
+            # 3. The checkpoint should reference the latest version
+            assert latest_checkpoint["channel_versions"]["messages"] == "version-2"
+            
+            # 4. Check that the blob we have is for the latest version
+            assert any(b"version-2" in key for key in blob_keys), "The remaining blob should be the latest version"
+            
+        finally:
+            # Clean up test data
+            await redis_client.flushdb()
+            await redis_client.aclose()
+            
+    # For comparison, test with regular AsyncRedisSaver
+    # The regular saver should also accumulate entries, but this is by design since it keeps history
+    async with AsyncRedisSaver.from_conn_string(redis_url) as regular_saver:
+        await regular_saver.asetup()
+        
+        # Create a client to check Redis directly
+        redis_client = Redis.from_url(redis_url)
+        
+        try:
+            # Do the same operations as above
+            for i in range(3):
+                checkpoint_id = f"id-{i}"
+                
+                # Create checkpoint
+                checkpoint = {
+                    "id": checkpoint_id,
+                    "ts": f"1234567890{i}",
+                    "v": 1,
+                    "channel_values": {"messages": f"message-{i}"},
+                    "channel_versions": {"messages": f"version-{i}"},
+                    "versions_seen": {},
+                    "pending_sends": [],
+                }
+                
+                metadata = {
+                    "source": "test",
+                    "step": i,
+                    "writes": {},
+                }
+                
+                # Define new_versions to force blob creation
+                new_versions = {"messages": f"version-{i}"}
+                
+                # Update test_config with the proper checkpoint_id
+                config = {
+                    "configurable": {
+                        "thread_id": thread_id,
+                        "checkpoint_ns": checkpoint_ns,
+                        "checkpoint_id": checkpoint_id,
+                    }
+                }
+                
+                # Save the checkpoint
+                saved_config = await regular_saver.aput(
+                    config,
+                    checkpoint,
+                    metadata,
+                    new_versions,
+                )
+                
+                # Add write for this checkpoint
+                await regular_saver.aput_writes(
+                    saved_config,
+                    [(f"channel{i}", f"value{i}")],
+                    f"task{i}",
+                )
+            
+            # Count the number of blobs and writes in Redis
+            # For blobs
+            blob_keys_pattern = f"{CHECKPOINT_BLOB_PREFIX}:*"
+            blob_keys = await redis_client.keys(blob_keys_pattern)
+            blob_count = len(blob_keys)
+            
+            # For writes
+            writes_keys_pattern = f"{CHECKPOINT_WRITE_PREFIX}:*"
+            writes_keys = await redis_client.keys(writes_keys_pattern)
+            writes_count = len(writes_keys)
+            
+            # Print debug info about the keys found
+            print(f"Regular Saver - Blob keys count: {blob_count}, keys: {blob_keys}")
+            print(f"Regular Saver - Writes keys count: {writes_count}, keys: {writes_keys}")
+            
+            # With regular saver, we expect it to retain all history (this is by design)
+            assert blob_count >= 3, "AsyncRedisSaver should accumulate blob entries (by design)"
+            assert writes_count >= 3, "AsyncRedisSaver should accumulate write entries (by design)"
+            
+        finally:
+            # Clean up test data
+            await redis_client.flushdb()
+            await redis_client.aclose()
