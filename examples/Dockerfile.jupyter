@@ -5,11 +5,11 @@ RUN useradd -m jupyter
 
 WORKDIR /home/jupyter/workspace
 
-# Copy the library files
-COPY . /home/jupyter/workspace
+# Copy the library files (only copy the checkpoint-redis directory)
+COPY ./libs/checkpoint-redis /home/jupyter/workspace/libs/checkpoint-redis
 
 # Create necessary directories and set permissions
-RUN mkdir -p /home/jupyter/workspace/libs/checkpoint-redis/docs && \
+RUN mkdir -p /home/jupyter/workspace/libs/checkpoint-redis/examples && \
     chown -R jupyter:jupyter /home/jupyter/workspace
 
 # Switch to non-root user
@@ -21,12 +21,12 @@ ENV PATH="/home/jupyter/venv/bin:$PATH"
 
 # Install dependencies
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir langgraph && \
+    pip install --no-cache-dir langgraph==0.3.25 && \
     pip install --no-cache-dir -e /home/jupyter/workspace/libs/checkpoint-redis && \
-    pip install --no-cache-dir jupyter redis
+    pip install --no-cache-dir jupyter redis langchain-openai langchain-anthropic python-ulid
 
-# Set the working directory to the docs folder
-WORKDIR /home/jupyter/workspace/libs/checkpoint-redis/docs
+# Set the working directory to the examples folder
+WORKDIR /home/jupyter/workspace/libs/checkpoint-redis/examples
 
 # Expose Jupyter port
 EXPOSE 8888
