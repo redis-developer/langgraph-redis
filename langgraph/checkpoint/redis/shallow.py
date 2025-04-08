@@ -119,7 +119,7 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         metadata: CheckpointMetadata,
         new_versions: ChannelVersions,
     ) -> RunnableConfig:
-        """Store only the latest checkpoint."""
+        """Store only the latest checkpoint and clean up old blobs."""
         configurable = config["configurable"].copy()
         thread_id = configurable.pop("thread_id")
         checkpoint_ns = configurable.pop("checkpoint_ns")
@@ -146,6 +146,9 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         if all(key in metadata for key in ["source", "step"]):
             checkpoint_data["source"] = metadata["source"]
             checkpoint_data["step"] = metadata["step"]
+            
+        # Note: Need to keep track of the current versions to keep
+        current_channel_versions = new_versions.copy()
 
         self.checkpoints_index.load(
             [checkpoint_data],
@@ -155,6 +158,38 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
                 )
             ],
         )
+        
+        # Before storing the new blobs, clean up old ones that won't be needed
+        # - Get a list of all blob keys for this thread_id and checkpoint_ns
+        # - Then delete the ones that aren't in new_versions
+        cleanup_pipeline = self._redis.json().pipeline(transaction=False)
+        
+        # Get all blob keys for this thread/namespace
+        blob_key_pattern = ShallowRedisSaver._make_shallow_redis_checkpoint_blob_key_pattern(
+            thread_id, checkpoint_ns
+        )
+        existing_blob_keys = self._redis.keys(blob_key_pattern)
+        
+        # Process each existing blob key to determine if it should be kept or deleted
+        if existing_blob_keys:
+            for blob_key in existing_blob_keys:
+                key_parts = blob_key.decode().split(REDIS_KEY_SEPARATOR)
+                # The key format is checkpoint_blob:thread_id:checkpoint_ns:channel:version
+                if len(key_parts) >= 5:
+                    channel = key_parts[3]
+                    version = key_parts[4]
+                    
+                    # Only keep the blob if it's referenced by the current versions
+                    if (channel in current_channel_versions and 
+                        current_channel_versions[channel] == version):
+                        # This is a current version, keep it
+                        continue
+                    else:
+                        # This is an old version, delete it
+                        cleanup_pipeline.delete(blob_key)
+            
+            # Execute the cleanup
+            cleanup_pipeline.execute()
 
         # Store blob values
         blobs = self._dump_blobs(
@@ -408,7 +443,7 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         task_id: str,
         task_path: str = "",
     ) -> None:
-        """Store intermediate writes linked to a checkpoint.
+        """Store intermediate writes linked to a checkpoint and clean up old writes.
 
         Args:
             config: Configuration of the related checkpoint.
@@ -436,6 +471,30 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
                 "blob": blob,
             }
             writes_objects.append(write_obj)
+            
+        # First clean up old writes for this thread and namespace if they're for a different checkpoint_id
+        cleanup_pipeline = self._redis.json().pipeline(transaction=False)
+        
+        # Get all writes keys for this thread/namespace
+        writes_key_pattern = ShallowRedisSaver._make_shallow_redis_checkpoint_writes_key_pattern(
+            thread_id, checkpoint_ns
+        )
+        existing_writes_keys = self._redis.keys(writes_key_pattern)
+        
+        # Process each existing writes key to determine if it should be kept or deleted
+        if existing_writes_keys:
+            for write_key in existing_writes_keys:
+                key_parts = write_key.decode().split(REDIS_KEY_SEPARATOR)
+                # The key format is checkpoint_write:thread_id:checkpoint_ns:checkpoint_id:task_id:idx
+                if len(key_parts) >= 5:
+                    key_checkpoint_id = key_parts[3]
+                    
+                    # If the write is for a different checkpoint_id, delete it
+                    if key_checkpoint_id != checkpoint_id:
+                        cleanup_pipeline.delete(write_key)
+            
+            # Execute the cleanup
+            cleanup_pipeline.execute()
 
         # For each write, check existence and then perform appropriate operation
         with self._redis.json().pipeline(transaction=False) as pipeline:
@@ -470,18 +529,25 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         values: dict[str, Any],
         versions: ChannelVersions,
     ) -> List[Tuple[str, dict[str, Any]]]:
+        """Convert blob data for Redis storage.
+        
+        In the shallow implementation, we use the version in the key to allow
+        storing multiple versions without conflicts and to facilitate cleanup.
+        """
         if not versions:
             return []
 
         return [
             (
-                ShallowRedisSaver._make_shallow_redis_checkpoint_blob_key(
-                    thread_id, checkpoint_ns, k
+                # Use the base Redis checkpoint blob key to include version, enabling version tracking
+                BaseRedisSaver._make_redis_checkpoint_blob_key(
+                    thread_id, checkpoint_ns, k, ver
                 ),
                 {
                     "thread_id": thread_id,
                     "checkpoint_ns": checkpoint_ns,
                     "channel": k,
+                    "version": ver, # Include version in the data as well
                     "type": (
                         self._get_type_and_blob(values[k])[0]
                         if k in values
@@ -581,12 +647,24 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
 
     @staticmethod
     def _make_shallow_redis_checkpoint_key(thread_id: str, checkpoint_ns: str) -> str:
+        """Create a key for shallow checkpoints using only thread_id and checkpoint_ns."""
         return REDIS_KEY_SEPARATOR.join([CHECKPOINT_PREFIX, thread_id, checkpoint_ns])
 
     @staticmethod
     def _make_shallow_redis_checkpoint_blob_key(
         thread_id: str, checkpoint_ns: str, channel: str
     ) -> str:
+        """Create a key for a blob in a shallow checkpoint."""
         return REDIS_KEY_SEPARATOR.join(
             [CHECKPOINT_BLOB_PREFIX, thread_id, checkpoint_ns, channel]
         )
+        
+    @staticmethod
+    def _make_shallow_redis_checkpoint_blob_key_pattern(thread_id: str, checkpoint_ns: str) -> str:
+        """Create a pattern to match all blob keys for a thread and namespace."""
+        return REDIS_KEY_SEPARATOR.join([CHECKPOINT_BLOB_PREFIX, thread_id, checkpoint_ns]) + ":*"
+        
+    @staticmethod
+    def _make_shallow_redis_checkpoint_writes_key_pattern(thread_id: str, checkpoint_ns: str) -> str:
+        """Create a pattern to match all writes keys for a thread and namespace."""
+        return REDIS_KEY_SEPARATOR.join([CHECKPOINT_WRITE_PREFIX, thread_id, checkpoint_ns]) + ":*"
