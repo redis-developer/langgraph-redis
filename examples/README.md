@@ -7,7 +7,7 @@ This directory contains Jupyter notebooks demonstrating the usage of the Redis w
 To run these notebooks using the local development versions of LangChain and the Redis partner package:
 
 1. Ensure you have Docker and Docker Compose installed on your system.
-2. Navigate to this directory (`langgraph/docs`) in your terminal.
+2. Navigate to this directory (`examples`) in your terminal.
 3. Run the following command:
    ```bash
    docker compose up
