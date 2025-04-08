@@ -278,6 +278,98 @@ async def test_from_conn_string_cleanup(redis_url: str) -> None:
         assert await ext_client.ping()  # Should still work
     finally:
         await ext_client.aclose()  # type: ignore[attr-defined]
+        
+        
+@pytest.mark.asyncio
+async def test_async_client_info_setting(redis_url: str, monkeypatch) -> None:
+    """Test that async client_setinfo is called with correct library information."""
+    from langgraph.checkpoint.redis.version import __full_lib_name__
+    
+    # Track if client_setinfo was called with the right parameters
+    client_info_called = False
+    
+    # Store the original method
+    original_client_setinfo = Redis.client_setinfo
+    
+    # Create a mock function for client_setinfo
+    async def mock_client_setinfo(self, key, value):
+        nonlocal client_info_called
+        # Note: RedisVL might call this with its own lib name first
+        # We only track calls with our full lib name
+        if key == "LIB-NAME" and __full_lib_name__ in value:
+            client_info_called = True
+        # Call original method to ensure normal function
+        return await original_client_setinfo(self, key, value)
+    
+    # Apply the mock
+    monkeypatch.setattr(Redis, "client_setinfo", mock_client_setinfo)
+    
+    # Test client info setting when creating a new saver with async context manager
+    async with AsyncRedisSaver.from_conn_string(redis_url) as saver:
+        await saver.asetup()
+        # __aenter__ should have called aset_client_info
+    
+    # Verify client_setinfo was called with our library info
+    assert client_info_called, "client_setinfo was not called with our library name"
+
+
+@pytest.mark.asyncio
+async def test_async_client_info_fallback_to_echo(redis_url: str, monkeypatch) -> None:
+    """Test that async client_setinfo falls back to echo when not available."""
+    from langgraph.checkpoint.redis.version import __full_lib_name__
+    from redis.exceptions import ResponseError
+    
+    # Remove client_setinfo to simulate older Redis version
+    async def mock_client_setinfo(self, key, value):
+        raise ResponseError("ERR unknown command")
+    
+    # Track if echo was called as fallback
+    echo_called = False
+    original_echo = Redis.echo
+    
+    # Create mock for echo
+    async def mock_echo(self, message):
+        nonlocal echo_called
+        echo_called = True
+        assert message == __full_lib_name__
+        return await original_echo(self, message)
+    
+    # Apply the mocks
+    monkeypatch.setattr(Redis, "client_setinfo", mock_client_setinfo)
+    monkeypatch.setattr(Redis, "echo", mock_echo)
+    
+    # Test client info setting with fallback
+    async with AsyncRedisSaver.from_conn_string(redis_url) as saver:
+        await saver.asetup()
+        # __aenter__ should have called aset_client_info with fallback to echo
+    
+    # Verify echo was called as fallback
+    assert echo_called, "echo was not called as fallback when async client_setinfo failed"
+
+
+@pytest.mark.asyncio
+async def test_async_client_info_graceful_failure(redis_url: str, monkeypatch) -> None:
+    """Test that async client info setting fails gracefully when all methods fail."""
+    from redis.exceptions import ResponseError
+    
+    # Simulate failures for both methods
+    async def mock_client_setinfo(self, key, value):
+        raise ResponseError("ERR unknown command")
+    
+    async def mock_echo(self, message):
+        raise ResponseError("ERR connection broken")
+    
+    # Apply the mocks
+    monkeypatch.setattr(Redis, "client_setinfo", mock_client_setinfo)
+    monkeypatch.setattr(Redis, "echo", mock_echo)
+    
+    # Should not raise any exceptions when both methods fail
+    try:
+        async with AsyncRedisSaver.from_conn_string(redis_url) as saver:
+            await saver.asetup()
+            # __aenter__ should handle failures gracefully
+    except Exception as e:
+        assert False, f"aset_client_info did not handle failure gracefully: {e}"
 
 
 @pytest.mark.asyncio

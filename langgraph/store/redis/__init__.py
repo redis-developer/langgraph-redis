@@ -98,7 +98,11 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
         client = None
         try:
             client = RedisConnectionFactory.get_redis_connection(conn_string)
-            yield cls(client, index=index, ttl=ttl)
+            store = cls(client, index=index, ttl=ttl)
+            # Client info will already be set in __init__, but we set it up here
+            # to make the method behavior consistent with AsyncRedisStore
+            store.set_client_info()
+            yield store
         finally:
             if client:
                 client.close()

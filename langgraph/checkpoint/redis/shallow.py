@@ -386,6 +386,9 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         self._redis = redis_client or RedisConnectionFactory.get_redis_connection(
             redis_url, **connection_args
         )
+        
+        # Set client info for Redis monitoring
+        self.set_client_info()
 
     def create_indexes(self) -> None:
         self.checkpoints_index = SearchIndex.from_dict(

@@ -19,6 +19,8 @@ from langgraph.store.base import (
     PutOp,
     SearchOp,
 )
+from redis import Redis
+from redis.exceptions import ResponseError
 
 from langgraph.store.redis import RedisStore
 from tests.embed_test_utils import CharacterEmbeddings
@@ -527,3 +529,108 @@ def test_store_ttl(store: RedisStore) -> None:
     # Verify item is gone due to TTL expiration
     res = store.search(ns, query="bar", refresh_ttl=False)
     assert len(res) == 0
+
+
+def test_redis_store_client_info(redis_url: str, monkeypatch) -> None:
+    """Test that RedisStore sets client info correctly."""
+    from redis import Redis as NativeRedis
+    from langgraph.checkpoint.redis.version import __full_lib_name__
+    
+    # Create a direct Redis client to bypass RedisVL validation
+    client = NativeRedis.from_url(redis_url)
+    
+    try:
+        # Create a mock to track if client_setinfo was called with our library name
+        client_info_called = False
+        original_client_setinfo = NativeRedis.client_setinfo
+        
+        def mock_client_setinfo(self, key, value):
+            nonlocal client_info_called
+            # We only track calls with our full lib name
+            if key == "LIB-NAME" and __full_lib_name__ in value:
+                client_info_called = True
+            return original_client_setinfo(self, key, value)
+        
+        # Apply the mock
+        monkeypatch.setattr(NativeRedis, "client_setinfo", mock_client_setinfo)
+        
+        # Test client info setting by creating store directly
+        store = RedisStore(client)
+        store.set_client_info()
+        
+        # Verify client_setinfo was called with our library info
+        assert client_info_called, "client_setinfo was not called with our library name"
+    finally:
+        client.close()
+        client.connection_pool.disconnect()
+
+
+def test_redis_store_client_info_fallback(redis_url: str, monkeypatch) -> None:
+    """Test that RedisStore falls back to echo when client_setinfo is not available."""
+    from redis import Redis as NativeRedis
+    from langgraph.checkpoint.redis.version import __full_lib_name__
+    
+    # Create a direct Redis client to bypass RedisVL validation
+    client = NativeRedis.from_url(redis_url)
+    
+    try:
+        # Track if echo was called
+        echo_called = False
+        original_echo = NativeRedis.echo
+        
+        # Remove client_setinfo to simulate older Redis version
+        def mock_client_setinfo(self, key, value):
+            raise ResponseError("ERR unknown command")
+        
+        def mock_echo(self, message):
+            nonlocal echo_called
+            # We only want to track our library's echo calls
+            if __full_lib_name__ in message:
+                echo_called = True
+            return original_echo(self, message)
+        
+        # Apply the mocks
+        monkeypatch.setattr(NativeRedis, "client_setinfo", mock_client_setinfo)
+        monkeypatch.setattr(NativeRedis, "echo", mock_echo)
+        
+        # Test client info setting by creating store directly
+        store = RedisStore(client)
+        store.set_client_info()
+        
+        # Verify echo was called as fallback
+        assert echo_called, "echo was not called as fallback when client_setinfo failed"
+    finally:
+        client.close()
+        client.connection_pool.disconnect()
+
+
+def test_redis_store_graceful_failure(redis_url: str, monkeypatch) -> None:
+    """Test graceful failure when both client_setinfo and echo fail."""
+    from redis import Redis as NativeRedis
+    from redis.exceptions import ResponseError
+    
+    # Create a direct Redis client to bypass RedisVL validation
+    client = NativeRedis.from_url(redis_url)
+    
+    try:
+        # Simulate failures for both methods
+        def mock_client_setinfo(self, key, value):
+            raise ResponseError("ERR unknown command")
+        
+        def mock_echo(self, message):
+            raise ResponseError("ERR broken connection")
+        
+        # Apply the mocks
+        monkeypatch.setattr(NativeRedis, "client_setinfo", mock_client_setinfo)
+        monkeypatch.setattr(NativeRedis, "echo", mock_echo)
+        
+        # Should not raise any exceptions when both methods fail
+        try:
+            # Test client info setting by creating store directly
+            store = RedisStore(client)
+            store.set_client_info()
+        except Exception as e:
+            assert False, f"set_client_info did not handle failure gracefully: {e}"
+    finally:
+        client.close()
+        client.connection_pool.disconnect()
