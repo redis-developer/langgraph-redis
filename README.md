@@ -5,15 +5,18 @@ This repository contains Redis implementations for LangGraph, providing both Che
 ## Overview
 
 The project consists of two main components:
+
 1. **Redis Checkpoint Savers**: Implementations for storing and managing checkpoints using Redis
 2. **Redis Stores**: Redis-backed key-value stores with optional vector search capabilities
 
 ## Dependencies
 
 The project requires the following main dependencies:
+
 - `redis>=5.2.1`
-- `redisvl>=0.3.7`
-- `langgraph-checkpoint>=2.0.10`
+- `redisvl>=0.5.1`
+- `langgraph-checkpoint>=2.0.24`
+- `langgraph>=0.3.0`
 
 ## Installation
 
@@ -184,6 +187,39 @@ async def main():
 asyncio.run(main())
 ```
 
+## Examples
+
+The `examples` directory contains Jupyter notebooks demonstrating the usage of Redis with LangGraph:
+
+- `persistence_redis.ipynb`: Demonstrates the usage of Redis checkpoint savers with LangGraph
+- `create-react-agent-memory.ipynb`: Shows how to create an agent with persistent memory using Redis
+- `cross-thread-persistence.ipynb`: Demonstrates cross-thread persistence capabilities
+- `persistence-functional.ipynb`: Shows functional persistence patterns with Redis
+
+### Running Example Notebooks
+
+To run the example notebooks with Docker:
+
+1. Navigate to the examples directory:
+
+   ```bash
+   cd examples
+   ```
+
+2. Start the Docker containers:
+
+   ```bash
+   docker compose up
+   ```
+
+3. Open the URL shown in the console (typically <http://127.0.0.1:8888/tree>) in your browser to access Jupyter.
+
+4. When finished, stop the containers:
+
+   ```bash
+   docker compose down
+   ```
+
 ## Implementation Details
 
 ### Indexing
@@ -195,6 +231,7 @@ The Redis implementation creates these main indices:
 3. **Writes Index**: Tracks pending writes and intermediate states
 
 For Redis Stores with vector search:
+
 1. **Store Index**: Main key-value store
 2. **Vector Index**: Optional vector embeddings for similarity search
 
@@ -205,14 +242,16 @@ We welcome contributions! Here's how you can help:
 ### Development Setup
 
 1. Clone the repository:
+
    ```bash
-   git clone https://github.com/langchain-ai/langgraph
-   cd langgraph
+   git clone https://github.com/redis-developer/langgraph-redis
+   cd langgraph-redis
    ```
 
 2. Install dependencies:
+
    ```bash
-   poetry install
+   poetry install --all-extras
    ```
 
 ### Available Commands
@@ -220,19 +259,25 @@ We welcome contributions! Here's how you can help:
 The project includes several make commands for development:
 
 - **Testing**:
+
   ```bash
   make test           # Run all tests
-  make test_watch    # Run tests in watch mode
+  make test-all       # Run all tests including API tests
   ```
 
 - **Linting and Formatting**:
+
   ```bash
-  make lint          # Run all linters
-  make lint_diff     # Lint only changed files
-  make lint_package  # Lint only the package
-  make lint_tests    # Lint only tests
-  make format        # Format all files
-  make format_diff   # Format only changed files
+  make format        # Format all files with Black and isort
+  make lint          # Run formatting, type checking, and other linters
+  make check-types   # Run mypy type checking
+  ```
+
+- **Redis for Development/Testing**:
+
+  ```bash
+  make redis-start   # Start Redis in Docker
+  make redis-stop    # Stop Redis container
   ```
 
 ### Contribution Guidelines
