@@ -708,6 +708,22 @@ files = [
 jsonpointer = ">=1.9"
 
 [[package]]
+name = "jsonpath-ng"
+version = "1.7.0"
+description = "A final implementation of JSONPath for Python that aims to be standard compliant, including arithmetic and binary comparison operators and providing clear AST for metaprogramming."
+optional = false
+python-versions = "*"
+groups = ["main"]
+files = [
+    {file = "jsonpath-ng-1.7.0.tar.gz", hash = "sha256:f6f5f7fd4e5ff79c785f1573b394043b39849fb2bb47bcead935d12b00beab3c"},
+    {file = "jsonpath_ng-1.7.0-py2-none-any.whl", hash = "sha256:898c93fc173f0c336784a3fa63d7434297544b7198124a68f9a3ef9597b0ae6e"},
+    {file = "jsonpath_ng-1.7.0-py3-none-any.whl", hash = "sha256:f3d7f9e848cba1b6da28c55b1c26ff915dc9e0b1ba7e752a53d6da8d5cbd00b6"},
+]
+
+[package.dependencies]
+ply = "*"
+
+[[package]]
 name = "jsonpointer"
 version = "3.0.0"
 description = "Identify specific nodes in a JSON document (RFC 6901)"
@@ -1286,6 +1302,18 @@ dev = ["pre-commit", "tox"]
 testing = ["pytest", "pytest-benchmark"]
 
 [[package]]
+name = "ply"
+version = "3.11"
+description = "Python Lex & Yacc"
+optional = false
+python-versions = "*"
+groups = ["main"]
+files = [
+    {file = "ply-3.11-py2.py3-none-any.whl", hash = "sha256:096f9b8350b65ebd2fd1346b12452efe5b9607f7482813ffca50c22722a807ce"},
+    {file = "ply-3.11.tar.gz", hash = "sha256:00c7c1aaa88358b9c765b6d3000c6eec0ba42abca5351b095321aef446081da3"},
+]
+
+[[package]]
 name = "psutil"
 version = "6.1.1"
 description = "Cross-platform lib for process and system monitoring in Python."
@@ -1704,18 +1732,19 @@ ocsp = ["cryptography (>=36.0.1)", "pyopenssl (==23.2.1)", "requests (>=2.31.0)"
 
 [[package]]
 name = "redisvl"
-version = "0.4.1"
+version = "0.5.1"
 description = "Python client library and CLI for using Redis as a vector database"
 optional = false
 python-versions = "<3.14,>=3.9"
 groups = ["main"]
 files = [
-    {file = "redisvl-0.4.1-py3-none-any.whl", hash = "sha256:6db5d5bc95b1fe8032a1cdae74ce1c65bc7fe9054e5429b5d34d5a91d28bae5f"},
-    {file = "redisvl-0.4.1.tar.gz", hash = "sha256:fd6a36426ba94792c0efca20915c31232d4ee3cc58eb23794a62c142696401e6"},
+    {file = "redisvl-0.5.1-py3-none-any.whl", hash = "sha256:dc8d71982b84ab4fe1136a62db8ad4af6b6a4117f47f9ecfad7f5cd68c87f34c"},
+    {file = "redisvl-0.5.1.tar.gz", hash = "sha256:f3e1e45abe4fb42d7531cc9e4cb127be7f39fb41940e9d63fb3def6455931302"},
 ]
 
 [package.dependencies]
 coloredlogs = ">=15.0,<16.0"
+jsonpath-ng = ">=1.5.0,<2.0.0"
 ml-dtypes = ">=0.4.0,<0.5.0"
 numpy = [
     {version = ">=1,<2", markers = "python_version < \"3.12\""},
@@ -1729,10 +1758,12 @@ tabulate = ">=0.9.0,<0.10.0"
 tenacity = ">=8.2.2"
 
 [package.extras]
-bedrock = ["boto3[bedrock] (>=1.36.0,<2.0.0)"]
+bedrock = ["boto3[bedrock] (==1.36.0)"]
 cohere = ["cohere (>=4.44)"]
 mistralai = ["mistralai (>=1.0.0)"]
+nltk = ["nltk (>=3.8.1,<4.0.0)"]
 openai = ["openai (>=1.13.0,<2.0.0)"]
+ranx = ["ranx (>=0.3.0,<0.4.0)"]
 sentence-transformers = ["scipy (<1.15)", "scipy (>=1.15,<2.0)", "sentence-transformers (>=3.4.0,<4.0.0)"]
 vertexai = ["google-cloud-aiplatform (>=1.26,<2.0)", "protobuf (>=5.29.1,<6.0.0)"]
 voyageai = ["voyageai (>=0.2.2)"]
@@ -2515,4 +2546,4 @@ cffi = ["cffi (>=1.11)"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.9,<3.14"
-content-hash = "9077e27f6f5e703aa4d06752a44f50a30ef814367a8962ceed4d354a02c1ef90"
+content-hash = "4fb92bdbc0c1e00310b75eaae6d3d6ca54884c696f9fc44a2da0e1097044bcdd"

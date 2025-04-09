@@ -285,7 +285,10 @@ async def test_from_conn_string_cleanup(redis_url: str) -> None:
 @pytest.mark.asyncio
 async def test_async_client_info_setting(redis_url: str, monkeypatch) -> None:
     """Test that async client_setinfo is called with correct library information."""
-    from langgraph.checkpoint.redis.version import __full_lib_name__
+    from langgraph.checkpoint.redis.version import __redisvl_version__
+
+    # Expected client info format
+    expected_client_info = f"redis-py(redisvl_v{__redisvl_version__})"
 
     # Track if client_setinfo was called with the right parameters
     client_info_called = False
@@ -298,7 +301,7 @@ async def test_async_client_info_setting(redis_url: str, monkeypatch) -> None:
         nonlocal client_info_called
         # Note: RedisVL might call this with its own lib name first
         # We only track calls with our full lib name
-        if key == "LIB-NAME" and __full_lib_name__ in value:
+        if key == "LIB-NAME" and value == expected_client_info:
             client_info_called = True
         # Call original method to ensure normal function
         return await original_client_setinfo(self, key, value)
@@ -320,7 +323,10 @@ async def test_async_client_info_fallback_to_echo(redis_url: str, monkeypatch) -
     """Test that async client_setinfo falls back to echo when not available."""
     from redis.exceptions import ResponseError
 
-    from langgraph.checkpoint.redis.version import __full_lib_name__
+    from langgraph.checkpoint.redis.version import __redisvl_version__
+
+    # Expected client info format
+    expected_client_info = f"redis-py(redisvl_v{__redisvl_version__})"
 
     # Remove client_setinfo to simulate older Redis version
     async def mock_client_setinfo(self, key, value):
@@ -334,7 +340,7 @@ async def test_async_client_info_fallback_to_echo(redis_url: str, monkeypatch) -
     async def mock_echo(self, message):
         nonlocal echo_called
         echo_called = True
-        assert message == __full_lib_name__
+        assert message == expected_client_info
         return await original_echo(self, message)
 
     # Apply the mocks
@@ -357,6 +363,17 @@ async def test_async_client_info_graceful_failure(redis_url: str, monkeypatch) -
     """Test that async client info setting fails gracefully when all methods fail."""
     from redis.exceptions import ResponseError
 
+    # Create a patch for the RedisVL validation to avoid it using echo
+    from redisvl.redis.connection import RedisConnectionFactory
+    original_validate = RedisConnectionFactory.validate_async_redis
+
+    # Create a replacement validation function that doesn't use echo
+    async def mock_validate(redis_client, lib_name=None):
+        return redis_client
+
+    # Apply the validation mock first to prevent echo from being called by RedisVL
+    monkeypatch.setattr(RedisConnectionFactory, "validate_async_redis", mock_validate)
+
     # Simulate failures for both methods
     async def mock_client_setinfo(self, key, value):
         raise ResponseError("ERR unknown command")
@@ -364,7 +381,7 @@ async def test_async_client_info_graceful_failure(redis_url: str, monkeypatch) -
     async def mock_echo(self, message):
         raise ResponseError("ERR connection broken")
 
-    # Apply the mocks
+    # Apply the Redis mocks
     monkeypatch.setattr(Redis, "client_setinfo", mock_client_setinfo)
     monkeypatch.setattr(Redis, "echo", mock_echo)
 
