@@ -292,51 +292,48 @@ async def test_list_namespaces(store: AsyncRedisStore) -> None:
 @pytest.mark.asyncio
 async def test_batch_order(store: AsyncRedisStore) -> None:
     """Test batch operations with async store.
-    
+
     This test focuses on verifying that multiple operations can be executed
     successfully in a batch, rather than testing strict sequential ordering.
     """
     namespace = ("test", "batch")
-    
+
     # First, put multiple items in a batch
     put_ops = [
         PutOp(namespace=namespace, key=f"key{i}", value={"data": f"value{i}"})
         for i in range(5)
     ]
-    
+
     # Execute the batch of puts
     put_results = await store.abatch(put_ops)
     assert len(put_results) == 5
     assert all(result is None for result in put_results)
-    
+
     # Then get multiple items in a batch
-    get_ops = [
-        GetOp(namespace=namespace, key=f"key{i}")
-        for i in range(5)
-    ]
-    
+    get_ops = [GetOp(namespace=namespace, key=f"key{i}") for i in range(5)]
+
     # Execute the batch of gets
     get_results = await store.abatch(get_ops)
     assert len(get_results) == 5
-    
+
     # Verify all items were retrieved correctly
     for i, result in enumerate(get_results):
         assert isinstance(result, Item)
         assert result.key == f"key{i}"
         assert result.value == {"data": f"value{i}"}
-        
+
     # Create additional items individually
     namespace2 = ("test", "batch_mixed")
     await store.aput(namespace2, "item1", {"category": "fruit", "name": "apple"})
     await store.aput(namespace2, "item2", {"category": "fruit", "name": "banana"})
     await store.aput(namespace2, "item3", {"category": "vegetable", "name": "carrot"})
-    
+
     # Now search for items in a separate operation
     fruit_items = await store.asearch(namespace2, filter={"category": "fruit"})
     assert isinstance(fruit_items, list)
     assert len(fruit_items) == 2
     assert all(item.value["category"] == "fruit" for item in fruit_items)
-    
+
     # Cleanup - delete all the items we created
     for i in range(5):
         await store.adelete(namespace, f"key{i}")
@@ -509,7 +506,7 @@ async def test_store_ttl(store: AsyncRedisStore) -> None:
 @pytest.mark.asyncio
 async def test_async_store_with_memory_persistence(redis_url: str) -> None:
     """Test basic persistence operations with Redis.
-    
+
     This test verifies that data persists in Redis after
     creating a new store connection.
     """
@@ -517,30 +514,30 @@ async def test_async_store_with_memory_persistence(redis_url: str) -> None:
     namespace = ("test", "persistence", str(uuid4()))
     key = "persisted_item"
     value = {"data": "persist_me", "timestamp": time.time()}
-    
+
     # First store instance - write data
     async with AsyncRedisStore.from_conn_string(redis_url) as store1:
         await store1.setup()
         await store1.aput(namespace, key, value)
-        
+
         # Verify the data was written
         item = await store1.aget(namespace, key)
         assert item is not None
         # Use approximate comparison for floating point values
         assert item.value["data"] == value["data"]
         assert abs(item.value["timestamp"] - value["timestamp"]) < 0.001
-    
+
     # Second store instance - verify data persisted
     async with AsyncRedisStore.from_conn_string(redis_url) as store2:
         await store2.setup()
-        
+
         # Read the item with the new store instance
         persisted_item = await store2.aget(namespace, key)
         assert persisted_item is not None
         # Use approximate comparison for floating point values
         assert persisted_item.value["data"] == value["data"]
         assert abs(persisted_item.value["timestamp"] - value["timestamp"]) < 0.001
-        
+
         # Cleanup
         await store2.adelete(namespace, key)
 
@@ -549,14 +546,15 @@ async def test_async_store_with_memory_persistence(redis_url: str) -> None:
 async def test_async_redis_store_client_info(redis_url: str, monkeypatch) -> None:
     """Test that AsyncRedisStore sets client info correctly."""
     from redis.asyncio import Redis
+
     from langgraph.checkpoint.redis.version import __full_lib_name__
-    
+
     # Track if client_setinfo was called with the right parameters
     client_info_called = False
-    
+
     # Store the original method
     original_client_setinfo = Redis.client_setinfo
-    
+
     # Create a mock function for client_setinfo
     async def mock_client_setinfo(self, key, value):
         nonlocal client_info_called
@@ -566,50 +564,55 @@ async def test_async_redis_store_client_info(redis_url: str, monkeypatch) -> Non
             client_info_called = True
         # Call original method to ensure normal function
         return await original_client_setinfo(self, key, value)
-    
+
     # Apply the mock
     monkeypatch.setattr(Redis, "client_setinfo", mock_client_setinfo)
-    
+
     # Test client info setting when creating a new async store
     async with AsyncRedisStore.from_conn_string(redis_url) as store:
         await store.setup()
-    
+
     # Verify client_setinfo was called with our library info
     assert client_info_called, "client_setinfo was not called with our library name"
 
 
 @pytest.mark.asyncio
-async def test_async_redis_store_client_info_fallback(redis_url: str, monkeypatch) -> None:
+async def test_async_redis_store_client_info_fallback(
+    redis_url: str, monkeypatch
+) -> None:
     """Test that AsyncRedisStore falls back to echo when client_setinfo is not available."""
     from redis.asyncio import Redis
     from redis.exceptions import ResponseError
+
     from langgraph.checkpoint.redis.version import __full_lib_name__
-    
+
     # Remove client_setinfo to simulate older Redis version
     async def mock_client_setinfo(self, key, value):
         raise ResponseError("ERR unknown command")
-    
+
     # Track if echo was called as fallback
     echo_called = False
     original_echo = Redis.echo
-    
+
     # Create mock for echo
     async def mock_echo(self, message):
         nonlocal echo_called
         echo_called = True
         assert message == __full_lib_name__
         return await original_echo(self, message)
-    
+
     # Apply the mocks
     monkeypatch.setattr(Redis, "client_setinfo", mock_client_setinfo)
     monkeypatch.setattr(Redis, "echo", mock_echo)
-    
+
     # Test client info setting with fallback
     async with AsyncRedisStore.from_conn_string(redis_url) as store:
         await store.setup()
-    
+
     # Verify echo was called as fallback
-    assert echo_called, "echo was not called as fallback when client_setinfo failed in AsyncRedisStore"
+    assert (
+        echo_called
+    ), "echo was not called as fallback when client_setinfo failed in AsyncRedisStore"
 
 
 @pytest.mark.asyncio
@@ -617,18 +620,18 @@ async def test_async_redis_store_graceful_failure(redis_url: str, monkeypatch) -
     """Test that async store client info setting fails gracefully when all methods fail."""
     from redis.asyncio import Redis
     from redis.exceptions import ResponseError
-    
+
     # Simulate failures for both methods
     async def mock_client_setinfo(self, key, value):
         raise ResponseError("ERR unknown command")
-    
+
     async def mock_echo(self, message):
         raise ResponseError("ERR connection broken")
-    
+
     # Apply the mocks
     monkeypatch.setattr(Redis, "client_setinfo", mock_client_setinfo)
     monkeypatch.setattr(Redis, "echo", mock_echo)
-    
+
     # Should not raise any exceptions when both methods fail
     try:
         async with AsyncRedisStore.from_conn_string(redis_url) as store:

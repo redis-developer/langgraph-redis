@@ -291,7 +291,7 @@ class AsyncRedisStore(
 
     async def __aenter__(self) -> AsyncRedisStore:
         """Async context manager enter."""
-        # Client info was already set in __init__, 
+        # Client info was already set in __init__,
         # but we'll set it again here to be consistent with checkpoint code
         await self.aset_client_info()
         return self

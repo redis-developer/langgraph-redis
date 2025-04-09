@@ -132,12 +132,13 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
     ) -> None:
         """Configure the Redis client."""
         pass
-        
+
     def set_client_info(self) -> None:
         """Set client info for Redis monitoring."""
         from redis.exceptions import ResponseError
+
         from langgraph.checkpoint.redis.version import __full_lib_name__
-        
+
         try:
             # Try to use client_setinfo command if available
             self._redis.client_setinfo("LIB-NAME", __full_lib_name__)  # type: ignore
@@ -148,12 +149,13 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
             except Exception:
                 # Silently fail if even echo doesn't work
                 pass
-                
+
     async def aset_client_info(self) -> None:
         """Set client info for Redis monitoring asynchronously."""
         from redis.exceptions import ResponseError
+
         from langgraph.checkpoint.redis.version import __full_lib_name__
-        
+
         try:
             # Try to use client_setinfo command if available
             await self._redis.client_setinfo("LIB-NAME", __full_lib_name__)  # type: ignore

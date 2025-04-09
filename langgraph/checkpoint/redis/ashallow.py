@@ -173,19 +173,19 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         new_versions: ChannelVersions,
     ) -> RunnableConfig:
         """Store only the latest checkpoint asynchronously and clean up old blobs with transaction handling.
-        
+
         This method uses Redis pipeline with transaction=True to ensure atomicity of checkpoint operations.
         In case of interruption, all operations will be aborted, maintaining consistency.
-        
+
         Args:
             config: The config to associate with the checkpoint
             checkpoint: The checkpoint data to store
             metadata: Additional metadata to save with the checkpoint
             new_versions: New channel versions as of this write
-            
+
         Returns:
             Updated configuration after storing the checkpoint
-            
+
         Raises:
             asyncio.CancelledError: If the operation is cancelled/interrupted
         """
@@ -205,7 +205,7 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         try:
             # Create a pipeline with transaction=True for atomicity
             pipeline = self._redis.pipeline(transaction=True)
-            
+
             # Store checkpoint data
             checkpoint_data = {
                 "thread_id": thread_id,
@@ -214,33 +214,35 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
                 "checkpoint": self._dump_checkpoint(copy),
                 "metadata": self._dump_metadata(metadata),
             }
-    
+
             # store at top-level for filters in list()
             if all(key in metadata for key in ["source", "step"]):
                 checkpoint_data["source"] = metadata["source"]
                 checkpoint_data["step"] = metadata["step"]
-            
+
             # Note: Need to keep track of the current versions to keep
             current_channel_versions = new_versions.copy()
-            
+
             # Prepare the checkpoint key
             checkpoint_key = AsyncShallowRedisSaver._make_shallow_redis_checkpoint_key(
                 thread_id, checkpoint_ns
             )
-            
+
             # Add checkpoint data to pipeline
             await pipeline.json().set(checkpoint_key, "$", checkpoint_data)
-    
+
             # Before storing the new blobs, clean up old ones that won't be needed
             # - Get a list of all blob keys for this thread_id and checkpoint_ns
             # - Then delete the ones that aren't in new_versions
-            
+
             # Get all blob keys for this thread/namespace (this is done outside the pipeline)
-            blob_key_pattern = AsyncShallowRedisSaver._make_shallow_redis_checkpoint_blob_key_pattern(
-                thread_id, checkpoint_ns
+            blob_key_pattern = (
+                AsyncShallowRedisSaver._make_shallow_redis_checkpoint_blob_key_pattern(
+                    thread_id, checkpoint_ns
+                )
             )
             existing_blob_keys = await self._redis.keys(blob_key_pattern)
-            
+
             # Process each existing blob key to determine if it should be kept or deleted
             if existing_blob_keys:
                 for blob_key in existing_blob_keys:
@@ -249,16 +251,18 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
                     if len(key_parts) >= 5:
                         channel = key_parts[3]
                         version = key_parts[4]
-                        
+
                         # Only keep the blob if it's referenced by the current versions
-                        if (channel in current_channel_versions and 
-                            current_channel_versions[channel] == version):
+                        if (
+                            channel in current_channel_versions
+                            and current_channel_versions[channel] == version
+                        ):
                             # This is a current version, keep it
                             continue
                         else:
                             # This is an old version, delete it
                             await pipeline.delete(blob_key)
-            
+
             # Store the new blob values
             blobs = self._dump_blobs(
                 thread_id,
@@ -266,23 +270,23 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
                 copy.get("channel_values", {}),
                 new_versions,
             )
-    
+
             if blobs:
                 # Add all blob data to pipeline
                 for key, data in blobs:
                     await pipeline.json().set(key, "$", data)
-            
+
             # Execute all operations atomically
             await pipeline.execute()
-            
+
             return next_config
-            
+
         except asyncio.CancelledError:
             # Handle cancellation/interruption
             # Pipeline will be automatically discarded
             # Either all operations succeed or none do
             raise
-            
+
         except Exception as e:
             # Re-raise other exceptions
             raise e
@@ -458,13 +462,13 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             writes (List[Tuple[str, Any]]): List of writes to store.
             task_id (str): Identifier for the task creating the writes.
             task_path (str): Path of the task creating the writes.
-            
+
         Raises:
             asyncio.CancelledError: If the operation is cancelled/interrupted
         """
         if not writes:
             return
-            
+
         thread_id = config["configurable"]["thread_id"]
         checkpoint_ns = config["configurable"].get("checkpoint_ns", "")
         checkpoint_id = config["configurable"]["checkpoint_id"]
@@ -472,7 +476,7 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         try:
             # Create a transaction pipeline for atomicity
             pipeline = self._redis.pipeline(transaction=True)
-            
+
             # Transform writes into appropriate format
             writes_objects = []
             for idx, (channel, value) in enumerate(writes):
@@ -489,13 +493,13 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
                     "blob": blob,
                 }
                 writes_objects.append(write_obj)
-            
+
             # First get all writes keys for this thread/namespace (outside the pipeline)
             writes_key_pattern = AsyncShallowRedisSaver._make_shallow_redis_checkpoint_writes_key_pattern(
                 thread_id, checkpoint_ns
             )
             existing_writes_keys = await self._redis.keys(writes_key_pattern)
-            
+
             # Process each existing writes key to determine if it should be kept or deleted
             if existing_writes_keys:
                 for write_key in existing_writes_keys:
@@ -503,11 +507,11 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
                     # The key format is checkpoint_write:thread_id:checkpoint_ns:checkpoint_id:task_id:idx
                     if len(key_parts) >= 5:
                         key_checkpoint_id = key_parts[3]
-                        
+
                         # If the write is for a different checkpoint_id, delete it
                         if key_checkpoint_id != checkpoint_id:
                             await pipeline.delete(write_key)
-            
+
             # Add new writes to the pipeline
             upsert_case = all(w[0] in WRITES_IDX_MAP for w in writes)
             for write_obj in writes_objects:
@@ -518,13 +522,15 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
                     task_id,
                     write_obj["idx"],
                 )
-                
+
                 if upsert_case:
                     # For upsert case, we need to check if the key exists (outside the pipeline)
                     exists = await self._redis.exists(key)
                     if exists:
                         # Update existing key
-                        await pipeline.json().set(key, "$.channel", write_obj["channel"])
+                        await pipeline.json().set(
+                            key, "$.channel", write_obj["channel"]
+                        )
                         await pipeline.json().set(key, "$.type", write_obj["type"])
                         await pipeline.json().set(key, "$.blob", write_obj["blob"])
                     else:
@@ -533,16 +539,16 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
                 else:
                     # For shallow implementation, always set the full object
                     await pipeline.json().set(key, "$", write_obj)
-                    
+
             # Execute all operations atomically
             await pipeline.execute()
-            
+
         except asyncio.CancelledError:
             # Handle cancellation/interruption
             # Pipeline will be automatically discarded
             # Either all operations succeed or none do
             raise
-            
+
         except Exception as e:
             # Re-raise other exceptions
             raise e
@@ -740,13 +746,25 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
     def _make_shallow_redis_checkpoint_key(thread_id: str, checkpoint_ns: str) -> str:
         """Create a key for shallow checkpoints using only thread_id and checkpoint_ns."""
         return REDIS_KEY_SEPARATOR.join([CHECKPOINT_PREFIX, thread_id, checkpoint_ns])
-        
+
     @staticmethod
-    def _make_shallow_redis_checkpoint_blob_key_pattern(thread_id: str, checkpoint_ns: str) -> str:
+    def _make_shallow_redis_checkpoint_blob_key_pattern(
+        thread_id: str, checkpoint_ns: str
+    ) -> str:
         """Create a pattern to match all blob keys for a thread and namespace."""
-        return REDIS_KEY_SEPARATOR.join([CHECKPOINT_BLOB_PREFIX, thread_id, checkpoint_ns]) + ":*"
-        
+        return (
+            REDIS_KEY_SEPARATOR.join([CHECKPOINT_BLOB_PREFIX, thread_id, checkpoint_ns])
+            + ":*"
+        )
+
     @staticmethod
-    def _make_shallow_redis_checkpoint_writes_key_pattern(thread_id: str, checkpoint_ns: str) -> str:
+    def _make_shallow_redis_checkpoint_writes_key_pattern(
+        thread_id: str, checkpoint_ns: str
+    ) -> str:
         """Create a pattern to match all writes keys for a thread and namespace."""
-        return REDIS_KEY_SEPARATOR.join([CHECKPOINT_WRITE_PREFIX, thread_id, checkpoint_ns]) + ":*"
+        return (
+            REDIS_KEY_SEPARATOR.join(
+                [CHECKPOINT_WRITE_PREFIX, thread_id, checkpoint_ns]
+            )
+            + ":*"
+        )

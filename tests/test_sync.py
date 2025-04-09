@@ -336,12 +336,12 @@ def test_from_conn_string_cleanup(redis_url: str) -> None:
 def test_client_info_setting(redis_url: str, monkeypatch) -> None:
     """Test that client_setinfo is called with correct library information."""
     from langgraph.checkpoint.redis.version import __full_lib_name__
-    
+
     # Create a mock to track if client_setinfo was called with our library name
     client_info_called = False
     lib_calls = []
     original_client_setinfo = Redis.client_setinfo
-    
+
     def mock_client_setinfo(self, key, value):
         nonlocal client_info_called, lib_calls
         if key == "LIB-NAME":
@@ -351,59 +351,60 @@ def test_client_info_setting(redis_url: str, monkeypatch) -> None:
             if __full_lib_name__ in value:
                 client_info_called = True
         return original_client_setinfo(self, key, value)
-    
+
     # Apply the mock
     monkeypatch.setattr(Redis, "client_setinfo", mock_client_setinfo)
-    
+
     # Test client info setting when creating a new saver
     with RedisSaver.from_conn_string(redis_url) as saver:
         # Call set_client_info directly to ensure it's called
         saver.set_client_info()
-    
+
     # Print debug info
     print(f"Library name values seen: {lib_calls}")
-    
+
     # Verify client_setinfo was called with our library info
     assert client_info_called, "client_setinfo was not called with our library name"
 
 
 def test_client_info_fallback_to_echo(redis_url: str, monkeypatch) -> None:
     """Test that when client_setinfo is not available, fall back to echo."""
-    from langgraph.checkpoint.redis.version import __full_lib_name__
     from redis.exceptions import ResponseError
-    
+
+    from langgraph.checkpoint.redis.version import __full_lib_name__
+
     # Create a Redis client directly first - this bypasses RedisVL validation
     client = Redis.from_url(redis_url)
-    
+
     # Remove client_setinfo to simulate older Redis version
     def mock_client_setinfo(self, key, value):
         raise ResponseError("ERR unknown command")
-    
+
     # Track if echo was called with our lib name
     echo_called = False
     echo_messages = []
     original_echo = Redis.echo
-    
+
     def mock_echo(self, message):
         nonlocal echo_called, echo_messages
         echo_messages.append(message)
         if __full_lib_name__ in message:
             echo_called = True
         return original_echo(self, message)
-    
+
     # Apply the mocks
     monkeypatch.setattr(Redis, "client_setinfo", mock_client_setinfo)
     monkeypatch.setattr(Redis, "echo", mock_echo)
-    
+
     try:
         # Test direct fallback without RedisVL interference
         with RedisSaver.from_conn_string(redis_client=client) as saver:
             # Force another call to set_client_info
             saver.set_client_info()
-            
+
         # Print debug info
         print(f"Echo messages seen: {echo_messages}")
-        
+
         # Verify echo was called as fallback with our library info
         assert echo_called, "echo was not called as fallback with our library name"
     finally:
@@ -413,21 +414,21 @@ def test_client_info_fallback_to_echo(redis_url: str, monkeypatch) -> None:
 def test_client_info_graceful_failure(redis_url: str, monkeypatch) -> None:
     """Test graceful failure when both client_setinfo and echo fail."""
     from redis.exceptions import ResponseError
-    
+
     # Create a Redis client directly first - this bypasses RedisVL validation
     client = Redis.from_url(redis_url)
-    
+
     # Simulate failures for both methods
     def mock_client_setinfo(self, key, value):
         raise ResponseError("ERR unknown command")
-    
+
     def mock_echo(self, message):
         raise ResponseError("ERR broken connection")
-    
+
     # Apply the mocks
     monkeypatch.setattr(Redis, "client_setinfo", mock_client_setinfo)
     monkeypatch.setattr(Redis, "echo", mock_echo)
-    
+
     try:
         # Should not raise any exceptions when both methods fail
         with RedisSaver.from_conn_string(redis_client=client) as saver:
@@ -542,6 +543,7 @@ def tools() -> List[BaseTool]:
 def mock_llm() -> Any:
     """Create a mock LLM for testing without requiring API keys."""
     from unittest.mock import MagicMock
+
     # Create a mock that can be used in place of a real LLM
     mock = MagicMock()
     mock.invoke.return_value = "This is a mock response from the LLM"
@@ -552,22 +554,25 @@ def mock_llm() -> Any:
 def mock_agent() -> Any:
     """Create a mock agent that creates checkpoints without requiring a real LLM."""
     from unittest.mock import MagicMock
-    
+
     # Create a mock agent that returns a dummy response
     mock = MagicMock()
-    
+
     # Set the invoke method to also create a fake chat session
     def mock_invoke(messages, config):
         # Return a dummy response that mimics a chat conversation
         return {
             "messages": [
-                ("human", messages.get("messages", [("human", "default message")])[0][1]),
+                (
+                    "human",
+                    messages.get("messages", [("human", "default message")])[0][1],
+                ),
                 ("ai", "I'll help you with that"),
                 ("tool", "get_weather"),
-                ("ai", "The weather looks good")
+                ("ai", "The weather looks good"),
             ]
         }
-    
+
     mock.invoke = mock_invoke
     return mock
 
@@ -578,10 +583,10 @@ def test_sync_redis_checkpointer(
     """Test RedisSaver checkpoint functionality using a mock agent."""
     with RedisSaver.from_conn_string(redis_url) as checkpointer:
         checkpointer.setup()
-        
+
         # Use the mock agent instead of creating a real one
         graph = mock_agent
-        
+
         # Use a unique thread_id
         thread_id = f"test-{uuid4()}"
 
@@ -593,7 +598,7 @@ def test_sync_redis_checkpointer(
                 "checkpoint_id": "",
             }
         }
-        
+
         # Create a checkpoint manually to simulate what would happen during agent execution
         checkpoint = {
             "id": str(uuid4()),
@@ -604,23 +609,20 @@ def test_sync_redis_checkpointer(
                     ("human", "what's the weather in sf?"),
                     ("ai", "I'll check the weather for you"),
                     ("tool", "get_weather(city='sf')"),
-                    ("ai", "It's always sunny in sf")
+                    ("ai", "It's always sunny in sf"),
                 ]
             },
             "channel_versions": {"messages": "1"},
             "versions_seen": {},
             "pending_sends": [],
         }
-        
+
         # Store the checkpoint
         next_config = checkpointer.put(
-            config, 
-            checkpoint,
-            {"source": "test", "step": 1},
-            {"messages": "1"}
+            config, checkpoint, {"source": "test", "step": 1}, {"messages": "1"}
         )
-        
-        # Verify next_config has the right structure 
+
+        # Verify next_config has the right structure
         assert "configurable" in next_config
         assert "thread_id" in next_config["configurable"]
 
@@ -664,12 +666,12 @@ def test_root_graph_checkpoint(
     """
     with RedisSaver.from_conn_string(redis_url) as checkpointer:
         checkpointer.setup()
-        
+
         # Use a unique thread_id
         thread_id = f"root-graph-{uuid4()}"
-        
+
         # Create a config with checkpoint_id and checkpoint_ns
-        # For a root graph test, we need to add an empty checkpoint_ns 
+        # For a root graph test, we need to add an empty checkpoint_ns
         # since that's how real root graphs work
         config: RunnableConfig = {
             "configurable": {
@@ -677,7 +679,7 @@ def test_root_graph_checkpoint(
                 "checkpoint_ns": "",  # Empty string is valid
             }
         }
-        
+
         # Create a checkpoint manually to simulate what would happen during agent execution
         checkpoint = {
             "id": str(uuid4()),
@@ -685,40 +687,37 @@ def test_root_graph_checkpoint(
             "v": 1,
             "channel_values": {
                 "messages": [
-                    ("human", "what's the weather in sf?"), 
+                    ("human", "what's the weather in sf?"),
                     ("ai", "I'll check the weather for you"),
                     ("tool", "get_weather(city='sf')"),
-                    ("ai", "It's always sunny in sf")
+                    ("ai", "It's always sunny in sf"),
                 ]
             },
             "channel_versions": {"messages": "1"},
             "versions_seen": {},
             "pending_sends": [],
         }
-        
+
         # Store the checkpoint
         next_config = checkpointer.put(
-            config, 
-            checkpoint,
-            {"source": "test", "step": 1},
-            {"messages": "1"}
+            config, checkpoint, {"source": "test", "step": 1}, {"messages": "1"}
         )
-        
+
         # Verify the checkpoint was stored
         assert next_config is not None
-        
+
         # Test retrieving the checkpoint with a root graph config
         # that doesn't have checkpoint_id or checkpoint_ns
         latest = checkpointer.get(config)
-        
+
         # This is the key test - verify we can retrieve checkpoints
         # when called from a root graph configuration
         assert latest is not None
         assert all(
             k in latest
             for k in [
-                "v", 
-                "ts", 
+                "v",
+                "ts",
                 "id",
                 "channel_values",
                 "channel_versions",
