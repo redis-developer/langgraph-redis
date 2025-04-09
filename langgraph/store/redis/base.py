@@ -252,15 +252,18 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
         """Set client info for Redis monitoring."""
         from redis.exceptions import ResponseError
 
-        from langgraph.checkpoint.redis.version import __full_lib_name__
+        from langgraph.checkpoint.redis.version import __redisvl_version__
+
+        # Create the client info string with only the redisvl version
+        client_info = f"redis-py(redisvl_v{__redisvl_version__})"
 
         try:
             # Try to use client_setinfo command if available
-            self._redis.client_setinfo("LIB-NAME", __full_lib_name__)  # type: ignore
+            self._redis.client_setinfo("LIB-NAME", client_info)  # type: ignore
         except (ResponseError, AttributeError):
             # Fall back to a simple echo if client_setinfo is not available
             try:
-                self._redis.echo(__full_lib_name__)
+                self._redis.echo(client_info)
             except Exception:
                 # Silently fail if even echo doesn't work
                 pass
@@ -269,16 +272,19 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
         """Set client info for Redis monitoring asynchronously."""
         from redis.exceptions import ResponseError
 
-        from langgraph.checkpoint.redis.version import __full_lib_name__
+        from langgraph.checkpoint.redis.version import __redisvl_version__
+
+        # Create the client info string with only the redisvl version
+        client_info = f"redis-py(redisvl_v{__redisvl_version__})"
 
         try:
             # Try to use client_setinfo command if available
-            await self._redis.client_setinfo("LIB-NAME", __full_lib_name__)  # type: ignore
+            await self._redis.client_setinfo("LIB-NAME", client_info)  # type: ignore
         except (ResponseError, AttributeError):
             # Fall back to a simple echo if client_setinfo is not available
             try:
                 # Call with await to ensure it's an async call
-                echo_result = self._redis.echo(__full_lib_name__)
+                echo_result = self._redis.echo(client_info)
                 if hasattr(echo_result, "__await__"):
                     await echo_result
             except Exception:
