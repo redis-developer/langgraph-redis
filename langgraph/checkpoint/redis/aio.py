@@ -384,7 +384,24 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         metadata: CheckpointMetadata,
         new_versions: ChannelVersions,
     ) -> RunnableConfig:
-        """Store a checkpoint to Redis."""
+        """Store a checkpoint to Redis with proper transaction handling.
+        
+        This method ensures that all Redis operations are performed atomically
+        using Redis transactions. In case of interruption (asyncio.CancelledError),
+        the transaction will be aborted, ensuring consistency.
+        
+        Args:
+            config: The config to associate with the checkpoint
+            checkpoint: The checkpoint data to store
+            metadata: Additional metadata to save with the checkpoint
+            new_versions: New channel versions as of this write
+            
+        Returns:
+            Updated configuration after storing the checkpoint
+            
+        Raises:
+            asyncio.CancelledError: If the operation is cancelled/interrupted
+        """
         configurable = config["configurable"].copy()
 
         thread_id = configurable.pop("thread_id")
@@ -410,46 +427,63 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             }
         }
 
-        # Store checkpoint data
-        checkpoint_data = {
-            "thread_id": storage_safe_thread_id,
-            "checkpoint_ns": storage_safe_checkpoint_ns,
-            "checkpoint_id": storage_safe_checkpoint_id,
-            "parent_checkpoint_id": storage_safe_checkpoint_id,
-            "checkpoint": self._dump_checkpoint(copy),
-            "metadata": self._dump_metadata(metadata),
-        }
-
-        # store at top-level for filters in list()
-        if all(key in metadata for key in ["source", "step"]):
-            checkpoint_data["source"] = metadata["source"]
-            checkpoint_data["step"] = metadata["step"]  # type: ignore
-
-        await self.checkpoints_index.load(
-            [checkpoint_data],
-            keys=[
-                BaseRedisSaver._make_redis_checkpoint_key(
-                    storage_safe_thread_id,
-                    storage_safe_checkpoint_ns,
-                    storage_safe_checkpoint_id,
-                )
-            ],
-        )
-
-        # Store blob values
-        blobs = self._dump_blobs(
-            storage_safe_thread_id,
-            storage_safe_checkpoint_ns,
-            copy.get("channel_values", {}),
-            new_versions,
-        )
-
-        if blobs:
-            # Unzip the list of tuples into separate lists for keys and data
-            keys, data = zip(*blobs)
-            await self.checkpoint_blobs_index.load(list(data), keys=list(keys))
-
-        return next_config
+        # Store checkpoint data with transaction handling
+        try:
+            # Create a pipeline with transaction=True for atomicity
+            pipeline = self._redis.pipeline(transaction=True)
+            
+            # Store checkpoint data
+            checkpoint_data = {
+                "thread_id": storage_safe_thread_id,
+                "checkpoint_ns": storage_safe_checkpoint_ns,
+                "checkpoint_id": storage_safe_checkpoint_id,
+                "parent_checkpoint_id": storage_safe_checkpoint_id,
+                "checkpoint": self._dump_checkpoint(copy),
+                "metadata": self._dump_metadata(metadata),
+            }
+    
+            # store at top-level for filters in list()
+            if all(key in metadata for key in ["source", "step"]):
+                checkpoint_data["source"] = metadata["source"]
+                checkpoint_data["step"] = metadata["step"]  # type: ignore
+            
+            # Prepare checkpoint key
+            checkpoint_key = BaseRedisSaver._make_redis_checkpoint_key(
+                storage_safe_thread_id,
+                storage_safe_checkpoint_ns,
+                storage_safe_checkpoint_id,
+            )
+            
+            # Add checkpoint data to Redis
+            await pipeline.json().set(checkpoint_key, "$", checkpoint_data)
+    
+            # Store blob values
+            blobs = self._dump_blobs(
+                storage_safe_thread_id,
+                storage_safe_checkpoint_ns,
+                copy.get("channel_values", {}),
+                new_versions,
+            )
+    
+            if blobs:
+                # Add all blob operations to the pipeline
+                for key, data in blobs:
+                    await pipeline.json().set(key, "$", data)
+            
+            # Execute all operations atomically
+            await pipeline.execute()
+            
+            return next_config
+            
+        except asyncio.CancelledError:
+            # Handle cancellation/interruption
+            # Pipeline will be automatically discarded
+            # Either all operations succeed or none do
+            raise
+            
+        except Exception as e:
+            # Re-raise other exceptions
+            raise e
 
     async def aput_writes(
         self,
@@ -458,14 +492,23 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         task_id: str,
         task_path: str = "",
     ) -> None:
-        """Store intermediate writes linked to a checkpoint using Redis JSON.
+        """Store intermediate writes linked to a checkpoint using Redis JSON with transaction handling.
+
+        This method uses Redis pipeline with transaction=True to ensure atomicity of all
+        write operations. In case of interruption, all operations will be aborted.
 
         Args:
             config (RunnableConfig): Configuration of the related checkpoint.
             writes (List[Tuple[str, Any]]): List of writes to store.
             task_id (str): Identifier for the task creating the writes.
             task_path (str): Path of the task creating the writes.
+            
+        Raises:
+            asyncio.CancelledError: If the operation is cancelled/interrupted
         """
+        if not writes:
+            return
+            
         thread_id = config["configurable"]["thread_id"]
         checkpoint_ns = config["configurable"].get("checkpoint_ns", "")
         checkpoint_id = config["configurable"]["checkpoint_id"]
@@ -487,7 +530,14 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             }
             writes_objects.append(write_obj)
 
+        try:
+            # Use a transaction pipeline for atomicity
+            pipeline = self._redis.pipeline(transaction=True)
+            
+            # Determine if this is an upsert case
             upsert_case = all(w[0] in WRITES_IDX_MAP for w in writes)
+            
+            # Add all write operations to the pipeline
             for write_obj in writes_objects:
                 key = self._make_redis_checkpoint_writes_key(
                     thread_id,
@@ -496,10 +546,36 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
                     task_id,
                     write_obj["idx"],  # type: ignore[arg-type]
                 )
-                tx = partial(
-                    _write_obj_tx, key=key, write_obj=write_obj, upsert_case=upsert_case
-                )
-                await self._redis.transaction(tx, key)
+                
+                if upsert_case:
+                    # For upsert case, we need to check if the key exists and update differently
+                    exists = await self._redis.exists(key)
+                    if exists:
+                        # Update existing key
+                        await pipeline.json().set(key, "$.channel", write_obj["channel"])
+                        await pipeline.json().set(key, "$.type", write_obj["type"])
+                        await pipeline.json().set(key, "$.blob", write_obj["blob"])
+                    else:
+                        # Create new key
+                        await pipeline.json().set(key, "$", write_obj)
+                else:
+                    # For non-upsert case, only set if key doesn't exist
+                    exists = await self._redis.exists(key)
+                    if not exists:
+                        await pipeline.json().set(key, "$", write_obj)
+            
+            # Execute all operations atomically
+            await pipeline.execute()
+            
+        except asyncio.CancelledError:
+            # Handle cancellation/interruption 
+            # Pipeline will be automatically discarded
+            # Either all operations succeed or none do
+            raise
+            
+        except Exception as e:
+            # Re-raise other exceptions
+            raise e
 
     def put_writes(
         self,

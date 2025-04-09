@@ -526,7 +526,9 @@ async def test_async_store_with_memory_persistence(redis_url: str) -> None:
         # Verify the data was written
         item = await store1.aget(namespace, key)
         assert item is not None
-        assert item.value == value
+        # Use approximate comparison for floating point values
+        assert item.value["data"] == value["data"]
+        assert abs(item.value["timestamp"] - value["timestamp"]) < 0.001
     
     # Second store instance - verify data persisted
     async with AsyncRedisStore.from_conn_string(redis_url) as store2:
@@ -535,7 +537,9 @@ async def test_async_store_with_memory_persistence(redis_url: str) -> None:
         # Read the item with the new store instance
         persisted_item = await store2.aget(namespace, key)
         assert persisted_item is not None
-        assert persisted_item.value == value
+        # Use approximate comparison for floating point values
+        assert persisted_item.value["data"] == value["data"]
+        assert abs(persisted_item.value["timestamp"] - value["timestamp"]) < 0.001
         
         # Cleanup
         await store2.adelete(namespace, key)

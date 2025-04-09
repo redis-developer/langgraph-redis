@@ -541,7 +541,7 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
             (
                 # Use the base Redis checkpoint blob key to include version, enabling version tracking
                 BaseRedisSaver._make_redis_checkpoint_blob_key(
-                    thread_id, checkpoint_ns, k, ver
+                    thread_id, checkpoint_ns, k, str(ver)
                 ),
                 {
                     "thread_id": thread_id,
