@@ -9,7 +9,7 @@ on:
 
   schedule:
     - cron: "0 2 * * *"  # 2 AM UTC nightly
-  
+
   workflow_dispatch:
 
 
@@ -44,6 +44,7 @@ jobs:
 
     - name: Install dependencies
       run: |
+        pip wheel --no-cache-dir --use-pep517 ml-dtypes
         poetry install --all-extras
 
     - name: Set Redis image name
