@@ -280,19 +280,19 @@ async def test_from_conn_string_cleanup(redis_url: str) -> None:
         assert await ext_client.ping()  # Should still work
     finally:
         await ext_client.aclose()  # type: ignore[attr-defined]
-        
-        
+
+
 @pytest.mark.asyncio
 async def test_async_client_info_setting(redis_url: str, monkeypatch) -> None:
     """Test that async client_setinfo is called with correct library information."""
     from langgraph.checkpoint.redis.version import __full_lib_name__
-    
+
     # Track if client_setinfo was called with the right parameters
     client_info_called = False
-    
+
     # Store the original method
     original_client_setinfo = Redis.client_setinfo
-    
+
     # Create a mock function for client_setinfo
     async def mock_client_setinfo(self, key, value):
         nonlocal client_info_called
@@ -302,15 +302,15 @@ async def test_async_client_info_setting(redis_url: str, monkeypatch) -> None:
             client_info_called = True
         # Call original method to ensure normal function
         return await original_client_setinfo(self, key, value)
-    
+
     # Apply the mock
     monkeypatch.setattr(Redis, "client_setinfo", mock_client_setinfo)
-    
+
     # Test client info setting when creating a new saver with async context manager
     async with AsyncRedisSaver.from_conn_string(redis_url) as saver:
         await saver.asetup()
         # __aenter__ should have called aset_client_info
-    
+
     # Verify client_setinfo was called with our library info
     assert client_info_called, "client_setinfo was not called with our library name"
 
@@ -318,53 +318,56 @@ async def test_async_client_info_setting(redis_url: str, monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_async_client_info_fallback_to_echo(redis_url: str, monkeypatch) -> None:
     """Test that async client_setinfo falls back to echo when not available."""
-    from langgraph.checkpoint.redis.version import __full_lib_name__
     from redis.exceptions import ResponseError
-    
+
+    from langgraph.checkpoint.redis.version import __full_lib_name__
+
     # Remove client_setinfo to simulate older Redis version
     async def mock_client_setinfo(self, key, value):
         raise ResponseError("ERR unknown command")
-    
+
     # Track if echo was called as fallback
     echo_called = False
     original_echo = Redis.echo
-    
+
     # Create mock for echo
     async def mock_echo(self, message):
         nonlocal echo_called
         echo_called = True
         assert message == __full_lib_name__
         return await original_echo(self, message)
-    
+
     # Apply the mocks
     monkeypatch.setattr(Redis, "client_setinfo", mock_client_setinfo)
     monkeypatch.setattr(Redis, "echo", mock_echo)
-    
+
     # Test client info setting with fallback
     async with AsyncRedisSaver.from_conn_string(redis_url) as saver:
         await saver.asetup()
         # __aenter__ should have called aset_client_info with fallback to echo
-    
+
     # Verify echo was called as fallback
-    assert echo_called, "echo was not called as fallback when async client_setinfo failed"
+    assert (
+        echo_called
+    ), "echo was not called as fallback when async client_setinfo failed"
 
 
 @pytest.mark.asyncio
 async def test_async_client_info_graceful_failure(redis_url: str, monkeypatch) -> None:
     """Test that async client info setting fails gracefully when all methods fail."""
     from redis.exceptions import ResponseError
-    
+
     # Simulate failures for both methods
     async def mock_client_setinfo(self, key, value):
         raise ResponseError("ERR unknown command")
-    
+
     async def mock_echo(self, message):
         raise ResponseError("ERR connection broken")
-    
+
     # Apply the mocks
     monkeypatch.setattr(Redis, "client_setinfo", mock_client_setinfo)
     monkeypatch.setattr(Redis, "echo", mock_echo)
-    
+
     # Should not raise any exceptions when both methods fail
     try:
         async with AsyncRedisSaver.from_conn_string(redis_url) as saver:
@@ -634,6 +637,7 @@ def tools() -> List[BaseTool]:
 def mock_llm() -> Any:
     """Create a mock LLM for testing without requiring API keys."""
     from unittest.mock import MagicMock
+
     # Create a mock that can be used in place of a real LLM
     mock = MagicMock()
     mock.ainvoke.return_value = "This is a mock response from the LLM"
@@ -644,22 +648,25 @@ def mock_llm() -> Any:
 def mock_agent() -> Any:
     """Create a mock agent that creates checkpoints without requiring a real LLM."""
     from unittest.mock import MagicMock
-    
+
     # Create a mock agent that returns a dummy response
     mock = MagicMock()
-    
+
     # Set the ainvoke method to also create a fake chat session
     async def mock_ainvoke(messages, config):
         # Return a dummy response that mimics a chat conversation
         return {
             "messages": [
-                ("human", messages.get("messages", [("human", "default message")])[0][1]),
+                (
+                    "human",
+                    messages.get("messages", [("human", "default message")])[0][1],
+                ),
                 ("ai", "I'll help you with that"),
                 ("tool", "get_weather"),
-                ("ai", "The weather looks good")
+                ("ai", "The weather looks good"),
             ]
         }
-    
+
     mock.ainvoke = mock_ainvoke
     return mock
 
@@ -671,10 +678,10 @@ async def test_async_redis_checkpointer(
     """Test AsyncRedisSaver checkpoint functionality using a mock agent."""
     async with AsyncRedisSaver.from_conn_string(redis_url) as checkpointer:
         await checkpointer.asetup()
-        
+
         # Use the mock agent instead of creating a real one
         graph = mock_agent
-        
+
         # Use a unique thread_id
         thread_id = f"test-{uuid4()}"
 
@@ -686,7 +693,7 @@ async def test_async_redis_checkpointer(
                 "checkpoint_id": "",
             }
         }
-        
+
         # Create a checkpoint manually to simulate what would happen during agent execution
         checkpoint = {
             "id": str(uuid4()),
@@ -697,23 +704,20 @@ async def test_async_redis_checkpointer(
                     ("human", "what's the weather in sf?"),
                     ("ai", "I'll check the weather for you"),
                     ("tool", "get_weather(city='sf')"),
-                    ("ai", "It's always sunny in sf")
+                    ("ai", "It's always sunny in sf"),
                 ]
             },
             "channel_versions": {"messages": "1"},
             "versions_seen": {},
             "pending_sends": [],
         }
-        
+
         # Store the checkpoint
         next_config = await checkpointer.aput(
-            config, 
-            checkpoint,
-            {"source": "test", "step": 1},
-            {"messages": "1"}
+            config, checkpoint, {"source": "test", "step": 1}, {"messages": "1"}
         )
-        
-        # Verify next_config has the right structure 
+
+        # Verify next_config has the right structure
         assert "configurable" in next_config
         assert "thread_id" in next_config["configurable"]
 
@@ -758,12 +762,12 @@ async def test_root_graph_checkpoint(
     """
     async with AsyncRedisSaver.from_conn_string(redis_url) as checkpointer:
         await checkpointer.asetup()
-        
+
         # Use a unique thread_id
         thread_id = f"root-graph-{uuid4()}"
-        
+
         # Create a config with checkpoint_id and checkpoint_ns
-        # For a root graph test, we need to add an empty checkpoint_ns 
+        # For a root graph test, we need to add an empty checkpoint_ns
         # since that's how real root graphs work
         config: RunnableConfig = {
             "configurable": {
@@ -771,7 +775,7 @@ async def test_root_graph_checkpoint(
                 "checkpoint_ns": "",  # Empty string is valid
             }
         }
-        
+
         # Create a checkpoint manually to simulate what would happen during agent execution
         checkpoint = {
             "id": str(uuid4()),
@@ -779,40 +783,37 @@ async def test_root_graph_checkpoint(
             "v": 1,
             "channel_values": {
                 "messages": [
-                    ("human", "what's the weather in sf?"), 
+                    ("human", "what's the weather in sf?"),
                     ("ai", "I'll check the weather for you"),
                     ("tool", "get_weather(city='sf')"),
-                    ("ai", "It's always sunny in sf")
+                    ("ai", "It's always sunny in sf"),
                 ]
             },
             "channel_versions": {"messages": "1"},
             "versions_seen": {},
             "pending_sends": [],
         }
-        
+
         # Store the checkpoint
         next_config = await checkpointer.aput(
-            config, 
-            checkpoint,
-            {"source": "test", "step": 1},
-            {"messages": "1"}
+            config, checkpoint, {"source": "test", "step": 1}, {"messages": "1"}
         )
-        
+
         # Verify the checkpoint was stored
         assert next_config is not None
-        
+
         # Test retrieving the checkpoint with a root graph config
         # that doesn't have checkpoint_id or checkpoint_ns
         latest = await checkpointer.aget(config)
-        
+
         # This is the key test - verify we can retrieve checkpoints
         # when called from a root graph configuration
         assert latest is not None
         assert all(
             k in latest
             for k in [
-                "v", 
-                "ts", 
+                "v",
+                "ts",
                 "id",
                 "channel_values",
                 "channel_versions",
