@@ -476,9 +476,16 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
 
     @staticmethod
     def _parse_redis_checkpoint_writes_key(redis_key: str) -> dict:
-        namespace, thread_id, checkpoint_ns, checkpoint_id, task_id, idx = (
-            redis_key.split(REDIS_KEY_SEPARATOR)
-        )
+        parts = redis_key.split(REDIS_KEY_SEPARATOR)
+        # Ensure we have at least 6 parts
+        if len(parts) < 6:
+            raise ValueError(
+                f"Expected at least 6 parts in Redis key, got {len(parts)}"
+            )
+
+        # Extract the first 6 parts regardless of total length
+        namespace, thread_id, checkpoint_ns, checkpoint_id, task_id, idx = parts[:6]
+
         if namespace != CHECKPOINT_WRITE_PREFIX:
             raise ValueError("Expected checkpoint key to start with 'checkpoint'")
 

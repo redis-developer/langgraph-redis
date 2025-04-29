@@ -5,12 +5,11 @@ RUN useradd -m jupyter
 
 WORKDIR /home/jupyter/workspace
 
-# Copy the library files (only copy the checkpoint-redis directory)
-COPY ./libs/checkpoint-redis /home/jupyter/workspace/libs/checkpoint-redis
+# Copy notebook files to the workspace
+COPY ./ /home/jupyter/workspace/examples/
 
-# Create necessary directories and set permissions
-RUN mkdir -p /home/jupyter/workspace/libs/checkpoint-redis/examples && \
-    chown -R jupyter:jupyter /home/jupyter/workspace
+# Set permissions
+RUN chown -R jupyter:jupyter /home/jupyter/workspace
 
 # Switch to non-root user
 USER jupyter
@@ -21,15 +20,17 @@ ENV PATH="/home/jupyter/venv/bin:$PATH"
 
 # Install dependencies
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir langgraph>=0.3.0 && \
-    pip install --no-cache-dir -e /home/jupyter/workspace/libs/checkpoint-redis && \
-    pip install --no-cache-dir jupyter redis>=5.2.1 redisvl>=0.5.1 langchain-openai langchain-anthropic python-ulid
+    pip install --no-cache-dir "httpx>=0.24.0,<1.0.0" && \
+    pip install --no-cache-dir "langgraph>=0.3.0" && \
+    pip install --no-cache-dir "langgraph-checkpoint-redis>=0.0.4" && \
+    pip install --no-cache-dir jupyter "redis>=5.2.1" "redisvl>=0.5.1" langchain-openai langchain-anthropic python-ulid
+# Note: Notebook-specific dependencies will be installed in the notebook cells as needed
 
 # Set the working directory to the examples folder
-WORKDIR /home/jupyter/workspace/libs/checkpoint-redis/examples
+WORKDIR /home/jupyter/workspace/examples
 
 # Expose Jupyter port
 EXPOSE 8888
 
 # Start Jupyter Notebook with checkpoints disabled
-CMD ["jupyter", "notebook", "--ip=0.0.0.0", "--port=8888", "--no-browser", "--NotebookApp.token=''", "--NotebookApp.password=''", "--NotebookApp.allow_root=True", "--NotebookApp.disable_check_xsrf=True", "--FileContentsManager.checkpoints_kwargs={'root_dir':'/tmp/checkpoints'}"]
+CMD ["jupyter", "notebook", "--ip=0.0.0.0", "--port=8888", "--no-browser", "--ServerApp.token=''", "--ServerApp.password=''", "--ServerApp.allow_root=True", "--NotebookApp.disable_check_xsrf=True", "--FileContentsManager.checkpoints_kwargs={'root_dir':'/tmp/checkpoints'}"]
