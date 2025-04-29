@@ -383,6 +383,7 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         checkpoint: Checkpoint,
         metadata: CheckpointMetadata,
         new_versions: ChannelVersions,
+        stream_mode: str = "values",
     ) -> RunnableConfig:
         """Store a checkpoint to Redis with proper transaction handling.
 
@@ -395,6 +396,7 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             checkpoint: The checkpoint data to store
             metadata: Additional metadata to save with the checkpoint
             new_versions: New channel versions as of this write
+            stream_mode: The streaming mode being used (values, updates, etc.)
 
         Returns:
             Updated configuration after storing the checkpoint
@@ -476,9 +478,45 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             return next_config
 
         except asyncio.CancelledError:
-            # Handle cancellation/interruption
-            # Pipeline will be automatically discarded
-            # Either all operations succeed or none do
+            # Handle cancellation/interruption based on stream mode
+            if stream_mode in ("values", "messages"):
+                # For these modes, we want to ensure any partial state is committed
+                # to allow resuming the stream later
+                try:
+                    # Try to commit what we have so far
+                    pipeline = self._redis.pipeline(transaction=True)
+
+                    # Store minimal checkpoint data
+                    checkpoint_data = {
+                        "thread_id": storage_safe_thread_id,
+                        "checkpoint_ns": storage_safe_checkpoint_ns,
+                        "checkpoint_id": storage_safe_checkpoint_id,
+                        "parent_checkpoint_id": storage_safe_checkpoint_id,
+                        "checkpoint": self._dump_checkpoint(copy),
+                        "metadata": self._dump_metadata(
+                            {
+                                **metadata,
+                                "interrupted": True,
+                                "stream_mode": stream_mode,
+                            }
+                        ),
+                    }
+
+                    # Prepare checkpoint key
+                    checkpoint_key = BaseRedisSaver._make_redis_checkpoint_key(
+                        storage_safe_thread_id,
+                        storage_safe_checkpoint_ns,
+                        storage_safe_checkpoint_id,
+                    )
+
+                    # Add checkpoint data to Redis
+                    await pipeline.json().set(checkpoint_key, "$", checkpoint_data)
+                    await pipeline.execute()
+                except Exception:
+                    # If this also fails, we just propagate the original cancellation
+                    pass
+
+            # Re-raise the cancellation
             raise
 
         except Exception as e:

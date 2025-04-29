@@ -629,6 +629,7 @@ async def test_async_redis_store_graceful_failure(redis_url: str, monkeypatch) -
 
     # Create a patch for the RedisVL validation to avoid it using echo
     from redisvl.redis.connection import RedisConnectionFactory
+
     original_validate = RedisConnectionFactory.validate_async_redis
 
     # Create a replacement validation function that doesn't use echo
