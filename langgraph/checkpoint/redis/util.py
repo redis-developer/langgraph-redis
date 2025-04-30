@@ -7,6 +7,8 @@ sentinel values are from the first run of the graph, so this should
 generally be correct.
 """
 
+from typing import Union
+
 EMPTY_STRING_SENTINEL = "__empty__"
 EMPTY_ID_SENTINEL = "00000000-0000-0000-0000-000000000000"
 
@@ -81,3 +83,22 @@ def from_storage_safe_id(value: str) -> str:
         return ""
     else:
         return value
+
+
+def safely_decode(key: Union[bytes, str]) -> str:
+    """
+    Safely decode a Redis key regardless of whether it's bytes or string.
+
+    This function handles both cases:
+    - When Redis client is configured with decode_responses=False (returns bytes)
+    - When Redis client is configured with decode_responses=True (returns strings)
+
+    Args:
+        key: The Redis key, either bytes or string
+
+    Returns:
+        The decoded key as a string
+    """
+    if isinstance(key, bytes):
+        return key.decode()
+    return key

@@ -18,6 +18,7 @@ from langgraph.checkpoint.serde.base import SerializerProtocol
 from langgraph.checkpoint.serde.types import ChannelProtocol
 
 from langgraph.checkpoint.redis.util import (
+    safely_decode,
     to_storage_safe_id,
     to_storage_safe_str,
 )
@@ -479,20 +480,24 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
             None,
         )
 
-        # Cast the result to List[bytes] to help type checker
-        matching_keys: List[bytes] = self._redis.keys(pattern=writes_key)  # type: ignore[assignment]
+        # The result from self._redis.keys() can vary based on client implementation
+        matching_keys = self._redis.keys(pattern=writes_key)
 
         parsed_keys = [
-            BaseRedisSaver._parse_redis_checkpoint_writes_key(key.decode())
+            BaseRedisSaver._parse_redis_checkpoint_writes_key(safely_decode(key))
             for key in matching_keys
         ]
+        # Create key-parsed_key pairs and sort them
+        # Using type ignore because Redis client implementations can vary
+        pairs = [(key, parsed_key) for key, parsed_key in zip(matching_keys, parsed_keys)]  # type: ignore
+        sorted_pairs = sorted(pairs, key=lambda x: x[1]["idx"])
+
+        # Build the dictionary with the sorted pairs
         pending_writes = BaseRedisSaver._load_writes(
             self.serde,
             {
                 (parsed_key["task_id"], parsed_key["idx"]): self._redis.json().get(key)
-                for key, parsed_key in sorted(
-                    zip(matching_keys, parsed_keys), key=lambda x: x[1]["idx"]
-                )
+                for key, parsed_key in sorted_pairs
             },
         )
         return pending_writes

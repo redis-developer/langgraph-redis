@@ -26,6 +26,7 @@ from langgraph.checkpoint.redis.base import (
     REDIS_KEY_SEPARATOR,
     BaseRedisSaver,
 )
+from langgraph.checkpoint.redis.util import safely_decode
 
 SCHEMAS = [
     {
@@ -175,7 +176,7 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         # Process each existing blob key to determine if it should be kept or deleted
         if existing_blob_keys:
             for blob_key in existing_blob_keys:
-                key_parts = blob_key.decode().split(REDIS_KEY_SEPARATOR)
+                key_parts = safely_decode(blob_key).split(REDIS_KEY_SEPARATOR)
                 # The key format is checkpoint_blob:thread_id:checkpoint_ns:channel:version
                 if len(key_parts) >= 5:
                     channel = key_parts[3]
@@ -490,7 +491,7 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         # Process each existing writes key to determine if it should be kept or deleted
         if existing_writes_keys:
             for write_key in existing_writes_keys:
-                key_parts = write_key.decode().split(REDIS_KEY_SEPARATOR)
+                key_parts = safely_decode(write_key).split(REDIS_KEY_SEPARATOR)
                 # The key format is checkpoint_write:thread_id:checkpoint_ns:checkpoint_id:task_id:idx
                 if len(key_parts) >= 5:
                     key_checkpoint_id = key_parts[3]

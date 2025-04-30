@@ -34,6 +34,7 @@ from langgraph.checkpoint.redis.base import (
     REDIS_KEY_SEPARATOR,
     BaseRedisSaver,
 )
+from langgraph.checkpoint.redis.util import safely_decode
 
 SCHEMAS = [
     {
@@ -246,7 +247,7 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             # Process each existing blob key to determine if it should be kept or deleted
             if existing_blob_keys:
                 for blob_key in existing_blob_keys:
-                    key_parts = blob_key.decode().split(REDIS_KEY_SEPARATOR)
+                    key_parts = safely_decode(blob_key).split(REDIS_KEY_SEPARATOR)
                     # The key format is checkpoint_blob:thread_id:checkpoint_ns:channel:version
                     if len(key_parts) >= 5:
                         channel = key_parts[3]
@@ -503,7 +504,7 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             # Process each existing writes key to determine if it should be kept or deleted
             if existing_writes_keys:
                 for write_key in existing_writes_keys:
-                    key_parts = write_key.decode().split(REDIS_KEY_SEPARATOR)
+                    key_parts = safely_decode(write_key).split(REDIS_KEY_SEPARATOR)
                     # The key format is checkpoint_write:thread_id:checkpoint_ns:checkpoint_id:task_id:idx
                     if len(key_parts) >= 5:
                         key_checkpoint_id = key_parts[3]
@@ -648,11 +649,20 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         writes_key = BaseRedisSaver._make_redis_checkpoint_writes_key(
             thread_id, checkpoint_ns, checkpoint_id, "*", None
         )
+        # The result from self._redis.keys() can vary based on client implementation
         matching_keys = await self._redis.keys(pattern=writes_key)
+
         parsed_keys = [
-            BaseRedisSaver._parse_redis_checkpoint_writes_key(key.decode())
+            BaseRedisSaver._parse_redis_checkpoint_writes_key(safely_decode(key))
             for key in matching_keys
         ]
+        # Create key-parsed_key pairs and sort them
+        pairs = [
+            (key, parsed_key) for key, parsed_key in zip(matching_keys, parsed_keys)
+        ]
+        sorted_pairs = sorted(pairs, key=lambda x: x[1]["idx"])
+
+        # Build the dictionary with the sorted pairs
         pending_writes = BaseRedisSaver._load_writes(
             self.serde,
             {
@@ -660,9 +670,7 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
                     parsed_key["task_id"],
                     parsed_key["idx"],
                 ): await self._redis.json().get(key)
-                for key, parsed_key in sorted(
-                    zip(matching_keys, parsed_keys), key=lambda x: x[1]["idx"]
-                )
+                for key, parsed_key in sorted_pairs
             },
         )
         return pending_writes

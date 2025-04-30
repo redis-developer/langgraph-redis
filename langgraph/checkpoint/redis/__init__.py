@@ -27,6 +27,7 @@ from langgraph.checkpoint.redis.util import (
     EMPTY_ID_SENTINEL,
     from_storage_safe_id,
     from_storage_safe_str,
+    safely_decode,
     to_storage_safe_id,
     to_storage_safe_str,
 )
@@ -518,4 +519,5 @@ __all__ = [
     "BaseRedisSaver",
     "ShallowRedisSaver",
     "AsyncShallowRedisSaver",
+    "safely_decode",
 ]

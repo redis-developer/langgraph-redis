@@ -33,6 +33,7 @@ from langgraph.checkpoint.redis.util import (
     EMPTY_ID_SENTINEL,
     from_storage_safe_id,
     from_storage_safe_str,
+    safely_decode,
     to_storage_safe_id,
     to_storage_safe_str,
 )
@@ -823,11 +824,20 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             "*",
             None,
         )
+        # The result from self._redis.keys() can vary based on client implementation
         matching_keys = await self._redis.keys(pattern=writes_key)
+
         parsed_keys = [
-            BaseRedisSaver._parse_redis_checkpoint_writes_key(key.decode())
+            BaseRedisSaver._parse_redis_checkpoint_writes_key(safely_decode(key))
             for key in matching_keys
         ]
+        # Create key-parsed_key pairs and sort them
+        pairs = [
+            (key, parsed_key) for key, parsed_key in zip(matching_keys, parsed_keys)
+        ]
+        sorted_pairs = sorted(pairs, key=lambda x: x[1]["idx"])
+
+        # Build the dictionary with the sorted pairs
         pending_writes = BaseRedisSaver._load_writes(
             self.serde,
             {
@@ -835,9 +845,7 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
                     parsed_key["task_id"],
                     parsed_key["idx"],
                 ): await self._redis.json().get(key)
-                for key, parsed_key in sorted(
-                    zip(matching_keys, parsed_keys), key=lambda x: x[1]["idx"]
-                )
+                for key, parsed_key in sorted_pairs
             },
         )
         return pending_writes
