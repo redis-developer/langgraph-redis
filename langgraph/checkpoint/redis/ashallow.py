@@ -108,11 +108,13 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         *,
         redis_client: Optional[AsyncRedis] = None,
         connection_args: Optional[dict[str, Any]] = None,
+        ttl: Optional[dict[str, Any]] = None,
     ) -> None:
         super().__init__(
             redis_url=redis_url,
             redis_client=redis_client,
             connection_args=connection_args,
+            ttl=ttl,
         )
         self.loop = asyncio.get_running_loop()
 
@@ -149,12 +151,14 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         *,
         redis_client: Optional[AsyncRedis] = None,
         connection_args: Optional[dict[str, Any]] = None,
+        ttl: Optional[dict[str, Any]] = None,
     ) -> AsyncIterator[AsyncShallowRedisSaver]:
         """Create a new AsyncShallowRedisSaver instance."""
         async with cls(
             redis_url=redis_url,
             redis_client=redis_client,
             connection_args=connection_args,
+            ttl=ttl,
         ) as saver:
             yield saver
 
@@ -279,6 +283,22 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             # Execute all operations atomically
             await pipeline.execute()
 
+            # Apply TTL to checkpoint and blob keys if configured
+            if self.ttl_config and "default_ttl" in self.ttl_config:
+                # Prepare the list of keys to apply TTL
+                ttl_keys = [checkpoint_key]
+                if blobs:
+                    ttl_keys.extend([key for key, _ in blobs])
+
+                # Apply TTL to all keys
+                ttl_minutes = self.ttl_config.get("default_ttl")
+                ttl_seconds = int(ttl_minutes * 60)
+
+                ttl_pipeline = self._redis.pipeline()
+                for key in ttl_keys:
+                    ttl_pipeline.expire(key, ttl_seconds)
+                await ttl_pipeline.execute()
+
             return next_config
 
         except asyncio.CancelledError:
@@ -388,6 +408,35 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             return None
 
         doc = results.docs[0]
+
+        # If refresh_on_read is enabled, refresh TTL for checkpoint key and related keys
+        if self.ttl_config and self.ttl_config.get("refresh_on_read"):
+            thread_id = getattr(doc, "thread_id", "")
+            checkpoint_ns = getattr(doc, "checkpoint_ns", "")
+
+            # Get the checkpoint key
+            checkpoint_key = AsyncShallowRedisSaver._make_shallow_redis_checkpoint_key(
+                thread_id, checkpoint_ns
+            )
+
+            # Get all blob keys related to this checkpoint
+            blob_key_pattern = (
+                AsyncShallowRedisSaver._make_shallow_redis_checkpoint_blob_key_pattern(
+                    thread_id, checkpoint_ns
+                )
+            )
+            blob_keys = await self._redis.keys(blob_key_pattern)
+            blob_keys = [key.decode() for key in blob_keys]
+
+            # Apply TTL
+            ttl_minutes = self.ttl_config.get("default_ttl")
+            if ttl_minutes is not None:
+                ttl_seconds = int(ttl_minutes * 60)
+                pipeline = self._redis.pipeline()
+                pipeline.expire(checkpoint_key, ttl_seconds)
+                for key in blob_keys:
+                    pipeline.expire(key, ttl_seconds)
+                await pipeline.execute()
 
         checkpoint = json.loads(doc["$.checkpoint"])
 

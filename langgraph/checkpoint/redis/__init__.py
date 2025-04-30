@@ -253,15 +253,16 @@ class RedisSaver(BaseRedisSaver[Redis, SearchIndex]):
             checkpoint_data["source"] = metadata["source"]
             checkpoint_data["step"] = metadata["step"]  # type: ignore
 
+        # Create the checkpoint key
+        checkpoint_key = BaseRedisSaver._make_redis_checkpoint_key(
+            storage_safe_thread_id,
+            storage_safe_checkpoint_ns,
+            storage_safe_checkpoint_id,
+        )
+
         self.checkpoints_index.load(
             [checkpoint_data],
-            keys=[
-                BaseRedisSaver._make_redis_checkpoint_key(
-                    storage_safe_thread_id,
-                    storage_safe_checkpoint_ns,
-                    storage_safe_checkpoint_id,
-                )
-            ],
+            keys=[checkpoint_key],
         )
 
         # Store blob values.
@@ -272,10 +273,16 @@ class RedisSaver(BaseRedisSaver[Redis, SearchIndex]):
             new_versions,
         )
 
+        blob_keys = []
         if blobs:
             # Unzip the list of tuples into separate lists for keys and data
             keys, data = zip(*blobs)
-            self.checkpoint_blobs_index.load(list(data), keys=list(keys))
+            blob_keys = list(keys)
+            self.checkpoint_blobs_index.load(list(data), keys=blob_keys)
+
+        # Apply TTL to checkpoint and blob keys if configured
+        if self.ttl_config and "default_ttl" in self.ttl_config:
+            self._apply_ttl_to_keys(checkpoint_key, blob_keys)
 
         return next_config
 
@@ -331,6 +338,33 @@ class RedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         doc_checkpoint_ns = from_storage_safe_str(doc["checkpoint_ns"])
         doc_checkpoint_id = from_storage_safe_id(doc["checkpoint_id"])
         doc_parent_checkpoint_id = from_storage_safe_id(doc["parent_checkpoint_id"])
+
+        # If refresh_on_read is enabled, refresh TTL for checkpoint key and related keys
+        if self.ttl_config and self.ttl_config.get("refresh_on_read"):
+            # Get the checkpoint key
+            checkpoint_key = BaseRedisSaver._make_redis_checkpoint_key(
+                to_storage_safe_id(doc_thread_id),
+                to_storage_safe_str(doc_checkpoint_ns),
+                to_storage_safe_id(doc_checkpoint_id),
+            )
+
+            # Get all blob keys related to this checkpoint
+            from langgraph.checkpoint.redis.base import (
+                CHECKPOINT_BLOB_PREFIX,
+                CHECKPOINT_WRITE_PREFIX,
+            )
+
+            # Get the blob keys
+            blob_key_pattern = f"{CHECKPOINT_BLOB_PREFIX}:{to_storage_safe_id(doc_thread_id)}:{to_storage_safe_str(doc_checkpoint_ns)}:*"
+            blob_keys = [key.decode() for key in self._redis.keys(blob_key_pattern)]
+
+            # Also get checkpoint write keys that should have the same TTL
+            write_key_pattern = f"{CHECKPOINT_WRITE_PREFIX}:{to_storage_safe_id(doc_thread_id)}:{to_storage_safe_str(doc_checkpoint_ns)}:{to_storage_safe_id(doc_checkpoint_id)}:*"
+            write_keys = [key.decode() for key in self._redis.keys(write_key_pattern)]
+
+            # Apply TTL to checkpoint, blob keys, and write keys
+            all_related_keys = blob_keys + write_keys
+            self._apply_ttl_to_keys(checkpoint_key, all_related_keys)
 
         # Fetch channel_values
         channel_values = self.get_channel_values(
