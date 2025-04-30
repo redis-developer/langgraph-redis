@@ -3,8 +3,7 @@ import binascii
 import json
 import random
 from abc import abstractmethod
-from collections.abc import Sequence
-from typing import Any, Generic, List, Optional, cast
+from typing import Any, Dict, Generic, List, Optional, Sequence, Tuple, cast
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import (
@@ -100,11 +99,15 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         redis_url: Optional[str] = None,
         *,
         redis_client: Optional[RedisClientType] = None,
-        connection_args: Optional[dict[str, Any]] = None,
+        connection_args: Optional[Dict[str, Any]] = None,
+        ttl: Optional[Dict[str, Any]] = None,
     ) -> None:
         super().__init__(serde=JsonPlusRedisSerializer())
         if redis_url is None and redis_client is None:
             raise ValueError("Either redis_url or redis_client must be provided")
+
+        # Store TTL configuration
+        self.ttl_config = ttl
 
         self.configure_client(
             redis_url=redis_url,
@@ -128,7 +131,7 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         self,
         redis_url: Optional[str] = None,
         redis_client: Optional[RedisClientType] = None,
-        connection_args: Optional[dict[str, Any]] = None,
+        connection_args: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Configure the Redis client."""
         pass
@@ -180,11 +183,46 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         self.checkpoint_blobs_index.create(overwrite=False)
         self.checkpoint_writes_index.create(overwrite=False)
 
+    def _apply_ttl_to_keys(
+        self,
+        main_key: str,
+        related_keys: Optional[List[str]] = None,
+        ttl_minutes: Optional[float] = None,
+    ) -> Any:
+        """Apply Redis native TTL to keys.
+
+        Args:
+            main_key: The primary Redis key
+            related_keys: Additional Redis keys that should expire at the same time
+            ttl_minutes: Time-to-live in minutes, overrides default_ttl if provided
+
+        Returns:
+            Result of the Redis operation
+        """
+        if ttl_minutes is None:
+            # Check if there's a default TTL in config
+            if self.ttl_config and "default_ttl" in self.ttl_config:
+                ttl_minutes = self.ttl_config.get("default_ttl")
+
+        if ttl_minutes is not None:
+            ttl_seconds = int(ttl_minutes * 60)
+            pipeline = self._redis.pipeline()
+
+            # Set TTL for main key
+            pipeline.expire(main_key, ttl_seconds)
+
+            # Set TTL for related keys
+            if related_keys:
+                for key in related_keys:
+                    pipeline.expire(key, ttl_seconds)
+
+            return pipeline.execute()
+
     def _load_checkpoint(
         self,
-        checkpoint: dict[str, Any],
-        channel_values: dict[str, Any],
-        pending_sends: list[Any],
+        checkpoint: Dict[str, Any],
+        channel_values: Dict[str, Any],
+        pending_sends: List[Any],
     ) -> Checkpoint:
         if not checkpoint:
             return {}
@@ -218,7 +256,7 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
             if v["type"] != "empty"
         }
 
-    def _get_type_and_blob(self, value: Any) -> tuple[str, Optional[bytes]]:
+    def _get_type_and_blob(self, value: Any) -> Tuple[str, Optional[bytes]]:
         """Helper to get type and blob from a value."""
         t, b = self.serde.dumps_typed(value)
         return t, b
@@ -227,9 +265,9 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         self,
         thread_id: str,
         checkpoint_ns: str,
-        values: dict[str, Any],
+        values: Dict[str, Any],
         versions: ChannelVersions,
-    ) -> list[tuple[str, dict[str, Any]]]:
+    ) -> List[Tuple[str, Dict[str, Any]]]:
         """Convert blob data for Redis storage."""
         if not versions:
             return []
@@ -337,7 +375,7 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
             # Handle both malformed base64 data and incorrect input types
             return blob.encode() if isinstance(blob, str) else blob
 
-    def _load_writes_from_redis(self, write_key: str) -> list[tuple[str, str, Any]]:
+    def _load_writes_from_redis(self, write_key: str) -> List[Tuple[str, str, Any]]:
         """Load writes from Redis JSON storage by key."""
         if not write_key:
             return []

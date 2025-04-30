@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Any, List, Optional, Tuple, cast
+from typing import Any, Dict, Iterator, List, Optional, Tuple, cast
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import (
@@ -42,19 +41,21 @@ class RedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         redis_url: Optional[str] = None,
         *,
         redis_client: Optional[Redis] = None,
-        connection_args: Optional[dict[str, Any]] = None,
+        connection_args: Optional[Dict[str, Any]] = None,
+        ttl: Optional[Dict[str, Any]] = None,
     ) -> None:
         super().__init__(
             redis_url=redis_url,
             redis_client=redis_client,
             connection_args=connection_args,
+            ttl=ttl,
         )
 
     def configure_client(
         self,
         redis_url: Optional[str] = None,
         redis_client: Optional[Redis] = None,
-        connection_args: Optional[dict[str, Any]] = None,
+        connection_args: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Configure the Redis client."""
         self._owns_its_client = redis_client is None
@@ -395,7 +396,8 @@ class RedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         redis_url: Optional[str] = None,
         *,
         redis_client: Optional[Redis] = None,
-        connection_args: Optional[dict[str, Any]] = None,
+        connection_args: Optional[Dict[str, Any]] = None,
+        ttl: Optional[Dict[str, Any]] = None,
     ) -> Iterator[RedisSaver]:
         """Create a new RedisSaver instance."""
         saver: Optional[RedisSaver] = None
@@ -404,6 +406,7 @@ class RedisSaver(BaseRedisSaver[Redis, SearchIndex]):
                 redis_url=redis_url,
                 redis_client=redis_client,
                 connection_args=connection_args,
+                ttl=ttl,
             )
 
             yield saver
@@ -414,7 +417,7 @@ class RedisSaver(BaseRedisSaver[Redis, SearchIndex]):
 
     def get_channel_values(
         self, thread_id: str, checkpoint_ns: str = "", checkpoint_id: str = ""
-    ) -> dict[str, Any]:
+    ) -> Dict[str, Any]:
         """Retrieve channel_values dictionary with properly constructed message objects."""
         storage_safe_thread_id = to_storage_safe_id(thread_id)
         storage_safe_checkpoint_ns = to_storage_safe_str(checkpoint_ns)

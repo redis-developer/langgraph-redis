@@ -5,11 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from functools import partial
 from types import TracebackType
-from typing import Any, List, Optional, Sequence, Tuple, Type, cast
+from typing import Any, AsyncIterator, Dict, List, Optional, Sequence, Tuple, Type, cast
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import (
@@ -42,7 +41,7 @@ from langgraph.checkpoint.redis.util import (
 async def _write_obj_tx(
     pipe: Pipeline,
     key: str,
-    write_obj: dict[str, Any],
+    write_obj: Dict[str, Any],
     upsert_case: bool,
 ) -> None:
     exists: int = await pipe.exists(key)
@@ -73,12 +72,14 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         redis_url: Optional[str] = None,
         *,
         redis_client: Optional[AsyncRedis] = None,
-        connection_args: Optional[dict[str, Any]] = None,
+        connection_args: Optional[Dict[str, Any]] = None,
+        ttl: Optional[Dict[str, Any]] = None,
     ) -> None:
         super().__init__(
             redis_url=redis_url,
             redis_client=redis_client,
             connection_args=connection_args,
+            ttl=ttl,
         )
         self.loop = asyncio.get_running_loop()
 
@@ -86,7 +87,7 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         self,
         redis_url: Optional[str] = None,
         redis_client: Optional[AsyncRedis] = None,
-        connection_args: Optional[dict[str, Any]] = None,
+        connection_args: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Configure the Redis client."""
         self._owns_its_client = redis_client is None
@@ -706,18 +707,20 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         redis_url: Optional[str] = None,
         *,
         redis_client: Optional[AsyncRedis] = None,
-        connection_args: Optional[dict[str, Any]] = None,
+        connection_args: Optional[Dict[str, Any]] = None,
+        ttl: Optional[Dict[str, Any]] = None,
     ) -> AsyncIterator[AsyncRedisSaver]:
         async with cls(
             redis_url=redis_url,
             redis_client=redis_client,
             connection_args=connection_args,
+            ttl=ttl,
         ) as saver:
             yield saver
 
     async def aget_channel_values(
         self, thread_id: str, checkpoint_ns: str = "", checkpoint_id: str = ""
-    ) -> dict[str, Any]:
+    ) -> Dict[str, Any]:
         """Retrieve channel_values dictionary with properly constructed message objects."""
         storage_safe_thread_id = to_storage_safe_id(thread_id)
         storage_safe_checkpoint_ns = to_storage_safe_str(checkpoint_ns)
@@ -767,7 +770,7 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
 
     async def _aload_pending_sends(
         self, thread_id: str, checkpoint_ns: str = "", parent_checkpoint_id: str = ""
-    ) -> list[tuple[str, bytes]]:
+    ) -> List[Tuple[str, bytes]]:
         """Load pending sends for a parent checkpoint.
 
         Args:
