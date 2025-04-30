@@ -82,11 +82,13 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         *,
         redis_client: Optional[Redis] = None,
         connection_args: Optional[dict[str, Any]] = None,
+        ttl: Optional[dict[str, Any]] = None,
     ) -> None:
         super().__init__(
             redis_url=redis_url,
             redis_client=redis_client,
             connection_args=connection_args,
+            ttl=ttl,
         )
 
     @classmethod
@@ -97,6 +99,7 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         *,
         redis_client: Optional[Redis] = None,
         connection_args: Optional[dict[str, Any]] = None,
+        ttl: Optional[dict[str, Any]] = None,
     ) -> Iterator[ShallowRedisSaver]:
         """Create a new ShallowRedisSaver instance."""
         saver: Optional[ShallowRedisSaver] = None
@@ -105,6 +108,7 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
                 redis_url=redis_url,
                 redis_client=redis_client,
                 connection_args=connection_args,
+                ttl=ttl,
             )
             yield saver
         finally:
@@ -203,10 +207,19 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
             new_versions,
         )
 
+        blob_keys = []
         if blobs:
             # Unzip the list of tuples into separate lists for keys and data
             keys, data = zip(*blobs)
-            self.checkpoint_blobs_index.load(list(data), keys=list(keys))
+            blob_keys = list(keys)
+            self.checkpoint_blobs_index.load(list(data), keys=blob_keys)
+
+        # Apply TTL to checkpoint and blob keys if configured
+        checkpoint_key = ShallowRedisSaver._make_shallow_redis_checkpoint_key(
+            thread_id, checkpoint_ns
+        )
+        if self.ttl_config and "default_ttl" in self.ttl_config:
+            self._apply_ttl_to_keys(checkpoint_key, blob_keys)
 
         return next_config
 
@@ -357,6 +370,27 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
             return None
 
         doc = results.docs[0]
+
+        # If refresh_on_read is enabled, refresh TTL for checkpoint key and related keys
+        if self.ttl_config and self.ttl_config.get("refresh_on_read"):
+            thread_id = getattr(doc, "thread_id", "")
+            checkpoint_ns = getattr(doc, "checkpoint_ns", "")
+
+            # Get the checkpoint key
+            checkpoint_key = ShallowRedisSaver._make_shallow_redis_checkpoint_key(
+                thread_id, checkpoint_ns
+            )
+
+            # Get all blob keys related to this checkpoint
+            blob_key_pattern = (
+                ShallowRedisSaver._make_shallow_redis_checkpoint_blob_key_pattern(
+                    thread_id, checkpoint_ns
+                )
+            )
+            blob_keys = [key.decode() for key in self._redis.keys(blob_key_pattern)]
+
+            # Apply TTL
+            self._apply_ttl_to_keys(checkpoint_key, blob_keys)
 
         checkpoint = json.loads(doc["$.checkpoint"])
 

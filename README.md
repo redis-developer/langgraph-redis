@@ -148,6 +148,25 @@ with ShallowRedisSaver.from_conn_string("redis://localhost:6379") as checkpointe
     # ... rest of the implementation follows similar pattern
 ```
 
+## Redis Checkpoint TTL Support
+
+Both Redis checkpoint savers and stores support Time-To-Live (TTL) functionality for automatic key expiration:
+
+```python
+# Configure TTL for checkpoint savers
+ttl_config = {
+    "default_ttl": 60,     # Default TTL in minutes
+    "refresh_on_read": True,  # Refresh TTL when checkpoint is read
+}
+
+# Use with any checkpoint saver implementation
+with RedisSaver.from_conn_string("redis://localhost:6379", ttl=ttl_config) as checkpointer:
+    checkpointer.setup()
+    # Use the checkpointer...
+```
+
+This makes it easy to manage storage and ensure ephemeral data is automatically cleaned up.
+
 ## Redis Stores
 
 Redis Stores provide a persistent key-value store with optional vector search capabilities.
@@ -169,9 +188,19 @@ index_config = {
     "fields": ["text"],  # Fields to index
 }
 
-with RedisStore.from_conn_string("redis://localhost:6379", index=index_config) as store:
+# With TTL configuration
+ttl_config = {
+    "default_ttl": 60,     # Default TTL in minutes
+    "refresh_on_read": True,  # Refresh TTL when store entries are read
+}
+
+with RedisStore.from_conn_string(
+    "redis://localhost:6379", 
+    index=index_config,
+    ttl=ttl_config
+) as store:
     store.setup()
-    # Use the store with vector search capabilities...
+    # Use the store with vector search and TTL capabilities...
 ```
 
 ### Async Implementation
@@ -180,7 +209,16 @@ with RedisStore.from_conn_string("redis://localhost:6379", index=index_config) a
 from langgraph.store.redis.aio import AsyncRedisStore
 
 async def main():
-    async with AsyncRedisStore.from_conn_string("redis://localhost:6379") as store:
+    # TTL also works with async implementations
+    ttl_config = {
+        "default_ttl": 60,     # Default TTL in minutes
+        "refresh_on_read": True,  # Refresh TTL when store entries are read
+    }
+    
+    async with AsyncRedisStore.from_conn_string(
+        "redis://localhost:6379", 
+        ttl=ttl_config
+    ) as store:
         await store.setup()
         # Use the store asynchronously...
 
@@ -234,6 +272,16 @@ For Redis Stores with vector search:
 
 1. **Store Index**: Main key-value store
 2. **Vector Index**: Optional vector embeddings for similarity search
+
+### TTL Implementation
+
+Both Redis checkpoint savers and stores leverage Redis's native key expiration:
+
+- **Native Redis TTL**: Uses Redis's built-in `EXPIRE` command
+- **Automatic Cleanup**: Redis automatically removes expired keys
+- **Configurable Default TTL**: Set a default TTL for all keys in minutes
+- **TTL Refresh on Read**: Optionally refresh TTL when keys are accessed
+- **Applied to All Related Keys**: TTL is applied to all related keys (checkpoint, blobs, writes)
 
 ## Contributing
 

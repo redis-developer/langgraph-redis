@@ -192,6 +192,45 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         doc_checkpoint_id = from_storage_safe_id(doc["checkpoint_id"])
         doc_parent_checkpoint_id = from_storage_safe_id(doc["parent_checkpoint_id"])
 
+        # If refresh_on_read is enabled, refresh TTL for checkpoint key and related keys
+        if self.ttl_config and self.ttl_config.get("refresh_on_read"):
+            # Get the checkpoint key
+            checkpoint_key = BaseRedisSaver._make_redis_checkpoint_key(
+                to_storage_safe_id(doc_thread_id),
+                to_storage_safe_str(doc_checkpoint_ns),
+                to_storage_safe_id(doc_checkpoint_id),
+            )
+
+            # Get all blob keys related to this checkpoint
+            from langgraph.checkpoint.redis.base import (
+                CHECKPOINT_BLOB_PREFIX,
+                CHECKPOINT_WRITE_PREFIX,
+            )
+
+            # Get the blob keys
+            blob_key_pattern = f"{CHECKPOINT_BLOB_PREFIX}:{to_storage_safe_id(doc_thread_id)}:{to_storage_safe_str(doc_checkpoint_ns)}:*"
+            blob_keys = await self._redis.keys(blob_key_pattern)
+            blob_keys = [key.decode() for key in blob_keys]
+
+            # Also get checkpoint write keys that should have the same TTL
+            write_key_pattern = f"{CHECKPOINT_WRITE_PREFIX}:{to_storage_safe_id(doc_thread_id)}:{to_storage_safe_str(doc_checkpoint_ns)}:{to_storage_safe_id(doc_checkpoint_id)}:*"
+            write_keys = await self._redis.keys(write_key_pattern)
+            write_keys = [key.decode() for key in write_keys]
+
+            # Apply TTL to checkpoint, blob keys, and write keys
+            ttl_minutes = self.ttl_config.get("default_ttl")
+            if ttl_minutes is not None:
+                ttl_seconds = int(ttl_minutes * 60)
+                pipeline = self._redis.pipeline()
+                pipeline.expire(checkpoint_key, ttl_seconds)
+
+                # Combine blob keys and write keys for TTL refresh
+                all_related_keys = blob_keys + write_keys
+                for key in all_related_keys:
+                    pipeline.expire(key, ttl_seconds)
+
+                await pipeline.execute()
+
         # Fetch channel_values
         channel_values = await self.aget_channel_values(
             thread_id=doc_thread_id,
@@ -476,6 +515,22 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             # Execute all operations atomically
             await pipeline.execute()
 
+            # Apply TTL to checkpoint and blob keys if configured
+            if self.ttl_config and "default_ttl" in self.ttl_config:
+                all_keys = (
+                    [checkpoint_key] + [key for key, _ in blobs]
+                    if blobs
+                    else [checkpoint_key]
+                )
+                ttl_minutes = self.ttl_config.get("default_ttl")
+                ttl_seconds = int(ttl_minutes * 60)
+
+                # Use a new pipeline for TTL operations
+                ttl_pipeline = self._redis.pipeline()
+                for key in all_keys:
+                    ttl_pipeline.expire(key, ttl_seconds)
+                await ttl_pipeline.execute()
+
             return next_config
 
         except asyncio.CancelledError:
@@ -575,6 +630,7 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
 
             # Determine if this is an upsert case
             upsert_case = all(w[0] in WRITES_IDX_MAP for w in writes)
+            created_keys = []
 
             # Add all write operations to the pipeline
             for write_obj in writes_objects:
@@ -599,14 +655,27 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
                     else:
                         # Create new key
                         await pipeline.json().set(key, "$", write_obj)
+                        created_keys.append(key)
                 else:
                     # For non-upsert case, only set if key doesn't exist
                     exists = await self._redis.exists(key)
                     if not exists:
                         await pipeline.json().set(key, "$", write_obj)
+                        created_keys.append(key)
 
             # Execute all operations atomically
             await pipeline.execute()
+
+            # Apply TTL to newly created keys
+            if created_keys and self.ttl_config and "default_ttl" in self.ttl_config:
+                ttl_minutes = self.ttl_config.get("default_ttl")
+                ttl_seconds = int(ttl_minutes * 60)
+
+                # Use a new pipeline for TTL operations
+                ttl_pipeline = self._redis.pipeline()
+                for key in created_keys:
+                    ttl_pipeline.expire(key, ttl_seconds)
+                await ttl_pipeline.execute()
 
         except asyncio.CancelledError:
             # Handle cancellation/interruption

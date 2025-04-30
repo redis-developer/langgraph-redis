@@ -102,6 +102,16 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         connection_args: Optional[Dict[str, Any]] = None,
         ttl: Optional[Dict[str, Any]] = None,
     ) -> None:
+        """Initialize Redis-backed checkpoint saver.
+
+        Args:
+            redis_url: Redis connection URL
+            redis_client: Redis client instance to use (alternative to redis_url)
+            connection_args: Additional arguments for Redis connection
+            ttl: Optional TTL configuration dict with optional keys:
+                - default_ttl: TTL in minutes for all checkpoint keys
+                - refresh_on_read: Whether to refresh TTL on reads
+        """
         super().__init__(serde=JsonPlusRedisSerializer())
         if redis_url is None and redis_client is None:
             raise ValueError("Either redis_url or redis_client must be provided")
@@ -183,10 +193,32 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         self.checkpoint_blobs_index.create(overwrite=False)
         self.checkpoint_writes_index.create(overwrite=False)
 
+    def _load_checkpoint(
+        self,
+        checkpoint: Dict[str, Any],
+        channel_values: Dict[str, Any],
+        pending_sends: List[Any],
+    ) -> Checkpoint:
+        if not checkpoint:
+            return {}
+
+        loaded = json.loads(checkpoint)  # type: ignore[arg-type]
+
+        # Note: TTL refresh is now handled in get_tuple() to ensure it works
+        # with all Redis operations, not just internal deserialization
+
+        return {
+            **loaded,
+            "pending_sends": [
+                self.serde.loads_typed((c.decode(), b)) for c, b in pending_sends or []
+            ],
+            "channel_values": channel_values,
+        }
+
     def _apply_ttl_to_keys(
         self,
         main_key: str,
-        related_keys: Optional[List[str]] = None,
+        related_keys: Optional[list[str]] = None,
         ttl_minutes: Optional[float] = None,
     ) -> Any:
         """Apply Redis native TTL to keys.
@@ -217,25 +249,6 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
                     pipeline.expire(key, ttl_seconds)
 
             return pipeline.execute()
-
-    def _load_checkpoint(
-        self,
-        checkpoint: Dict[str, Any],
-        channel_values: Dict[str, Any],
-        pending_sends: List[Any],
-    ) -> Checkpoint:
-        if not checkpoint:
-            return {}
-
-        loaded = json.loads(checkpoint)  # type: ignore[arg-type]
-
-        return {
-            **loaded,
-            "pending_sends": [
-                self.serde.loads_typed((c.decode(), b)) for c, b in pending_sends or []
-            ],
-            "channel_values": channel_values,
-        }
 
     def _dump_checkpoint(self, checkpoint: Checkpoint) -> dict[str, Any]:
         """Convert checkpoint to Redis format."""
@@ -436,6 +449,9 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
 
         # For each write, check existence and then perform appropriate operation
         with self._redis.json().pipeline(transaction=False) as pipeline:
+            # Keep track of keys we're creating
+            created_keys = []
+
             for write_obj in writes_objects:
                 key = self._make_redis_checkpoint_writes_key(
                     thread_id,
@@ -458,12 +474,20 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
                     else:
                         # For new records, set the complete object
                         pipeline.set(key, "$", write_obj)  # type: ignore[arg-type]
+                        created_keys.append(key)
                 else:
                     # INSERT case - only insert if doesn't exist
                     if not key_exists:
                         pipeline.set(key, "$", write_obj)  # type: ignore[arg-type]
+                        created_keys.append(key)
 
             pipeline.execute()
+
+            # Apply TTL to newly created keys
+            if created_keys and self.ttl_config and "default_ttl" in self.ttl_config:
+                self._apply_ttl_to_keys(
+                    created_keys[0], created_keys[1:] if len(created_keys) > 1 else None
+                )
 
     def _load_pending_writes(
         self, thread_id: str, checkpoint_ns: str, checkpoint_id: str
