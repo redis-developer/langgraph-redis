@@ -398,7 +398,7 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
     def _get_batch_search_queries(
         self,
         search_ops: Sequence[tuple[int, SearchOp]],
-    ) -> tuple[list[tuple[str, list]], list[tuple[int, str]]]:
+    ) -> tuple[list[tuple[str, list, int, int]], list[tuple[int, str]]]:
         """Convert search operations into Redis queries."""
         queries = []
         embedding_requests = []
@@ -413,8 +413,10 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
                 embedding_requests.append((idx, op.query))
 
             query = " ".join(filter_conditions) if filter_conditions else "*"
-            params = [op.limit, op.offset] if op.limit or op.offset else []
-            queries.append((query, params))
+            limit = op.limit if op.limit is not None else 10
+            offset = op.offset if op.offset is not None else 0
+            params = [limit, offset]
+            queries.append((query, params, limit, offset))
 
         return queries, embedding_requests
 

@@ -367,7 +367,7 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
             query_vectors = dict(zip([idx for idx, _ in embedding_requests], vectors))
 
         # Process each search operation
-        for (idx, op), (query_str, params) in zip(search_ops, queries):
+        for (idx, op), (query_str, params, limit, offset) in zip(search_ops, queries):
             if op.query and idx in query_vectors:
                 # Vector similarity search
                 vector = query_vectors[idx]
@@ -376,7 +376,7 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
                     vector_field_name="embedding",
                     filter_expression=f"@prefix:{_namespace_to_text(op.namespace_prefix)}*",
                     return_fields=["prefix", "key", "vector_distance"],
-                    num_results=op.limit,
+                    num_results=limit,  # Use the user-specified limit
                 )
                 vector_results = self.vector_index.query(vector_query)
 
@@ -469,8 +469,10 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
                 results[idx] = items
             else:
                 # Regular search
-                query = Query(query_str)
-                # Get all potential matches for filtering
+                # Create a query with LIMIT and OFFSET parameters
+                query = Query(query_str).paging(offset, limit)
+
+                # Execute search with limit and offset applied by Redis
                 res = self.store_index.search(query)
                 items = []
                 refresh_keys = []  # Track keys that need TTL refreshed
@@ -505,10 +507,7 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
 
                     items.append(_row_to_search_item(_decode_ns(data["prefix"]), data))
 
-                # Apply pagination after filtering
-                if params:
-                    limit, offset = params
-                    items = items[offset : offset + limit]
+                # Note: Pagination is now handled by Redis, no need to slice items manually
 
                 # Refresh TTL if requested
                 if op.refresh_ttl and refresh_keys and self.ttl_config:
