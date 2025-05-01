@@ -44,6 +44,7 @@ from langgraph.store.redis.base import (
     _namespace_to_text,
     _row_to_item,
     _row_to_search_item,
+    get_key_with_hash_tag,
 )
 
 from .token_unescaper import TokenUnescaper
@@ -209,7 +210,8 @@ class AsyncRedisStore(
 
         if ttl_minutes is not None:
             ttl_seconds = int(ttl_minutes * 60)
-            pipeline = self._redis.pipeline()
+            # In cluster mode, we must use transaction=False
+            pipeline = self._redis.pipeline(transaction=not self.cluster_mode)
 
             # Set TTL for main key
             await pipeline.expire(main_key, ttl_seconds)
@@ -428,9 +430,7 @@ class AsyncRedisStore(
 
                             # Also add vector keys for the same document
                             doc_uuid = doc_id.split(":")[-1]
-                            vector_key = (
-                                f"{STORE_VECTOR_PREFIX}{REDIS_KEY_SEPARATOR}{doc_uuid}"
-                            )
+                            vector_key = get_key_with_hash_tag(STORE_VECTOR_PREFIX, REDIS_KEY_SEPARATOR, doc_uuid, self.cluster_mode)
                             refresh_keys_by_idx[idx].append(vector_key)
 
         # Now refresh TTLs for any keys that need it
@@ -442,7 +442,8 @@ class AsyncRedisStore(
 
             if ttl_minutes is not None:
                 ttl_seconds = int(ttl_minutes * 60)
-                pipeline = self._redis.pipeline()
+                # In cluster mode, we must use transaction=False
+                pipeline = self._redis.pipeline(transaction=not self.cluster_mode)
 
                 for keys in refresh_keys_by_idx.values():
                     for key in keys:
@@ -544,7 +545,8 @@ class AsyncRedisStore(
             namespace = _namespace_to_text(op.namespace)
             query = f"@prefix:{namespace} @key:{{{_token_escaper.escape(op.key)}}}"
             results = await self.store_index.search(query)
-            pipeline = self._redis.pipeline()
+            # In cluster mode, we must use transaction=False
+            pipeline = self._redis.pipeline(transaction=not self.cluster_mode)
             for doc in results.docs:
                 pipeline.delete(doc.id)
 
@@ -572,7 +574,7 @@ class AsyncRedisStore(
                 doc_ids[(namespace, op.key)] = generated_doc_id
                 # Track TTL for this document if specified
                 if hasattr(op, "ttl") and op.ttl is not None:
-                    main_key = f"{STORE_PREFIX}{REDIS_KEY_SEPARATOR}{generated_doc_id}"
+                    main_key = get_key_with_hash_tag(STORE_PREFIX, REDIS_KEY_SEPARATOR, generated_doc_id, self.cluster_mode)
                     ttl_tracking[main_key] = ([], op.ttl)
 
         # Load store docs with explicit keys
@@ -586,7 +588,7 @@ class AsyncRedisStore(
                 doc.pop("expires_at", None)
 
             store_docs.append(doc)
-            redis_key = f"{STORE_PREFIX}{REDIS_KEY_SEPARATOR}{doc_id}"
+            redis_key = get_key_with_hash_tag(STORE_PREFIX, REDIS_KEY_SEPARATOR, doc_id, self.cluster_mode)
             store_keys.append(redis_key)
 
         if store_docs:
@@ -616,11 +618,11 @@ class AsyncRedisStore(
                         "updated_at": datetime.now(timezone.utc).timestamp(),
                     }
                 )
-                vector_key = f"{STORE_VECTOR_PREFIX}{REDIS_KEY_SEPARATOR}{doc_id}"
+                vector_key = get_key_with_hash_tag(STORE_VECTOR_PREFIX, REDIS_KEY_SEPARATOR, doc_id, self.cluster_mode)
                 vector_keys.append(vector_key)
 
                 # Add this vector key to the related keys list for TTL
-                main_key = f"{STORE_PREFIX}{REDIS_KEY_SEPARATOR}{doc_id}"
+                main_key = get_key_with_hash_tag(STORE_PREFIX, REDIS_KEY_SEPARATOR, doc_id, self.cluster_mode)
                 if main_key in ttl_tracking:
                     ttl_tracking[main_key][0].append(vector_key)
 
@@ -673,7 +675,9 @@ class AsyncRedisStore(
                         else getattr(doc, "id", None)
                     )
                     if doc_id:
-                        store_key = f"store:{doc_id.split(':')[1]}"  # Convert vector:ID to store:ID
+                        # Convert vector:ID to store:ID
+                        doc_uuid = doc_id.split(':')[1]
+                        store_key = get_key_with_hash_tag(STORE_PREFIX, REDIS_KEY_SEPARATOR, doc_uuid, self.cluster_mode)
                         result_map[store_key] = doc
                         pipeline.json().get(store_key)
 

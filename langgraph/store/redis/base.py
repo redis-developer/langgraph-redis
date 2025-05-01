@@ -41,6 +41,18 @@ REDIS_KEY_SEPARATOR = ":"
 STORE_PREFIX = "store"
 STORE_VECTOR_PREFIX = "store_vectors"
 
+def get_key_with_hash_tag(prefix: str, separator: str, id_value: str, use_hash_tag: bool = False) -> str:
+    """Create a Redis key with optional hash tag for cluster mode.
+
+    In Redis Cluster, keys with hash tags ensure they're stored in the same hash slot.
+    Hash tags are substrings enclosed in curly braces {}.
+    """
+    if use_hash_tag:
+        # Use hash tag to ensure related keys are in the same slot
+        return f"{prefix}{separator}{{{id_value}}}"
+    else:
+        return f"{prefix}{separator}{id_value}"
+
 # Schemas for Redis Search indices
 SCHEMAS = [
     {
@@ -106,6 +118,7 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
     vector_index: IndexType
     _ttl_sweeper_thread: Optional[threading.Thread] = None
     _ttl_stop_event: threading.Event | None = None
+    cluster_mode: bool = False
 
     SCHEMAS = SCHEMAS
 
@@ -132,7 +145,8 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
 
         if ttl_minutes is not None:
             ttl_seconds = int(ttl_minutes * 60)
-            pipeline = self._redis.pipeline()
+            # In cluster mode, we must use transaction=False
+            pipeline = self._redis.pipeline(transaction=not self.cluster_mode)
 
             # Set TTL for main key
             pipeline.expire(main_key, ttl_seconds)
@@ -192,6 +206,18 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
         self.index_config = index
         self.ttl_config = ttl  # type: ignore
         self.embeddings: Optional[Embeddings] = None
+
+        # Detect if Redis client is a cluster client
+        from redis.exceptions import ResponseError
+        try:
+            # Try to run a cluster command
+            # This will succeed for cluster clients and fail for non-cluster clients
+            self._redis.cluster("info")  # type: ignore
+            self.cluster_mode = True
+            logger.info("Redis cluster mode detected")
+        except (ResponseError, AttributeError):
+            self.cluster_mode = False
+            logger.debug("Redis standalone mode detected")
         if self.index_config:
             self.index_config = self.index_config.copy()
             self.embeddings = ensure_embeddings(
