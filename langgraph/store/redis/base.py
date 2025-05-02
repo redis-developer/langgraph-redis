@@ -41,7 +41,10 @@ REDIS_KEY_SEPARATOR = ":"
 STORE_PREFIX = "store"
 STORE_VECTOR_PREFIX = "store_vectors"
 
-def get_key_with_hash_tag(prefix: str, separator: str, id_value: str, use_hash_tag: bool = False) -> str:
+
+def get_key_with_hash_tag(
+    prefix: str, separator: str, id_value: str, use_hash_tag: bool = False
+) -> str:
     """Create a Redis key with optional hash tag for cluster mode.
 
     In Redis Cluster, keys with hash tags ensure they're stored in the same hash slot.
@@ -52,6 +55,7 @@ def get_key_with_hash_tag(prefix: str, separator: str, id_value: str, use_hash_t
         return f"{prefix}{separator}{{{id_value}}}"
     else:
         return f"{prefix}{separator}{id_value}"
+
 
 # Schemas for Redis Search indices
 SCHEMAS = [
@@ -209,10 +213,11 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
 
         # Detect if Redis client is a cluster client
         from redis.exceptions import ResponseError
+
         try:
             # Try to run a cluster command
             # This will succeed for cluster clients and fail for non-cluster clients
-            self._redis.cluster("info")  # type: ignore
+            self._redis.cluster("info")
             self.cluster_mode = True
             logger.info("Redis cluster mode detected")
         except (ResponseError, AttributeError):

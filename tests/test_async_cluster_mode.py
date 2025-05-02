@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 import asyncio
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 from redis.asyncio import Redis as AsyncRedis
 from redis.exceptions import ResponseError
 from ulid import ULID
 
 from langgraph.store.redis import AsyncRedisStore
-from langgraph.store.redis.base import get_key_with_hash_tag, STORE_PREFIX, REDIS_KEY_SEPARATOR, STORE_VECTOR_PREFIX
+from langgraph.store.redis.base import (
+    REDIS_KEY_SEPARATOR,
+    STORE_PREFIX,
+    STORE_VECTOR_PREFIX,
+    get_key_with_hash_tag,
+)
 
 
 class MockAsyncRedisCluster(AsyncRedis):
@@ -49,28 +55,34 @@ class MockAsyncRedisCluster(AsyncRedis):
         # Mock the pipeline's execute method
         async def execute():
             return []
+
         mock_pipeline.execute = execute
 
         # Mock the pipeline's expire method
         async def expire(key, ttl):
             self.expire_calls.append({"key": key, "ttl": ttl})
             return True
+
         mock_pipeline.expire = expire
 
         # Mock the pipeline's delete method
         async def delete(key):
             self.delete_calls.append({"key": key})
             return 1
+
         mock_pipeline.delete = delete
 
         # Mock the pipeline's json method
         def json():
             mock_json = AsyncMock()
+
             async def get(key):
                 self.json_get_calls.append({"key": key})
                 return {"key": key.split(":")[-1], "value": {"test": "data"}}
+
             mock_json.get = get
             return mock_json
+
         mock_pipeline.json = json
 
         return mock_pipeline
@@ -92,9 +104,11 @@ class MockAsyncRedisCluster(AsyncRedis):
     def json(self):
         """Mock json method."""
         mock = AsyncMock()
+
         async def get(key):
             self.json_get_calls.append({"key": key})
             return {"key": key.split(":")[-1], "value": {"test": "data"}}
+
         mock.get = get
         return mock
 
@@ -166,7 +180,9 @@ async def test_async_hash_tag_in_keys(async_cluster_store, mock_async_redis_clus
 
 
 @pytest.mark.asyncio
-async def test_async_pipeline_transaction_false(async_cluster_store, mock_async_redis_cluster):
+async def test_async_pipeline_transaction_false(
+    async_cluster_store, mock_async_redis_cluster
+):
     """Test that pipeline is created with transaction=False in cluster mode."""
     # Apply TTL to trigger pipeline creation
     await async_cluster_store._apply_ttl_to_keys("test_key", ["related_key"], 1.0)
@@ -174,7 +190,9 @@ async def test_async_pipeline_transaction_false(async_cluster_store, mock_async_
     # Check that pipeline was created with transaction=False
     assert len(mock_async_redis_cluster.pipeline_calls) > 0
     for call in mock_async_redis_cluster.pipeline_calls:
-        assert call["transaction"] is False, "Pipeline should be created with transaction=False in cluster mode"
+        assert (
+            call["transaction"] is False
+        ), "Pipeline should be created with transaction=False in cluster mode"
 
     # Put a value to trigger more pipeline usage
     await async_cluster_store.aput(("test",), "key1", {"data": "value1"})
@@ -182,11 +200,15 @@ async def test_async_pipeline_transaction_false(async_cluster_store, mock_async_
     # Check again
     assert len(mock_async_redis_cluster.pipeline_calls) > 0
     for call in mock_async_redis_cluster.pipeline_calls:
-        assert call["transaction"] is False, "Pipeline should be created with transaction=False in cluster mode"
+        assert (
+            call["transaction"] is False
+        ), "Pipeline should be created with transaction=False in cluster mode"
 
 
 @pytest.mark.asyncio
-async def test_async_ttl_refresh_in_search(async_cluster_store, mock_async_redis_cluster):
+async def test_async_ttl_refresh_in_search(
+    async_cluster_store, mock_async_redis_cluster
+):
     """Test that TTL refresh in search uses transaction=False for pipeline in cluster mode."""
     # Clear the pipeline calls to start fresh
     mock_async_redis_cluster.pipeline_calls = []
@@ -211,7 +233,9 @@ async def test_async_ttl_refresh_in_search(async_cluster_store, mock_async_redis
         # Check that pipeline was created with transaction=False
         assert len(mock_async_redis_cluster.pipeline_calls) > 0
         for call in mock_async_redis_cluster.pipeline_calls:
-            assert call["transaction"] is False, "Pipeline should be created with transaction=False in cluster mode"
+            assert (
+                call["transaction"] is False
+            ), "Pipeline should be created with transaction=False in cluster mode"
     finally:
         # Restore the original ttl method
         mock_async_redis_cluster.ttl = original_ttl
