@@ -29,15 +29,6 @@ class MockAsyncRedisCluster(AsyncRedis):
         self.delete_calls = []
         self.json_get_calls = []
 
-    def cluster(self, command, *args, **kwargs):
-        """Mock synchronous cluster command that returns cluster info.
-
-        This is called by BaseRedisStore.__init__ to detect cluster mode.
-        """
-        if command == "info":
-            return {"cluster_state": "ok"}
-        raise ResponseError(f"Unknown cluster command: {command}")
-
     async def cluster(self, command, *args, **kwargs):  # type: ignore
         """Mock asynchronous cluster command that returns cluster info.
 
@@ -125,9 +116,12 @@ async def async_cluster_store(mock_async_redis_cluster):
     # Create a store with the mock Redis client
     # Pass the mock client explicitly as redis_client to avoid URL parsing
     async with AsyncRedisStore(redis_client=mock_async_redis_cluster) as store:
-        # Manually set cluster_mode to True for testing
-        # This bypasses the automatic detection which is hard to mock in async context
-        store.cluster_mode = True
+        # The cluster_mode will be automatically detected during setup
+        # Call setup to ensure cluster mode is detected
+        await store.detect_cluster_mode()
+
+        # Verify that cluster mode was detected
+        assert store.cluster_mode is True
 
         # Mock the store_index and vector_index
         mock_index = AsyncMock()
@@ -145,16 +139,32 @@ async def async_cluster_store(mock_async_redis_cluster):
 
 @pytest.mark.asyncio
 async def test_async_cluster_mode_detection(mock_async_redis_cluster):
-    """Test that cluster mode can be manually set."""
+    """Test that cluster mode is automatically detected."""
     # Pass the mock client explicitly as redis_client to avoid URL parsing
     async with AsyncRedisStore(redis_client=mock_async_redis_cluster) as store:
-        # Manually set cluster_mode for testing
-        store.cluster_mode = True
+        # Cluster mode should be initialized to False
+        assert store.cluster_mode is False
+
+        # Call detect_cluster_mode to detect cluster mode
+        await store.detect_cluster_mode()
+
+        # Cluster mode should be detected as True
         assert store.cluster_mode is True
 
-        # Test with cluster_mode set to False
-        store.cluster_mode = False
-        assert store.cluster_mode is False
+        # Test with a non-cluster Redis client by patching the cluster method
+        with patch.object(
+            mock_async_redis_cluster,
+            "cluster",
+            side_effect=ResponseError("cluster command not allowed"),
+        ):
+            # Reset cluster_mode to False
+            store.cluster_mode = False
+
+            # Call detect_cluster_mode again
+            await store.detect_cluster_mode()
+
+            # Cluster mode should remain False
+            assert store.cluster_mode is False
 
 
 @pytest.mark.asyncio

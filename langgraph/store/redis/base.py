@@ -25,6 +25,7 @@ from langgraph.store.base import (
 )
 from redis import Redis
 from redis.asyncio import Redis as AsyncRedis
+from redis.exceptions import ResponseError
 from redisvl.index import SearchIndex
 from redisvl.query.filter import Tag, Text
 from redisvl.utils.token_escaper import TokenEscaper
@@ -210,9 +211,6 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
         self.index_config = index
         self.ttl_config = ttl  # type: ignore
         self.embeddings: Optional[Embeddings] = None
-
-        # Detect if Redis client is a cluster client
-        from redis.exceptions import ResponseError
 
         try:
             # Try to run a cluster command
