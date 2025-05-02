@@ -110,43 +110,37 @@ async def async_cluster_store(mock_async_redis_cluster):
     """Fixture to create an AsyncRedisStore with a mock Redis cluster client."""
     # Create a store with the mock Redis client
     # Pass the mock client explicitly as redis_client to avoid URL parsing
-    store = AsyncRedisStore(redis_client=mock_async_redis_cluster)
+    async with AsyncRedisStore(redis_client=mock_async_redis_cluster) as store:
+        # Manually set cluster_mode to True for testing
+        # This bypasses the automatic detection which is hard to mock in async context
+        store.cluster_mode = True
 
-    # Manually set cluster_mode to True for testing
-    # This bypasses the automatic detection which is hard to mock in async context
-    store.cluster_mode = True
+        # Mock the store_index and vector_index
+        mock_index = AsyncMock()
+        mock_docs = MagicMock()
+        mock_docs.docs = []
+        mock_index.search.return_value = mock_docs
+        mock_index.load.return_value = None
+        mock_index.query.return_value = []
 
-    # Mock the store_index and vector_index
-    mock_index = AsyncMock()
-    mock_docs = MagicMock()
-    mock_docs.docs = []
-    mock_index.search.return_value = mock_docs
-    mock_index.load.return_value = None
-    mock_index.query.return_value = []
-
-    # Replace the real indices with mocks
-    store.store_index = mock_index
-    store.vector_index = mock_index
-
-    yield store
-    await store.aclose()
+        # Replace the real indices with mocks
+        store.store_index = mock_index
+        store.vector_index = mock_index
+        yield store
 
 
 @pytest.mark.asyncio
 async def test_async_cluster_mode_detection(mock_async_redis_cluster):
     """Test that cluster mode can be manually set."""
     # Pass the mock client explicitly as redis_client to avoid URL parsing
-    store = AsyncRedisStore(redis_client=mock_async_redis_cluster)
+    async with AsyncRedisStore(redis_client=mock_async_redis_cluster) as store:
+        # Manually set cluster_mode for testing
+        store.cluster_mode = True
+        assert store.cluster_mode is True
 
-    # Manually set cluster_mode for testing
-    store.cluster_mode = True
-    assert store.cluster_mode is True
-
-    # Test with cluster_mode set to False
-    store.cluster_mode = False
-    assert store.cluster_mode is False
-
-    await store.aclose()
+        # Test with cluster_mode set to False
+        store.cluster_mode = False
+        assert store.cluster_mode is False
 
 
 @pytest.mark.asyncio
@@ -161,7 +155,7 @@ async def test_async_hash_tag_in_keys(async_cluster_store, mock_async_redis_clus
     assert key == f"{STORE_PREFIX}{REDIS_KEY_SEPARATOR}test_id"
 
     # Put a value in the store to generate keys
-    await async_cluster_store.put(("test",), "key1", {"data": "value1"})
+    await async_cluster_store.aput(("test",), "key1", {"data": "value1"})
 
     # Check that keys in delete calls have hash tags
     # Note: This is an indirect test as we're checking the mock's recorded calls
@@ -183,7 +177,7 @@ async def test_async_pipeline_transaction_false(async_cluster_store, mock_async_
         assert call["transaction"] is False, "Pipeline should be created with transaction=False in cluster mode"
 
     # Put a value to trigger more pipeline usage
-    await async_cluster_store.put(("test",), "key1", {"data": "value1"})
+    await async_cluster_store.aput(("test",), "key1", {"data": "value1"})
 
     # Check again
     assert len(mock_async_redis_cluster.pipeline_calls) > 0
