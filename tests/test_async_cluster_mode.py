@@ -105,9 +105,15 @@ class MockAsyncRedisCluster(AsyncRedis):
 
 
 @pytest.fixture
-def mock_async_redis_cluster():
+async def mock_async_redis_cluster(redis_url):
     """Fixture to create a mock Async Redis cluster client."""
-    return MockAsyncRedisCluster()
+    # Use from_url to create the Redis client
+    client = AsyncRedis.from_url(redis_url)
+    # Create a mock that inherits from the real client
+    mock = MockAsyncRedisCluster()
+    # Copy connection attributes from the real client
+    mock.connection_pool = client.connection_pool
+    return mock
 
 
 @pytest.fixture
