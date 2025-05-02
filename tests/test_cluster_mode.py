@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
-import pytest
 from unittest.mock import MagicMock, patch
+
+import pytest
 from redis import Redis
 from redis.exceptions import ResponseError
 from ulid import ULID
 
 from langgraph.store.redis import RedisStore
-from langgraph.store.redis.base import get_key_with_hash_tag, STORE_PREFIX, REDIS_KEY_SEPARATOR, STORE_VECTOR_PREFIX
+from langgraph.store.redis.base import (
+    REDIS_KEY_SEPARATOR,
+    STORE_PREFIX,
+    STORE_VECTOR_PREFIX,
+    get_key_with_hash_tag,
+)
 
 
 class MockRedisCluster(Redis):
@@ -60,9 +66,11 @@ class MockRedisCluster(Redis):
     def json(self):
         """Mock json method."""
         mock = MagicMock()
+
         def get(key):
             self.json_get_calls.append({"key": key})
             return {"key": key.split(":")[-1], "value": {"test": "data"}}
+
         mock.get = get
         return mock
 
@@ -102,7 +110,11 @@ def test_cluster_mode_detection(mock_redis_cluster):
     assert store.cluster_mode is True
 
     # Test with a non-cluster Redis client
-    with patch.object(mock_redis_cluster, 'cluster', side_effect=ResponseError("cluster command not allowed")):
+    with patch.object(
+        mock_redis_cluster,
+        "cluster",
+        side_effect=ResponseError("cluster command not allowed"),
+    ):
         store = RedisStore(mock_redis_cluster)
         assert store.cluster_mode is False
 
@@ -136,7 +148,9 @@ def test_pipeline_transaction_false(cluster_store, mock_redis_cluster):
     # Check that pipeline was created with transaction=False
     assert len(mock_redis_cluster.pipeline_calls) > 0
     for call in mock_redis_cluster.pipeline_calls:
-        assert call["transaction"] is False, "Pipeline should be created with transaction=False in cluster mode"
+        assert (
+            call["transaction"] is False
+        ), "Pipeline should be created with transaction=False in cluster mode"
 
     # Put a value to trigger more pipeline usage
     cluster_store.put(("test",), "key1", {"data": "value1"})
@@ -144,7 +158,9 @@ def test_pipeline_transaction_false(cluster_store, mock_redis_cluster):
     # Check again
     assert len(mock_redis_cluster.pipeline_calls) > 0
     for call in mock_redis_cluster.pipeline_calls:
-        assert call["transaction"] is False, "Pipeline should be created with transaction=False in cluster mode"
+        assert (
+            call["transaction"] is False
+        ), "Pipeline should be created with transaction=False in cluster mode"
 
 
 def test_ttl_refresh_in_search(cluster_store, mock_redis_cluster):
@@ -172,7 +188,9 @@ def test_ttl_refresh_in_search(cluster_store, mock_redis_cluster):
         # Check that pipeline was created with transaction=False
         assert len(mock_redis_cluster.pipeline_calls) > 0
         for call in mock_redis_cluster.pipeline_calls:
-            assert call["transaction"] is False, "Pipeline should be created with transaction=False in cluster mode"
+            assert (
+                call["transaction"] is False
+            ), "Pipeline should be created with transaction=False in cluster mode"
     finally:
         # Restore the original ttl method
         mock_redis_cluster.ttl = original_ttl
