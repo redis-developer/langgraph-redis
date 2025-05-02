@@ -45,6 +45,7 @@ from langgraph.store.redis.base import (
     _row_to_item,
     _row_to_search_item,
     get_key_with_hash_tag,
+    logger,
 )
 
 from .token_unescaper import TokenUnescaper
@@ -176,6 +177,9 @@ class AsyncRedisStore(
         else:
             self._redis = redis_client
 
+        # Initialize cluster_mode to False, will be set properly in setup()
+        self.cluster_mode = False
+
     async def setup(self) -> None:
         """Initialize store indices."""
         # Handle embeddings in same way as sync store
@@ -184,10 +188,30 @@ class AsyncRedisStore(
                 self.index_config.get("embed"),
             )
 
+        # Detect if we're connected to a Redis cluster
+        await self.detect_cluster_mode()
+
         # Create indices in Redis
         await self.store_index.create(overwrite=False)
         if self.index_config:
             await self.vector_index.create(overwrite=False)
+
+    async def detect_cluster_mode(self) -> None:
+        """Detect if the Redis client is a cluster client.
+
+        This is the async version of the cluster mode detection logic in BaseRedisStore.__init__.
+        """
+        from redis.exceptions import ResponseError
+
+        try:
+            # Try to run a cluster command
+            # This will succeed for cluster clients and fail for non-cluster clients
+            await self._redis.cluster("info")
+            self.cluster_mode = True
+            logger.info("Redis cluster mode detected")
+        except (ResponseError, AttributeError):
+            self.cluster_mode = False
+            logger.info("Redis standalone mode detected")
 
     # This can't be properly typed due to covariance issues with async methods
     async def _apply_ttl_to_keys(
