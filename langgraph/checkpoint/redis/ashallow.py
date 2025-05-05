@@ -39,7 +39,8 @@ SCHEMAS = [
     {
         "index": {
             "name": "checkpoints",
-            "prefix": CHECKPOINT_PREFIX + REDIS_KEY_SEPARATOR,
+            "prefix": CHECKPOINT_PREFIX,
+            "key_separator": REDIS_KEY_SEPARATOR,
             "storage_type": "json",
         },
         "fields": [
@@ -52,7 +53,8 @@ SCHEMAS = [
     {
         "index": {
             "name": "checkpoints_blobs",
-            "prefix": CHECKPOINT_BLOB_PREFIX + REDIS_KEY_SEPARATOR,
+            "prefix": CHECKPOINT_BLOB_PREFIX,
+            "key_separator": REDIS_KEY_SEPARATOR,
             "storage_type": "json",
         },
         "fields": [
@@ -65,7 +67,8 @@ SCHEMAS = [
     {
         "index": {
             "name": "checkpoint_writes",
-            "prefix": CHECKPOINT_WRITE_PREFIX + REDIS_KEY_SEPARATOR,
+            "prefix": CHECKPOINT_WRITE_PREFIX,
+            "key_separator": REDIS_KEY_SEPARATOR,
             "storage_type": "json",
         },
         "fields": [
