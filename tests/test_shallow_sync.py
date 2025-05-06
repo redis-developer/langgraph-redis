@@ -12,6 +12,7 @@ from langgraph.checkpoint.base import (
 from redis import Redis
 from redis.exceptions import ConnectionError as RedisConnectionError
 
+from langgraph.checkpoint.redis.base import CHECKPOINT_BLOB_PREFIX
 from langgraph.checkpoint.redis.shallow import ShallowRedisSaver
 
 
@@ -102,7 +103,8 @@ def test_only_latest_checkpoint(
             }
         }
         checkpoint_1 = test_data["checkpoints"][0]
-        saver.put(config_1, checkpoint_1, test_data["metadata"][0], {})
+        channel_versions_1 = {"test_channel": "1"}
+        saver.put(config_1, checkpoint_1, test_data["metadata"][0], channel_versions_1)
 
         # Create second checkpoint
         config_2 = {
@@ -112,12 +114,16 @@ def test_only_latest_checkpoint(
             }
         }
         checkpoint_2 = test_data["checkpoints"][1]
-        saver.put(config_2, checkpoint_2, test_data["metadata"][1], {})
+        channel_versions_2 = {"test_channel": "2"}
+        saver.put(config_2, checkpoint_2, test_data["metadata"][1], channel_versions_2)
 
-        # Verify only latest checkpoint exists
+        # Verify only latest checkpoint and blobs exists
         results = list(saver.list(None))
         assert len(results) == 1
         assert results[0].config["configurable"]["checkpoint_id"] == checkpoint_2["id"]
+
+        blobs = list(saver._redis.keys(CHECKPOINT_BLOB_PREFIX + ":*"))
+        assert len(blobs) == 1
 
 
 @pytest.mark.parametrize(

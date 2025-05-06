@@ -12,6 +12,7 @@ from redis.asyncio import Redis
 from redis.exceptions import ConnectionError as RedisConnectionError
 
 from langgraph.checkpoint.redis.ashallow import AsyncShallowRedisSaver
+from langgraph.checkpoint.redis.base import CHECKPOINT_BLOB_PREFIX
 
 
 @pytest.fixture
@@ -96,7 +97,10 @@ async def test_only_latest_checkpoint(
         }
     )
     checkpoint_1 = test_data["checkpoints"][0]
-    await saver.aput(config_1, checkpoint_1, test_data["metadata"][0], {})
+    channel_versions_1 = {"test_channel": "1"}
+    await saver.aput(
+        config_1, checkpoint_1, test_data["metadata"][0], channel_versions_1
+    )
 
     # Create second checkpoint
     config_2 = RunnableConfig(
@@ -108,12 +112,18 @@ async def test_only_latest_checkpoint(
         }
     )
     checkpoint_2 = test_data["checkpoints"][1]
-    await saver.aput(config_2, checkpoint_2, test_data["metadata"][1], {})
+    channel_versions_2 = {"test_channel": "2"}
+    await saver.aput(
+        config_2, checkpoint_2, test_data["metadata"][1], channel_versions_2
+    )
 
-    # Verify only latest checkpoint exists
+    # Verify only latest checkpoint and blobs exists
     results = [c async for c in saver.alist(None)]
     assert len(results) == 1
     assert results[0].config["configurable"]["checkpoint_id"] == checkpoint_2["id"]
+
+    blobs = list(await saver._redis.keys(CHECKPOINT_BLOB_PREFIX + ":*"))
+    assert len(blobs) == 1
 
 
 @pytest.mark.asyncio

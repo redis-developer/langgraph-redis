@@ -26,6 +26,10 @@ from langgraph.checkpoint.redis.base import (
     REDIS_KEY_SEPARATOR,
     BaseRedisSaver,
 )
+from langgraph.checkpoint.redis.util import (
+    to_storage_safe_id,
+    to_storage_safe_str,
+)
 
 SCHEMAS = [
     {
@@ -688,15 +692,12 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
     @staticmethod
     def _make_shallow_redis_checkpoint_key(thread_id: str, checkpoint_ns: str) -> str:
         """Create a key for shallow checkpoints using only thread_id and checkpoint_ns."""
-        return REDIS_KEY_SEPARATOR.join([CHECKPOINT_PREFIX, thread_id, checkpoint_ns])
-
-    @staticmethod
-    def _make_shallow_redis_checkpoint_blob_key(
-        thread_id: str, checkpoint_ns: str, channel: str
-    ) -> str:
-        """Create a key for a blob in a shallow checkpoint."""
         return REDIS_KEY_SEPARATOR.join(
-            [CHECKPOINT_BLOB_PREFIX, thread_id, checkpoint_ns, channel]
+            [
+                CHECKPOINT_PREFIX,
+                str(to_storage_safe_id(thread_id)),
+                to_storage_safe_str(checkpoint_ns),
+            ]
         )
 
     @staticmethod
@@ -704,9 +705,13 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         thread_id: str, checkpoint_ns: str
     ) -> str:
         """Create a pattern to match all blob keys for a thread and namespace."""
-        return (
-            REDIS_KEY_SEPARATOR.join([CHECKPOINT_BLOB_PREFIX, thread_id, checkpoint_ns])
-            + ":*"
+        return REDIS_KEY_SEPARATOR.join(
+            [
+                CHECKPOINT_BLOB_PREFIX,
+                str(to_storage_safe_id(thread_id)),
+                to_storage_safe_str(checkpoint_ns),
+                "*",
+            ]
         )
 
     @staticmethod
@@ -714,9 +719,11 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         thread_id: str, checkpoint_ns: str
     ) -> str:
         """Create a pattern to match all writes keys for a thread and namespace."""
-        return (
-            REDIS_KEY_SEPARATOR.join(
-                [CHECKPOINT_WRITE_PREFIX, thread_id, checkpoint_ns]
-            )
-            + ":*"
+        return REDIS_KEY_SEPARATOR.join(
+            [
+                CHECKPOINT_WRITE_PREFIX,
+                str(to_storage_safe_id(thread_id)),
+                to_storage_safe_str(checkpoint_ns),
+                "*",
+            ]
         )
