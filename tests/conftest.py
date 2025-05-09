@@ -84,6 +84,8 @@ def client(redis_url):
 @pytest.fixture(autouse=True)
 async def clear_redis(redis_url: str) -> None:
     """Clear Redis before each test."""
+    # Add a small delay to allow container to stabilize between tests
+    await asyncio.sleep(0.1)
     try:
         client = Redis.from_url(redis_url)
         await client.flushall()
