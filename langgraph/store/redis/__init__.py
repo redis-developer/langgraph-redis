@@ -435,33 +435,26 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
                 )
                 vector_results = self.vector_index.query(vector_query)
 
-                # Get matching store docs: direct JSON GET for cluster, batch for non-cluster
+                # Get matching store docs
                 result_map = {}  # Map store key to vector result with distances
-                store_docs = []
 
                 if self.cluster_mode:
+                    store_docs = []
                     # Direct JSON GET for cluster mode
-                    json_client = self._redis.json()
-                    # Monkey-patch json method to always return this instance for consistent call tracking
-                    try:
-                        self._redis.json = lambda: json_client
-                    except Exception:
-                        pass
                     for doc in vector_results:
                         doc_id = (
                             doc.get("id")
                             if isinstance(doc, dict)
                             else getattr(doc, "id", None)
                         )
-                        if not doc_id:
-                            continue
-                        doc_uuid = doc_id.split(":")[1]
-                        store_key = f"{STORE_PREFIX}{REDIS_KEY_SEPARATOR}{doc_uuid}"
-                        result_map[store_key] = doc
-                        # Record JSON GET call for testing
-                        if hasattr(self._redis, "json_get_calls"):
-                            self._redis.json_get_calls.append({"key": store_key})
-                        store_docs.append(json_client.get(store_key))
+                        if doc_id:
+                            doc_uuid = doc_id.split(":")[1]
+                            store_key = f"{STORE_PREFIX}{REDIS_KEY_SEPARATOR}{doc_uuid}"
+                            result_map[store_key] = doc
+                            # Fetch individually in cluster mode
+                            store_doc_item = self._redis.json().get(store_key)
+                            store_docs.append(store_doc_item)
+                    store_docs_raw = store_docs
                 else:
                     pipe = self._redis.pipeline(transaction=True)
                     for doc in vector_results:
@@ -477,13 +470,15 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
                         result_map[store_key] = doc
                         pipe.json().get(store_key)
                     # Execute all lookups in one batch
-                    store_docs = pipe.execute()
+                    store_docs_raw = pipe.execute()
 
                 # Process results maintaining order and applying filters
                 items = []
                 refresh_keys = []  # Track keys that need TTL refreshed
+                store_docs_iter = iter(store_docs_raw)
 
-                for store_key, store_doc in zip(result_map.keys(), store_docs):
+                for store_key in result_map.keys():
+                    store_doc = next(store_docs_iter, None)
                     if store_doc:
                         vector_result = result_map[store_key]
                         # Get vector_distance from original search result
@@ -494,7 +489,25 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
                         )
                         # Convert to similarity score
                         score = (1.0 - float(dist)) if dist is not None else 0.0
-                        store_doc["vector_distance"] = dist
+                        if not isinstance(store_doc, dict):
+                            try:
+                                store_doc = json.loads(
+                                    store_doc
+                                )  # Attempt to parse if it's a JSON string
+                            except (json.JSONDecodeError, TypeError):
+                                logger.error(f"Failed to parse store_doc: {store_doc}")
+                                continue  # Skip this problematic document
+
+                        if isinstance(
+                            store_doc, dict
+                        ):  # Check again after potential parsing
+                            store_doc["vector_distance"] = dist
+                        else:
+                            # if still not a dict, this means it's a problematic entry
+                            logger.error(
+                                f"store_doc is not a dict after parsing attempt: {store_doc}"
+                            )
+                            continue
 
                         # Apply value filters if needed
                         if op.filter:
@@ -542,14 +555,16 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
                         if self.cluster_mode:
                             for key in refresh_keys:
                                 ttl = self._redis.ttl(key)
-                                if ttl > 0:
+                                if ttl > 0:  # type: ignore
                                     self._redis.expire(key, ttl_seconds)
                         else:
                             pipeline = self._redis.pipeline(transaction=True)
                             for key in refresh_keys:
                                 # Only refresh TTL if the key exists and has a TTL
                                 ttl = self._redis.ttl(key)
-                                if ttl > 0:  # Only refresh if key exists and has TTL
+                                if (
+                                    ttl > 0
+                                ):  # Only refresh if key exists and has TTL  # type: ignore
                                     pipeline.expire(key, ttl_seconds)
                             if pipeline.command_stack:
                                 pipeline.execute()
@@ -595,8 +610,6 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
 
                     items.append(_row_to_search_item(_decode_ns(data["prefix"]), data))
 
-                # Note: Pagination is now handled by Redis, no need to slice items manually
-
                 # Refresh TTL if requested
                 if op.refresh_ttl and refresh_keys and self.ttl_config:
                     # Get default TTL from config
@@ -609,14 +622,16 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
                         if self.cluster_mode:
                             for key in refresh_keys:
                                 ttl = self._redis.ttl(key)
-                                if ttl > 0:
+                                if ttl > 0:  # type: ignore
                                     self._redis.expire(key, ttl_seconds)
                         else:
                             pipeline = self._redis.pipeline(transaction=True)
                             for key in refresh_keys:
                                 # Only refresh TTL if the key exists and has a TTL
                                 ttl = self._redis.ttl(key)
-                                if ttl > 0:  # Only refresh if key exists and has TTL
+                                if (
+                                    ttl > 0
+                                ):  # Only refresh if key exists and has TTL  # type: ignore
                                     pipeline.expire(key, ttl_seconds)
                             if pipeline.command_stack:
                                 pipeline.execute()

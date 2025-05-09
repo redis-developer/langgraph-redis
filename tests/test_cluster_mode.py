@@ -3,15 +3,16 @@
 import json
 from datetime import datetime, timezone
 from typing import Any
-from ulid import ULID
+from unittest import mock
+from unittest.mock import MagicMock
+
 import pytest
+from langgraph.store.base import GetOp, ListNamespacesOp, PutOp, SearchOp
 from redis import Redis
 from redis.cluster import RedisCluster as SyncRedisCluster
-from unittest.mock import MagicMock
-from unittest import mock
+from ulid import ULID
 
 from langgraph.store.redis import RedisStore
-from langgraph.store.base import GetOp, PutOp, SearchOp, ListNamespacesOp
 from langgraph.store.redis.base import (
     REDIS_KEY_SEPARATOR,
     STORE_PREFIX,
@@ -40,7 +41,6 @@ class BaseMockRedis:
         self.expire_calls = []
         self.delete_calls = []
         self.ttl_calls = []
-        self.json_get_calls = []
         self.cluster_info_calls = 0
 
         # Pipeline mock
@@ -272,7 +272,6 @@ def test_batch_put_ops_pre_delete_behavior(store):
 def test_batch_search_ops_vector_fetch_behavior(store):
     """Test fetching store docs after vector search in _batch_search_ops."""
     client = store._redis
-    client.json_get_calls.clear()
     client.pipeline_calls.clear()
 
     if not store.index_config:
@@ -300,10 +299,10 @@ def test_batch_search_ops_vector_fetch_behavior(store):
         "updated_at": int(datetime.now(timezone.utc).timestamp() * 1_000_000),
     }
 
+    mock_json = MagicMock(get=MagicMock(return_value=mock_store_data_search))
+
     if store.cluster_mode:
-        client.json = lambda: MagicMock(
-            get=MagicMock(return_value=mock_store_data_search)
-        )
+        client.json = lambda: mock_json
     else:
         client._pipeline.json.return_value.get.return_value = mock_store_data_search
         client._pipeline.execute.return_value = [mock_store_data_search]
@@ -321,8 +320,8 @@ def test_batch_search_ops_vector_fetch_behavior(store):
     store._batch_search_ops(search_ops, results)
 
     if store.cluster_mode:
-        assert client.json().get.call_count == 1
-        assert {"key": expected_store_key} in client.json_get_calls
+        assert mock_json.get.call_count == 1
+        mock_json.get.assert_called_with(expected_store_key)
         client._pipeline.json.return_value.get.assert_not_called()
     else:
         assert len(client.pipeline_calls) > 0
