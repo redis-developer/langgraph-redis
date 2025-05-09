@@ -39,18 +39,14 @@ class AsyncMockRedis(AsyncRedis):
         # print(f"AsyncMockRedis.pipeline called with transaction={transaction}")
         self.pipeline_calls.append({"transaction": transaction})
         mock_pipeline = AsyncMock()  # Use AsyncMock for awaitable methods
+        mock_pipeline.expire = MagicMock(return_value=True)
+        mock_pipeline.delete = MagicMock(return_value=1)
         mock_pipeline.execute = AsyncMock(return_value=[])
-        mock_pipeline.expire = AsyncMock(return_value=True)
-        mock_pipeline.delete = AsyncMock(return_value=1)
 
         # Mock json().get() behavior within pipeline
         mock_json_pipeline = AsyncMock()
-        mock_json_pipeline.get = AsyncMock(
-            return_value={"key": "mock_key", "value": {"data": "mock_data"}}
-        )
-        mock_pipeline.json = MagicMock(
-            return_value=mock_json_pipeline
-        )  # json() returns a mock that has async get
+        mock_json_pipeline.get = MagicMock()
+        mock_pipeline.json = MagicMock(return_value=mock_json_pipeline)
         return mock_pipeline
 
     async def expire(self, key, ttl):
@@ -101,15 +97,13 @@ class AsyncMockRedisCluster(
     def pipeline(self, transaction=True):
         # print(f"AsyncMockRedisCluster.pipeline called with transaction={transaction}")
         self.pipeline_calls.append({"transaction": transaction})
-        mock_pipeline = AsyncMock()
+        mock_pipeline = MagicMock()
         mock_pipeline.execute = AsyncMock(return_value=[])
-        mock_pipeline.expire = AsyncMock(return_value=True)
-        mock_pipeline.delete = AsyncMock(return_value=1)
+        mock_pipeline.expire = MagicMock(return_value=True)
+        mock_pipeline.delete = MagicMock(return_value=1)
 
-        mock_json_pipeline = AsyncMock()
-        mock_json_pipeline.get = AsyncMock(
-            return_value={"key": "mock_key", "value": {"data": "mock_data"}}
-        )
+        mock_json_pipeline = MagicMock()
+        mock_json_pipeline.get = MagicMock()
         mock_pipeline.json = MagicMock(return_value=mock_json_pipeline)
         return mock_pipeline
 
@@ -166,9 +160,7 @@ async def test_async_cluster_mode_behavior_differs(
 ):
     """Test that AsyncRedisStore behavior differs for cluster vs. non-cluster clients."""
 
-    # --- Test with AsyncMockRedisCluster (simulates cluster) ---
     async_cluster_store = AsyncRedisStore(redis_client=mock_async_redis_cluster_client)
-    # Mock indices for async_cluster_store
     mock_index_cluster = AsyncMock()
     mock_index_cluster.search = AsyncMock(return_value=MagicMock(docs=[]))
     mock_index_cluster.load = AsyncMock(return_value=None)
