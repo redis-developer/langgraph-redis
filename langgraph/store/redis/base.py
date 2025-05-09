@@ -109,7 +109,8 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
     vector_index: IndexType
     _ttl_sweeper_thread: Optional[threading.Thread] = None
     _ttl_stop_event: threading.Event | None = None
-    cluster_mode: bool = False
+    # Whether to operate in Redis cluster mode; None triggers auto-detection
+    cluster_mode: Optional[bool] = None
     SCHEMAS = SCHEMAS
 
     supports_ttl: bool = True
@@ -195,14 +196,14 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
         *,
         index: Optional[IndexConfig] = None,
         ttl: Optional[TTLConfig] = None,  # Corrected type hint for ttl
+        cluster_mode: Optional[bool] = None,
     ) -> None:
         """Initialize store with Redis connection and optional index config."""
         self.index_config = index
         self.ttl_config = ttl
         self._redis = conn
-        self.cluster_mode = (
-            False  # Default to False, will be set by RedisStore or AsyncRedisStore
-        )
+        # Store cluster_mode; None means auto-detect in RedisStore or AsyncRedisStore
+        self.cluster_mode = cluster_mode
 
         if self.index_config:
             self.index_config = self.index_config.copy()

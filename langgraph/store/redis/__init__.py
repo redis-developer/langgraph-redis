@@ -84,10 +84,13 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
         *,
         index: Optional[IndexConfig] = None,
         ttl: Optional[TTLConfig] = None,
+        cluster_mode: Optional[bool] = None,
     ) -> None:
         BaseStore.__init__(self)
-        BaseRedisStore.__init__(self, conn, index=index, ttl=ttl)
-        self._detect_cluster_mode()
+        BaseRedisStore.__init__(
+            self, conn, index=index, ttl=ttl, cluster_mode=cluster_mode
+        )
+        # Detection will happen in setup()
 
     @classmethod
     @contextmanager
@@ -151,17 +154,23 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
         return results
 
     def _detect_cluster_mode(self) -> None:
-        """Detect if the Redis client is connected to a cluster."""
-        try:
-            # Try to run a cluster command
-            # This will succeed for Redis clusters and fail for non-cluster servers
-            self._redis.cluster("info")
-            self.cluster_mode = True
-            logger.info("Redis cluster mode detected for RedisStore.")
-        except (ResponseError, AttributeError):
-            self.cluster_mode = False
-            logger.info("Redis standalone mode detected for RedisStore.")
+        """Detect if the Redis client is a cluster client by inspecting its class."""
+        # If we passed in_cluster_mode explicitly, respect it
+        if self.cluster_mode is not None:
+            logger.info(
+                f"Redis cluster_mode explicitly set to {self.cluster_mode}, skipping detection."
+            )
+            return
 
+        # Check if client is a Redis Cluster instance
+        from redis.cluster import RedisCluster as SyncRedisCluster
+
+        if isinstance(self._redis, SyncRedisCluster):
+            self.cluster_mode = True
+            logger.info("Redis cluster client detected for RedisStore.")
+        else:
+            self.cluster_mode = False
+            logger.info("Redis standalone client detected for RedisStore.")
 
     def _batch_list_namespaces_ops(
         self,
