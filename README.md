@@ -16,7 +16,6 @@ The project requires the following main dependencies:
 - `redis>=5.2.1`
 - `redisvl>=0.5.1`
 - `langgraph-checkpoint>=2.0.24`
-- `langgraph>=0.3.0`
 
 ## Installation
 
