@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -12,6 +11,19 @@ from redis.asyncio.cluster import (
 )
 
 from langgraph.store.redis import AsyncRedisStore
+
+
+# Override session-scoped redis_container fixture to prevent Docker operations and provide dummy host/port
+class DummyCompose:
+    def get_service_host_and_port(self, service, port):
+        # Return localhost and specified port for dummy usage
+        return ("localhost", port)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def redis_container():
+    """Override redis_container to use DummyCompose instead of real DockerCompose."""
+    yield DummyCompose()
 
 
 # Basic Mock for non-cluster async client
@@ -170,9 +182,9 @@ async def test_async_cluster_mode_behavior_differs(
     mock_async_redis_cluster_client.pipeline_calls = []
     await async_cluster_store.aput(("test_ns",), "key_cluster", {"data": "c"}, ttl=1.0)
 
-    assert (
-        len(mock_async_redis_cluster_client.expire_calls) > 0
-    ), "Expire should be called directly for async cluster client"
+    assert len(mock_async_redis_cluster_client.expire_calls) > 0, (
+        "Expire should be called directly for async cluster client"
+    )
     assert not any(
         call.get("transaction") is True
         for call in mock_async_redis_cluster_client.pipeline_calls
@@ -200,12 +212,3 @@ async def test_async_cluster_mode_behavior_differs(
         call.get("transaction") is True
         for call in mock_async_redis_client.pipeline_calls
     ), "Transactional pipeline expected for async non-cluster TTL"
-    # Depending on mock, direct expire_calls might be empty if done via pipeline
-    # If pipeline.expire directly calls client.expire in the mock, this might need adjustment
-    # For now, we assume that if a transactional pipeline is used, client.expire_calls list would be short/empty
-    # and pipeline.expire calls are made on the pipeline object itself.
-    # A more robust check might be on the pipeline mock object's calls.
-    # Example: Ensure pipeline_mock.expire was awaited if that was the expected path.
-
-
-# Add other tests for specific multi-key operations if needed, e.g., for batch deletes, mget simulations etc.

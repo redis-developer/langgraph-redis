@@ -37,11 +37,19 @@ def redis_container(request):
         compose_file_name="docker-compose.yml",
         pull=True,
     )
-    compose.start()
+    try:
+        compose.start()
+    except Exception:
+        # Ignore compose startup errors (e.g., existing containers)
+        pass
 
     yield compose
 
-    compose.stop()
+    try:
+        compose.stop()
+    except Exception:
+        # Ignore compose stop errors
+        pass
 
 
 @pytest.fixture(scope="session")
@@ -76,17 +84,13 @@ def client(redis_url):
 @pytest.fixture(autouse=True)
 async def clear_redis(redis_url: str) -> None:
     """Clear Redis before each test."""
-    # Add a small delay to allow container to stabilize between tests
-    time.sleep(0.1)
     try:
-        client = Redis.from_url(redis_url, socket_connect_timeout=5)
+        client = Redis.from_url(redis_url)
         await client.flushall()
-        await client.aclose()  # type: ignore[attr-defined]
-    except Exception as e:
-        # Log the error to help diagnose if connections still fail
-        print(f"Error in clear_redis fixture: {e}")
-        # Optionally re-raise or handle differently if needed
-        # raise e
+        await client.aclose()
+    except Exception:
+        # Ignore clear_redis errors when Redis container is unavailable
+        pass
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
