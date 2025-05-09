@@ -6,10 +6,9 @@ import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from types import TracebackType
-from typing import Any, AsyncIterator, Iterable, Optional, Sequence, cast
+from typing import Any, AsyncIterator, Iterable, Optional, Sequence, cast, Union
 
 from langgraph.store.base import (
-    BaseStore,
     GetOp,
     IndexConfig,
     ListNamespacesOp,
@@ -22,7 +21,7 @@ from langgraph.store.base import (
     get_text_at_path,
     tokenize_path,
 )
-from langgraph.store.base.batch import AsyncBatchedBaseStore, _dedupe_ops
+from langgraph.store.base.batch import AsyncBatchedBaseStore
 from redis import ResponseError
 from redis.asyncio import Redis as AsyncRedis
 from redis.commands.search.query import Query
@@ -50,6 +49,7 @@ from .token_unescaper import TokenUnescaper
 
 _token_escaper = TokenEscaper()
 _token_unescaper = TokenUnescaper()
+from redis.asyncio.cluster import RedisCluster as AsyncRedisCluster
 
 
 class AsyncRedisStore(
@@ -65,7 +65,8 @@ class AsyncRedisStore(
     _async_ttl_stop_event: asyncio.Event | None = None
     _ttl_sweeper_task: asyncio.Task | None = None
     ttl_config: Optional[TTLConfig] = None
-    cluster_mode: bool = False
+    # Whether to assume the Redis server is a cluster; None triggers auto-detection
+    cluster_mode: Optional[bool] = None
 
     def __init__(
         self,
@@ -75,6 +76,7 @@ class AsyncRedisStore(
         index: Optional[IndexConfig] = None,
         connection_args: Optional[dict[str, Any]] = None,
         ttl: Optional[dict[str, Any]] = None,
+        cluster_mode: Optional[bool] = None,
     ) -> None:
         """Initialize store with Redis connection and optional index config."""
         if redis_url is None and redis_client is None:
@@ -111,6 +113,11 @@ class AsyncRedisStore(
             redis_client=redis_client,
             connection_args=connection_args or {},
         )
+
+        # Validate and store cluster_mode; None means auto-detect later
+        if cluster_mode is not None and not isinstance(cluster_mode, bool):
+            raise TypeError("cluster_mode must be a boolean or None")
+        self.cluster_mode: Optional[bool] = cluster_mode
 
         # Create store index
         self.store_index = AsyncSearchIndex.from_dict(
@@ -184,7 +191,13 @@ class AsyncRedisStore(
                 self.index_config.get("embed"),
             )
 
-        await self._detect_cluster_mode()
+        # Auto-detect cluster mode if not explicitly set
+        if self.cluster_mode is None:
+            await self._detect_cluster_mode()
+        else:
+            logger.info(
+                f"Redis cluster_mode explicitly set to {self.cluster_mode}, skipping detection."
+            )
 
         # Create indices in Redis
         await self.store_index.create(overwrite=False)
@@ -192,16 +205,14 @@ class AsyncRedisStore(
             await self.vector_index.create(overwrite=False)
 
     async def _detect_cluster_mode(self) -> None:
-        """Detect if the Redis client is a cluster client."""
-        try:
-            # Try to run a cluster command
-            # This will succeed for cluster clients and fail for non-cluster clients
-            await self._redis.cluster("info")
+        """Detect if the Redis client is a cluster client by inspecting its class."""
+        # Determine cluster mode based on client class
+        if isinstance(self._redis, AsyncRedisCluster):
             self.cluster_mode = True
-            logger.info("Redis cluster mode detected for AsyncRedisStore.")
-        except (ResponseError, AttributeError):
+            logger.info("Redis cluster client detected for AsyncRedisStore.")
+        else:
             self.cluster_mode = False
-            logger.info("Redis standalone mode detected for AsyncRedisStore.")
+            logger.info("Redis standalone client detected for AsyncRedisStore.")
 
     # This can't be properly typed due to covariance issues with async methods
     async def _apply_ttl_to_keys(
