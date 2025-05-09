@@ -25,6 +25,7 @@ from langgraph.store.base import (
 )
 from redis import Redis
 from redis.asyncio import Redis as AsyncRedis
+from redis.cluster import RedisCluster as SyncRedisCluster
 from redis.exceptions import ResponseError
 from redisvl.index import SearchIndex
 from redisvl.query.filter import Tag, Text
@@ -41,21 +42,6 @@ logger = logging.getLogger(__name__)
 REDIS_KEY_SEPARATOR = ":"
 STORE_PREFIX = "store"
 STORE_VECTOR_PREFIX = "store_vectors"
-
-
-def get_key_with_hash_tag(
-    prefix: str, separator: str, id_value: str, use_hash_tag: bool = False
-) -> str:
-    """Create a Redis key with optional hash tag for cluster mode.
-
-    In Redis Cluster, keys with hash tags ensure they're stored in the same hash slot.
-    Hash tags are substrings enclosed in curly braces {}.
-    """
-    if use_hash_tag:
-        # Use hash tag to ensure related keys are in the same slot
-        return f"{prefix}{separator}{{{id_value}}}"
-    else:
-        return f"{prefix}{separator}{id_value}"
 
 
 # Schemas for Redis Search indices
@@ -124,7 +110,6 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
     _ttl_sweeper_thread: Optional[threading.Thread] = None
     _ttl_stop_event: threading.Event | None = None
     cluster_mode: bool = False
-
     SCHEMAS = SCHEMAS
 
     supports_ttl: bool = True
@@ -133,7 +118,7 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
     def _apply_ttl_to_keys(
         self,
         main_key: str,
-        related_keys: list[str] = None,
+        related_keys: Optional[list[str]] = None,
         ttl_minutes: Optional[float] = None,
     ) -> Any:
         """Apply Redis native TTL to keys.
@@ -150,18 +135,22 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
 
         if ttl_minutes is not None:
             ttl_seconds = int(ttl_minutes * 60)
-            # In cluster mode, we must use transaction=False
-            pipeline = self._redis.pipeline(transaction=not self.cluster_mode)
 
-            # Set TTL for main key
-            pipeline.expire(main_key, ttl_seconds)
-
-            # Set TTL for related keys
-            if related_keys:
-                for key in related_keys:
-                    pipeline.expire(key, ttl_seconds)
-
-            pipeline.execute()
+            # Use the cluster_mode attribute to determine the approach
+            if self.cluster_mode:
+                # Cluster path: direct expire calls
+                self._redis.expire(main_key, ttl_seconds)
+                if related_keys:
+                    for key in related_keys:
+                        self._redis.expire(key, ttl_seconds)
+            else:
+                # Non-cluster path: transactional pipeline
+                pipeline = self._redis.pipeline(transaction=True)
+                pipeline.expire(main_key, ttl_seconds)
+                if related_keys:
+                    for key in related_keys:
+                        pipeline.expire(key, ttl_seconds)
+                pipeline.execute()
 
     def sweep_ttl(self) -> int:
         """Clean up any remaining expired items.
@@ -203,24 +192,18 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
     def __init__(
         self,
         conn: RedisClientType,
+        *,
         index: Optional[IndexConfig] = None,
-        ttl: Optional[dict[str, Any]] = None,
+        ttl: Optional[TTLConfig] = None,  # Corrected type hint for ttl
     ) -> None:
         """Initialize store with Redis connection and optional index config."""
-        self._redis = conn
         self.index_config = index
-        self.ttl_config = ttl  # type: ignore
-        self.embeddings: Optional[Embeddings] = None
+        self.ttl_config = ttl
+        self._redis = conn
+        self.cluster_mode = (
+            False  # Default to False, will be set by RedisStore or AsyncRedisStore
+        )
 
-        try:
-            # Try to run a cluster command
-            # This will succeed for cluster clients and fail for non-cluster clients
-            self._redis.cluster("info")
-            self.cluster_mode = True
-            logger.info("Redis cluster mode detected")
-        except (ResponseError, AttributeError):
-            self.cluster_mode = False
-            logger.debug("Redis standalone mode detected")
         if self.index_config:
             self.index_config = self.index_config.copy()
             self.embeddings = ensure_embeddings(
