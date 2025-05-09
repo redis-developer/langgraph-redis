@@ -134,8 +134,10 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         tb: Optional[TracebackType],
     ) -> None:
         if self._owns_its_client:
-            await self._redis.aclose()  # type: ignore[attr-defined]
-            await self._redis.connection_pool.disconnect()
+            await self._redis.aclose()
+            coro = self._redis.connection_pool.disconnect()
+            if coro:
+                await coro
 
             # Prevent RedisVL from attempting to close the client
             # on an event loop in a separate thread.

@@ -25,6 +25,8 @@ from langgraph.store.base import (
 )
 from redis import Redis
 from redis.asyncio import Redis as AsyncRedis
+from redis.cluster import RedisCluster as SyncRedisCluster
+from redis.exceptions import ResponseError
 from redisvl.index import SearchIndex
 from redisvl.query.filter import Tag, Text
 from redisvl.utils.token_escaper import TokenEscaper
@@ -40,6 +42,7 @@ logger = logging.getLogger(__name__)
 REDIS_KEY_SEPARATOR = ":"
 STORE_PREFIX = "store"
 STORE_VECTOR_PREFIX = "store_vectors"
+
 
 # Schemas for Redis Search indices
 SCHEMAS = [
@@ -106,7 +109,8 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
     vector_index: IndexType
     _ttl_sweeper_thread: Optional[threading.Thread] = None
     _ttl_stop_event: threading.Event | None = None
-
+    # Whether to operate in Redis cluster mode; None triggers auto-detection
+    cluster_mode: Optional[bool] = None
     SCHEMAS = SCHEMAS
 
     supports_ttl: bool = True
@@ -115,7 +119,7 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
     def _apply_ttl_to_keys(
         self,
         main_key: str,
-        related_keys: list[str] = None,
+        related_keys: Optional[list[str]] = None,
         ttl_minutes: Optional[float] = None,
     ) -> Any:
         """Apply Redis native TTL to keys.
@@ -132,17 +136,22 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
 
         if ttl_minutes is not None:
             ttl_seconds = int(ttl_minutes * 60)
-            pipeline = self._redis.pipeline()
 
-            # Set TTL for main key
-            pipeline.expire(main_key, ttl_seconds)
-
-            # Set TTL for related keys
-            if related_keys:
-                for key in related_keys:
-                    pipeline.expire(key, ttl_seconds)
-
-            pipeline.execute()
+            # Use the cluster_mode attribute to determine the approach
+            if self.cluster_mode:
+                # Cluster path: direct expire calls
+                self._redis.expire(main_key, ttl_seconds)
+                if related_keys:
+                    for key in related_keys:
+                        self._redis.expire(key, ttl_seconds)
+            else:
+                # Non-cluster path: transactional pipeline
+                pipeline = self._redis.pipeline(transaction=True)
+                pipeline.expire(main_key, ttl_seconds)
+                if related_keys:
+                    for key in related_keys:
+                        pipeline.expire(key, ttl_seconds)
+                pipeline.execute()
 
     def sweep_ttl(self) -> int:
         """Clean up any remaining expired items.
@@ -184,14 +193,18 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
     def __init__(
         self,
         conn: RedisClientType,
+        *,
         index: Optional[IndexConfig] = None,
-        ttl: Optional[dict[str, Any]] = None,
+        ttl: Optional[TTLConfig] = None,  # Corrected type hint for ttl
+        cluster_mode: Optional[bool] = None,
     ) -> None:
         """Initialize store with Redis connection and optional index config."""
-        self._redis = conn
         self.index_config = index
-        self.ttl_config = ttl  # type: ignore
-        self.embeddings: Optional[Embeddings] = None
+        self.ttl_config = ttl
+        self._redis = conn
+        # Store cluster_mode; None means auto-detect in RedisStore or AsyncRedisStore
+        self.cluster_mode = cluster_mode
+
         if self.index_config:
             self.index_config = self.index_config.copy()
             self.embeddings = ensure_embeddings(
@@ -259,7 +272,7 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
 
         try:
             # Try to use client_setinfo command if available
-            self._redis.client_setinfo("LIB-NAME", client_info)  # type: ignore
+            self._redis.client_setinfo("LIB-NAME", client_info)
         except (ResponseError, AttributeError):
             # Fall back to a simple echo if client_setinfo is not available
             try:
@@ -279,7 +292,7 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
 
         try:
             # Try to use client_setinfo command if available
-            await self._redis.client_setinfo("LIB-NAME", client_info)  # type: ignore
+            await self._redis.client_setinfo("LIB-NAME", client_info)
         except (ResponseError, AttributeError):
             # Fall back to a simple echo if client_setinfo is not available
             try:

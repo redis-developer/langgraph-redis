@@ -3,14 +3,12 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import weakref
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from types import TracebackType
-from typing import Any, AsyncIterator, Iterable, Optional, Sequence, cast
+from typing import Any, AsyncIterator, Iterable, Optional, Sequence, Union, cast
 
 from langgraph.store.base import (
-    BaseStore,
     GetOp,
     IndexConfig,
     ListNamespacesOp,
@@ -23,12 +21,12 @@ from langgraph.store.base import (
     get_text_at_path,
     tokenize_path,
 )
-from langgraph.store.base.batch import AsyncBatchedBaseStore, _dedupe_ops
+from langgraph.store.base.batch import AsyncBatchedBaseStore
+from redis import ResponseError
 from redis.asyncio import Redis as AsyncRedis
 from redis.commands.search.query import Query
 from redisvl.index import AsyncSearchIndex
 from redisvl.query import FilterQuery, VectorQuery
-from redisvl.redis.connection import RedisConnectionFactory
 from redisvl.utils.token_escaper import TokenEscaper
 from ulid import ULID
 
@@ -44,12 +42,14 @@ from langgraph.store.redis.base import (
     _namespace_to_text,
     _row_to_item,
     _row_to_search_item,
+    logger,
 )
 
 from .token_unescaper import TokenUnescaper
 
 _token_escaper = TokenEscaper()
 _token_unescaper = TokenUnescaper()
+from redis.asyncio.cluster import RedisCluster as AsyncRedisCluster
 
 
 class AsyncRedisStore(
@@ -65,6 +65,8 @@ class AsyncRedisStore(
     _async_ttl_stop_event: asyncio.Event | None = None
     _ttl_sweeper_task: asyncio.Task | None = None
     ttl_config: Optional[TTLConfig] = None
+    # Whether to assume the Redis server is a cluster; None triggers auto-detection
+    cluster_mode: Optional[bool] = None
 
     def __init__(
         self,
@@ -74,6 +76,7 @@ class AsyncRedisStore(
         index: Optional[IndexConfig] = None,
         connection_args: Optional[dict[str, Any]] = None,
         ttl: Optional[dict[str, Any]] = None,
+        cluster_mode: Optional[bool] = None,
     ) -> None:
         """Initialize store with Redis connection and optional index config."""
         if redis_url is None and redis_client is None:
@@ -110,6 +113,11 @@ class AsyncRedisStore(
             redis_client=redis_client,
             connection_args=connection_args or {},
         )
+
+        # Validate and store cluster_mode; None means auto-detect later
+        if cluster_mode is not None and not isinstance(cluster_mode, bool):
+            raise TypeError("cluster_mode must be a boolean or None")
+        self.cluster_mode: Optional[bool] = cluster_mode
 
         # Create store index
         self.store_index = AsyncSearchIndex.from_dict(
@@ -183,16 +191,34 @@ class AsyncRedisStore(
                 self.index_config.get("embed"),
             )
 
+        # Auto-detect cluster mode if not explicitly set
+        if self.cluster_mode is None:
+            await self._detect_cluster_mode()
+        else:
+            logger.info(
+                f"Redis cluster_mode explicitly set to {self.cluster_mode}, skipping detection."
+            )
+
         # Create indices in Redis
         await self.store_index.create(overwrite=False)
         if self.index_config:
             await self.vector_index.create(overwrite=False)
 
+    async def _detect_cluster_mode(self) -> None:
+        """Detect if the Redis client is a cluster client by inspecting its class."""
+        # Determine cluster mode based on client class
+        if isinstance(self._redis, AsyncRedisCluster):
+            self.cluster_mode = True
+            logger.info("Redis cluster client detected for AsyncRedisStore.")
+        else:
+            self.cluster_mode = False
+            logger.info("Redis standalone client detected for AsyncRedisStore.")
+
     # This can't be properly typed due to covariance issues with async methods
     async def _apply_ttl_to_keys(
         self,
         main_key: str,
-        related_keys: list[str] = None,
+        related_keys: Optional[list[str]] = None,
         ttl_minutes: Optional[float] = None,
     ) -> Any:
         """Apply Redis native TTL to keys asynchronously.
@@ -209,17 +235,23 @@ class AsyncRedisStore(
 
         if ttl_minutes is not None:
             ttl_seconds = int(ttl_minutes * 60)
-            pipeline = self._redis.pipeline()
+            if self.cluster_mode:
+                await self._redis.expire(main_key, ttl_seconds)
+                if related_keys:
+                    for key in related_keys:
+                        await self._redis.expire(key, ttl_seconds)
+            else:
+                pipeline = self._redis.pipeline(transaction=True)
 
-            # Set TTL for main key
-            await pipeline.expire(main_key, ttl_seconds)
+                # Set TTL for main key
+                pipeline.expire(main_key, ttl_seconds)
 
-            # Set TTL for related keys
-            if related_keys:
-                for key in related_keys:
-                    await pipeline.expire(key, ttl_seconds)
+                # Set TTL for related keys
+                if related_keys:  # Check if related_keys is not None
+                    for key in related_keys:
+                        pipeline.expire(key, ttl_seconds)
 
-            await pipeline.execute()
+                await pipeline.execute()
 
     # This can't be properly typed due to covariance issues with async methods
     async def sweep_ttl(self) -> int:  # type: ignore[override]
@@ -313,7 +345,7 @@ class AsyncRedisStore(
 
         # Close Redis connections if we own them
         if self._owns_its_client:
-            await self._redis.aclose()  # type: ignore[attr-defined]
+            await self._redis.aclose()
             await self._redis.connection_pool.disconnect()
 
     async def abatch(self, ops: Iterable[Op]) -> list[Result]:
@@ -442,16 +474,26 @@ class AsyncRedisStore(
 
             if ttl_minutes is not None:
                 ttl_seconds = int(ttl_minutes * 60)
-                pipeline = self._redis.pipeline()
+                if self.cluster_mode:
+                    for keys_to_refresh in refresh_keys_by_idx.values():
+                        for key in keys_to_refresh:
+                            ttl = await self._redis.ttl(key)
+                            if ttl > 0:
+                                await self._redis.expire(key, ttl_seconds)
+                else:
+                    # In cluster mode, we must use transaction=False # Comment no longer relevant
+                    pipeline = self._redis.pipeline(
+                        transaction=True
+                    )  # Assuming non-cluster or single node for now
 
-                for keys in refresh_keys_by_idx.values():
-                    for key in keys:
-                        # Only refresh TTL if the key exists and has a TTL
-                        ttl = await self._redis.ttl(key)
-                        if ttl > 0:  # Only refresh if key exists and has TTL
-                            await pipeline.expire(key, ttl_seconds)
+                    for keys in refresh_keys_by_idx.values():
+                        for key in keys:
+                            # Only refresh TTL if the key exists and has a TTL
+                            ttl = await self._redis.ttl(key)
+                            if ttl > 0:  # Only refresh if key exists and has TTL
+                                pipeline.expire(key, ttl_seconds)
 
-                await pipeline.execute()
+                    await pipeline.execute()
 
     async def _aprepare_batch_PUT_queries(
         self,
@@ -544,17 +586,28 @@ class AsyncRedisStore(
             namespace = _namespace_to_text(op.namespace)
             query = f"@prefix:{namespace} @key:{{{_token_escaper.escape(op.key)}}}"
             results = await self.store_index.search(query)
-            pipeline = self._redis.pipeline()
-            for doc in results.docs:
-                pipeline.delete(doc.id)
 
-            if self.index_config:
-                vector_results = await self.vector_index.search(query)
-                for doc in vector_results.docs:
+            if self.cluster_mode:
+                for doc in results.docs:
+                    await self._redis.delete(doc.id)
+                if self.index_config:
+                    vector_results = await self.vector_index.search(query)
+                    for doc_vec in vector_results.docs:
+                        await self._redis.delete(doc_vec.id)
+            else:
+                pipeline = self._redis.pipeline(transaction=True)
+                for doc in results.docs:
                     pipeline.delete(doc.id)
 
-            if pipeline:
-                await pipeline.execute()
+                if self.index_config:
+                    vector_results = await self.vector_index.search(query)
+                    for doc_vec in vector_results.docs:
+                        pipeline.delete(doc_vec.id)
+
+                if (
+                    pipeline.command_stack
+                ):  # Check if pipeline has commands before executing
+                    await pipeline.execute()
 
         # Now handle new document creation
         doc_ids: dict[tuple[str, str], str] = {}
@@ -590,7 +643,13 @@ class AsyncRedisStore(
             store_keys.append(redis_key)
 
         if store_docs:
-            await self.store_index.load(store_docs, keys=store_keys)
+            if self.cluster_mode:
+                # For cluster mode, load documents individually if SearchIndex.load isn't cluster-safe for batching.
+                # This is a conservative approach. If redisvl's load is cluster-safe, this can be optimized.
+                for i, store_doc_item in enumerate(store_docs):
+                    await self.store_index.load([store_doc_item], keys=[store_keys[i]])
+            else:
+                await self.store_index.load(store_docs, keys=store_keys)
 
         # Handle vector embeddings with same IDs
         if embedding_request and self.embeddings:
@@ -616,16 +675,23 @@ class AsyncRedisStore(
                         "updated_at": datetime.now(timezone.utc).timestamp(),
                     }
                 )
-                vector_key = f"{STORE_VECTOR_PREFIX}{REDIS_KEY_SEPARATOR}{doc_id}"
-                vector_keys.append(vector_key)
+                redis_vector_key = f"{STORE_VECTOR_PREFIX}{REDIS_KEY_SEPARATOR}{doc_id}"
+                vector_keys.append(redis_vector_key)
 
                 # Add this vector key to the related keys list for TTL
                 main_key = f"{STORE_PREFIX}{REDIS_KEY_SEPARATOR}{doc_id}"
                 if main_key in ttl_tracking:
-                    ttl_tracking[main_key][0].append(vector_key)
+                    ttl_tracking[main_key][0].append(redis_vector_key)
 
             if vector_docs:
-                await self.vector_index.load(vector_docs, keys=vector_keys)
+                if self.cluster_mode:
+                    # Similar to store_docs, load vector docs individually in cluster mode as a precaution.
+                    for i, vector_doc_item in enumerate(vector_docs):
+                        await self.vector_index.load(
+                            [vector_doc_item], keys=[vector_keys[i]]
+                        )
+                else:
+                    await self.vector_index.load(vector_docs, keys=vector_keys)
 
         # Now apply TTLs after all documents are loaded
         for main_key, (related_keys, ttl_minutes) in ttl_tracking.items():
@@ -652,37 +718,61 @@ class AsyncRedisStore(
             if op.query and idx in query_vectors:
                 # Vector similarity search
                 vector = query_vectors[idx]
-                vector_results = await self.vector_index.query(
-                    VectorQuery(
-                        vector=vector.tolist() if hasattr(vector, "tolist") else vector,
-                        vector_field_name="embedding",
-                        filter_expression=f"@prefix:{_namespace_to_text(op.namespace_prefix)}*",
-                        return_fields=["prefix", "key", "vector_distance"],
-                        num_results=limit,  # Use the user-specified limit
-                    )
+                vector_query = VectorQuery(
+                    vector=vector.tolist() if hasattr(vector, "tolist") else vector,
+                    vector_field_name="embedding",
+                    filter_expression=f"@prefix:{_namespace_to_text(op.namespace_prefix)}*",
+                    return_fields=["prefix", "key", "vector_distance"],
+                    num_results=limit,  # Use the user-specified limit
                 )
+                vector_query.paging(offset, limit)
+                vector_results_docs = await self.vector_index.query(vector_query)
 
-                # Get matching store docs in pipeline
-                pipeline = self._redis.pipeline(transaction=False)
-                result_map = {}  # Map store key to vector result with distances
+                # Get matching store docs
+                result_map = {}
 
-                for doc in vector_results:
-                    doc_id = (
-                        doc.get("id")
-                        if isinstance(doc, dict)
-                        else getattr(doc, "id", None)
-                    )
-                    if doc_id:
-                        store_key = f"store:{doc_id.split(':')[1]}"  # Convert vector:ID to store:ID
-                        result_map[store_key] = doc
-                        pipeline.json().get(store_key)
-
-                # Execute all lookups in one batch
-                store_docs = await pipeline.execute()
+                if self.cluster_mode:
+                    store_docs = []
+                    for doc in vector_results_docs:
+                        doc_id = (
+                            doc.get("id")
+                            if isinstance(doc, dict)
+                            else getattr(doc, "id", None)
+                        )
+                        if doc_id:
+                            doc_uuid = doc_id.split(":")[1]
+                            store_key = f"{STORE_PREFIX}{REDIS_KEY_SEPARATOR}{doc_uuid}"
+                            result_map[store_key] = doc
+                            # Fetch individually in cluster mode
+                            store_doc_item = await self._redis.json().get(store_key)
+                            store_docs.append(store_doc_item)
+                    store_docs_raw = store_docs
+                else:
+                    pipeline = self._redis.pipeline(transaction=False)
+                    for (
+                        doc
+                    ) in (
+                        vector_results_docs
+                    ):  # doc_vr is now an individual doc from the list
+                        doc_id = (
+                            doc.get("id")
+                            if isinstance(doc, dict)
+                            else getattr(doc, "id", None)
+                        )
+                        if doc_id:
+                            doc_uuid = doc_id.split(":")[1]
+                            store_key = f"{STORE_PREFIX}{REDIS_KEY_SEPARATOR}{doc_uuid}"
+                            result_map[store_key] = doc
+                            pipeline.json().get(store_key)
+                    store_docs_raw = await pipeline.execute()
 
                 # Process results maintaining order and applying filters
                 items = []
-                for store_key, store_doc in zip(result_map.keys(), store_docs):
+                refresh_keys = []  # Track keys that need TTL refreshed
+                store_docs_iter = iter(store_docs_raw)
+
+                for store_key in result_map.keys():
+                    store_doc = next(store_docs_iter, None)
                     if store_doc:
                         vector_result = result_map[store_key]
                         # Get vector_distance from original search result
@@ -693,7 +783,26 @@ class AsyncRedisStore(
                         )
                         # Convert to similarity score
                         score = (1.0 - float(dist)) if dist is not None else 0.0
-                        store_doc["vector_distance"] = dist
+                        # Ensure store_doc is a dictionary before trying to assign to it
+                        if not isinstance(store_doc, dict):
+                            try:
+                                store_doc = json.loads(
+                                    store_doc
+                                )  # Attempt to parse if it's a JSON string
+                            except (json.JSONDecodeError, TypeError):
+                                logger.error(f"Failed to parse store_doc: {store_doc}")
+                                continue  # Skip this problematic document
+
+                        if isinstance(
+                            store_doc, dict
+                        ):  # Check again after potential parsing
+                            store_doc["vector_distance"] = dist
+                        else:
+                            # if still not a dict, this means it's a problematic entry
+                            logger.error(
+                                f"store_doc is not a dict after parsing attempt: {store_doc}"
+                            )
+                            continue
 
                         # Apply value filters if needed
                         if op.filter:
@@ -711,6 +820,16 @@ class AsyncRedisStore(
                             if not matches:
                                 continue
 
+                        # If refresh_ttl is true, add to list for refreshing
+                        if op.refresh_ttl:
+                            refresh_keys.append(store_key)
+                            # Also find associated vector keys with same ID
+                            doc_id = store_key.split(":")[-1]
+                            vector_key = (
+                                f"{STORE_VECTOR_PREFIX}{REDIS_KEY_SEPARATOR}{doc_id}"
+                            )
+                            refresh_keys.append(vector_key)
+
                         items.append(
                             _row_to_search_item(
                                 _decode_ns(store_doc["prefix"]),
@@ -719,7 +838,32 @@ class AsyncRedisStore(
                             )
                         )
 
+                # Refresh TTL if requested
+                if op.refresh_ttl and refresh_keys and self.ttl_config:
+                    # Get default TTL from config
+                    ttl_minutes = None
+                    if "default_ttl" in self.ttl_config:
+                        ttl_minutes = self.ttl_config.get("default_ttl")
+
+                    if ttl_minutes is not None:
+                        ttl_seconds = int(ttl_minutes * 60)
+                        if self.cluster_mode:
+                            for key in refresh_keys:
+                                ttl = await self._redis.ttl(key)
+                                if ttl > 0:
+                                    await self._redis.expire(key, ttl_seconds)
+                        else:
+                            pipeline = self._redis.pipeline(transaction=True)
+                            for key in refresh_keys:
+                                # Only refresh TTL if the key exists and has a TTL
+                                ttl = await self._redis.ttl(key)
+                                if ttl > 0:  # Only refresh if key exists and has TTL
+                                    pipeline.expire(key, ttl_seconds)
+                            if pipeline.command_stack:
+                                await pipeline.execute()
+
                 results[idx] = items
+
             else:
                 # Regular search
                 # Create a query with LIMIT and OFFSET parameters
@@ -728,6 +872,7 @@ class AsyncRedisStore(
                 # Execute search with limit and offset applied by Redis
                 res = await self.store_index.search(query)
                 items = []
+                refresh_keys = []  # Track keys that need TTL refreshed
 
                 for doc in res.docs:
                     data = json.loads(doc.json)
@@ -746,9 +891,42 @@ class AsyncRedisStore(
                                 break
                         if not matches:
                             continue
+
+                    # If refresh_ttl is true, add the key to refresh list
+                    if op.refresh_ttl:
+                        refresh_keys.append(doc.id)
+                        # Also find associated vector keys with same ID
+                        doc_id = doc.id.split(":")[-1]
+                        vector_key = (
+                            f"{STORE_VECTOR_PREFIX}{REDIS_KEY_SEPARATOR}{doc_id}"
+                        )
+                        refresh_keys.append(vector_key)
+
                     items.append(_row_to_search_item(_decode_ns(data["prefix"]), data))
 
-                # Note: Pagination is now handled by Redis, no need to slice items manually
+                # Refresh TTL if requested
+                if op.refresh_ttl and refresh_keys and self.ttl_config:
+                    # Get default TTL from config
+                    ttl_minutes = None
+                    if "default_ttl" in self.ttl_config:
+                        ttl_minutes = self.ttl_config.get("default_ttl")
+
+                    if ttl_minutes is not None:
+                        ttl_seconds = int(ttl_minutes * 60)
+                        if self.cluster_mode:
+                            for key in refresh_keys:
+                                ttl = await self._redis.ttl(key)
+                                if ttl > 0:
+                                    await self._redis.expire(key, ttl_seconds)
+                        else:
+                            pipeline = self._redis.pipeline(transaction=True)
+                            for key in refresh_keys:
+                                # Only refresh TTL if the key exists and has a TTL
+                                ttl = await self._redis.ttl(key)
+                                if ttl > 0:  # Only refresh if key exists and has TTL
+                                    pipeline.expire(key, ttl_seconds)
+                            if pipeline.command_stack:
+                                await pipeline.execute()
 
                 results[idx] = items
 
