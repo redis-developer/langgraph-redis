@@ -272,7 +272,7 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
 
         try:
             # Try to use client_setinfo command if available
-            self._redis.client_setinfo("LIB-NAME", client_info)  # type: ignore
+            self._redis.client_setinfo("LIB-NAME", client_info)
         except (ResponseError, AttributeError):
             # Fall back to a simple echo if client_setinfo is not available
             try:
@@ -292,7 +292,7 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
 
         try:
             # Try to use client_setinfo command if available
-            await self._redis.client_setinfo("LIB-NAME", client_info)  # type: ignore
+            await self._redis.client_setinfo("LIB-NAME", client_info)
         except (ResponseError, AttributeError):
             # Fall back to a simple echo if client_setinfo is not available
             try:
