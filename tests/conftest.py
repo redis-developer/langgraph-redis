@@ -77,7 +77,7 @@ def client(redis_url):
 async def clear_redis(redis_url: str) -> None:
     """Clear Redis before each test."""
     # Add a small delay to allow container to stabilize between tests
-    time.sleep(0.1)
+    await asyncio.sleep(0.1)
     try:
         client = Redis.from_url(redis_url, socket_connect_timeout=5)
         await client.flushall()
