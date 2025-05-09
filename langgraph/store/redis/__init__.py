@@ -21,7 +21,9 @@ from langgraph.store.base import (
     TTLConfig,
 )
 from redis import Redis
+from redis.cluster import RedisCluster
 from redis.commands.search.query import Query
+from redis.exceptions import ResponseError
 from redisvl.index import SearchIndex
 from redisvl.query import FilterQuery, VectorQuery
 from redisvl.redis.connection import RedisConnectionFactory
@@ -40,7 +42,7 @@ from langgraph.store.redis.base import (
     _namespace_to_text,
     _row_to_item,
     _row_to_search_item,
-    get_key_with_hash_tag,
+    logger,
 )
 
 from .token_unescaper import TokenUnescaper
@@ -81,10 +83,11 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
         conn: Redis,
         *,
         index: Optional[IndexConfig] = None,
-        ttl: Optional[dict[str, Any]] = None,
+        ttl: Optional[TTLConfig] = None,
     ) -> None:
         BaseStore.__init__(self)
         BaseRedisStore.__init__(self, conn, index=index, ttl=ttl)
+        self._detect_cluster_mode()
 
     @classmethod
     @contextmanager
@@ -93,7 +96,7 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
         conn_string: str,
         *,
         index: Optional[IndexConfig] = None,
-        ttl: Optional[dict[str, Any]] = None,
+        ttl: Optional[TTLConfig] = None,
     ) -> Iterator[RedisStore]:
         """Create store from Redis connection string."""
         client = None
@@ -111,6 +114,9 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
 
     def setup(self) -> None:
         """Initialize store indices."""
+        # Detect if we're connected to a Redis cluster
+        self._detect_cluster_mode()
+
         self.store_index.create(overwrite=False)
         if self.index_config:
             self.vector_index.create(overwrite=False)
@@ -143,6 +149,19 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
             )
 
         return results
+
+    def _detect_cluster_mode(self) -> None:
+        """Detect if the Redis client is connected to a cluster."""
+        try:
+            # Try to run a cluster command
+            # This will succeed for Redis clusters and fail for non-cluster servers
+            self._redis.cluster("info")
+            self.cluster_mode = True
+            logger.info("Redis cluster mode detected for RedisStore.")
+        except (ResponseError, AttributeError):
+            self.cluster_mode = False
+            logger.info("Redis standalone mode detected for RedisStore.")
+
 
     def _batch_list_namespaces_ops(
         self,
@@ -246,17 +265,22 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
 
             if ttl_minutes is not None:
                 ttl_seconds = int(ttl_minutes * 60)
-                # In cluster mode, we must use transaction=False
-                pipeline = self._redis.pipeline(transaction=not self.cluster_mode)
-
-                for keys in refresh_keys_by_idx.values():
-                    for key in keys:
-                        # Only refresh TTL if the key exists and has a TTL
-                        ttl = self._redis.ttl(key)
-                        if ttl > 0:  # Only refresh if key exists and has TTL
-                            pipeline.expire(key, ttl_seconds)
-
-                pipeline.execute()
+                if self.cluster_mode:
+                    for keys_to_refresh in refresh_keys_by_idx.values():
+                        for key in keys_to_refresh:
+                            ttl = self._redis.ttl(key)
+                            if ttl > 0:
+                                self._redis.expire(key, ttl_seconds)
+                else:
+                    pipeline = self._redis.pipeline(transaction=True)
+                    for keys in refresh_keys_by_idx.values():
+                        for key in keys:
+                            # Only refresh TTL if the key exists and has a TTL
+                            ttl = self._redis.ttl(key)
+                            if ttl > 0:  # Only refresh if key exists and has TTL
+                                pipeline.expire(key, ttl_seconds)
+                    if pipeline.command_stack:
+                        pipeline.execute()
 
     def _batch_put_ops(
         self,
@@ -270,12 +294,26 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
             namespace = _namespace_to_text(op.namespace)
             query = f"@prefix:{namespace} @key:{{{_token_escaper.escape(op.key)}}}"
             results = self.store_index.search(query)
-            for doc in results.docs:
-                self._redis.delete(doc.id)
-            if self.index_config:
-                results = self.vector_index.search(query)
+
+            if self.cluster_mode:
                 for doc in results.docs:
                     self._redis.delete(doc.id)
+                if self.index_config:
+                    vector_results = self.vector_index.search(query)
+                    for doc_vec in vector_results.docs:
+                        self._redis.delete(doc_vec.id)
+            else:
+                pipeline = self._redis.pipeline(transaction=True)
+                for doc in results.docs:
+                    pipeline.delete(doc.id)
+
+                if self.index_config:
+                    vector_results = self.vector_index.search(query)
+                    for doc_vec in vector_results.docs:
+                        pipeline.delete(doc_vec.id)
+
+                if pipeline.command_stack:
+                    pipeline.execute()
 
         # Now handle new document creation
         doc_ids: dict[tuple[str, str], str] = {}
@@ -293,12 +331,7 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
                 doc_ids[(namespace, op.key)] = generated_doc_id
                 # Track TTL for this document if specified
                 if hasattr(op, "ttl") and op.ttl is not None:
-                    main_key = get_key_with_hash_tag(
-                        STORE_PREFIX,
-                        REDIS_KEY_SEPARATOR,
-                        generated_doc_id,
-                        self.cluster_mode,
-                    )
+                    main_key = f"{STORE_PREFIX}{REDIS_KEY_SEPARATOR}{generated_doc_id}"
                     ttl_tracking[main_key] = ([], op.ttl)
 
         # Load store docs with explicit keys
@@ -312,13 +345,16 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
                 doc.pop("expires_at", None)
 
             store_docs.append(doc)
-            redis_key = get_key_with_hash_tag(
-                STORE_PREFIX, REDIS_KEY_SEPARATOR, doc_id, self.cluster_mode
-            )
+            redis_key = f"{STORE_PREFIX}{REDIS_KEY_SEPARATOR}{doc_id}"
             store_keys.append(redis_key)
 
         if store_docs:
-            self.store_index.load(store_docs, keys=store_keys)
+            if self.cluster_mode:
+                # Load individually if cluster
+                for i, store_doc_item in enumerate(store_docs):
+                    self.store_index.load([store_doc_item], keys=[store_keys[i]])
+            else:
+                self.store_index.load(store_docs, keys=store_keys)
 
         # Handle vector embeddings with same IDs
         if embedding_request and self.embeddings:
@@ -344,20 +380,21 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
                         "updated_at": datetime.now(timezone.utc).timestamp(),
                     }
                 )
-                vector_key = get_key_with_hash_tag(
-                    STORE_VECTOR_PREFIX, REDIS_KEY_SEPARATOR, doc_id, self.cluster_mode
-                )
-                vector_keys.append(vector_key)
+                redis_vector_key = f"{STORE_VECTOR_PREFIX}{REDIS_KEY_SEPARATOR}{doc_id}"
+                vector_keys.append(redis_vector_key)
 
                 # Add this vector key to the related keys list for TTL
-                main_key = get_key_with_hash_tag(
-                    STORE_PREFIX, REDIS_KEY_SEPARATOR, doc_id, self.cluster_mode
-                )
+                main_key = f"{STORE_PREFIX}{REDIS_KEY_SEPARATOR}{doc_id}"
                 if main_key in ttl_tracking:
-                    ttl_tracking[main_key][0].append(vector_key)
+                    ttl_tracking[main_key][0].append(redis_vector_key)
 
             if vector_docs:
-                self.vector_index.load(vector_docs, keys=vector_keys)
+                if self.cluster_mode:
+                    # Load individually if cluster
+                    for i, vector_doc_item in enumerate(vector_docs):
+                        self.vector_index.load([vector_doc_item], keys=[vector_keys[i]])
+                else:
+                    self.vector_index.load(vector_docs, keys=vector_keys)
 
         # Now apply TTLs after all documents are loaded
         for main_key, (related_keys, ttl_minutes) in ttl_tracking.items():
@@ -407,12 +444,7 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
                     if doc_id:
                         # Convert vector:ID to store:ID
                         doc_uuid = doc_id.split(":")[1]
-                        store_key = get_key_with_hash_tag(
-                            STORE_PREFIX,
-                            REDIS_KEY_SEPARATOR,
-                            doc_uuid,
-                            self.cluster_mode,
-                        )
+                        store_key = f"{STORE_PREFIX}{REDIS_KEY_SEPARATOR}{doc_uuid}"
                         result_map[store_key] = doc
                         pipe.json().get(store_key)
 
@@ -457,11 +489,8 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
                             refresh_keys.append(store_key)
                             # Also find associated vector keys with same ID
                             doc_id = store_key.split(":")[-1]
-                            vector_key = get_key_with_hash_tag(
-                                STORE_VECTOR_PREFIX,
-                                REDIS_KEY_SEPARATOR,
-                                doc_id,
-                                self.cluster_mode,
+                            vector_key = (
+                                f"{STORE_VECTOR_PREFIX}{REDIS_KEY_SEPARATOR}{doc_id}"
                             )
                             refresh_keys.append(vector_key)
 
@@ -482,16 +511,20 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
 
                     if ttl_minutes is not None:
                         ttl_seconds = int(ttl_minutes * 60)
-                        # In cluster mode, we must use transaction=False
-                        pipeline = self._redis.pipeline(
-                            transaction=not self.cluster_mode
-                        )
-                        for key in refresh_keys:
-                            # Only refresh TTL if the key exists and has a TTL
-                            ttl = self._redis.ttl(key)
-                            if ttl > 0:  # Only refresh if key exists and has TTL
-                                pipeline.expire(key, ttl_seconds)
-                        pipeline.execute()
+                        if self.cluster_mode:
+                            for key in refresh_keys:
+                                ttl = self._redis.ttl(key)
+                                if ttl > 0:
+                                    self._redis.expire(key, ttl_seconds)
+                        else:
+                            pipeline = self._redis.pipeline(transaction=True)
+                            for key in refresh_keys:
+                                # Only refresh TTL if the key exists and has a TTL
+                                ttl = self._redis.ttl(key)
+                                if ttl > 0:  # Only refresh if key exists and has TTL
+                                    pipeline.expire(key, ttl_seconds)
+                            if pipeline.command_stack:
+                                pipeline.execute()
 
                 results[idx] = items
             else:
@@ -527,11 +560,8 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
                         refresh_keys.append(doc.id)
                         # Also find associated vector keys with same ID
                         doc_id = doc.id.split(":")[-1]
-                        vector_key = get_key_with_hash_tag(
-                            STORE_VECTOR_PREFIX,
-                            REDIS_KEY_SEPARATOR,
-                            doc_id,
-                            self.cluster_mode,
+                        vector_key = (
+                            f"{STORE_VECTOR_PREFIX}{REDIS_KEY_SEPARATOR}{doc_id}"
                         )
                         refresh_keys.append(vector_key)
 
@@ -548,16 +578,20 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
 
                     if ttl_minutes is not None:
                         ttl_seconds = int(ttl_minutes * 60)
-                        # In cluster mode, we must use transaction=False
-                        pipeline = self._redis.pipeline(
-                            transaction=not self.cluster_mode
-                        )
-                        for key in refresh_keys:
-                            # Only refresh TTL if the key exists and has a TTL
-                            ttl = self._redis.ttl(key)
-                            if ttl > 0:  # Only refresh if key exists and has TTL
-                                pipeline.expire(key, ttl_seconds)
-                        pipeline.execute()
+                        if self.cluster_mode:
+                            for key in refresh_keys:
+                                ttl = self._redis.ttl(key)
+                                if ttl > 0:
+                                    self._redis.expire(key, ttl_seconds)
+                        else:
+                            pipeline = self._redis.pipeline(transaction=True)
+                            for key in refresh_keys:
+                                # Only refresh TTL if the key exists and has a TTL
+                                ttl = self._redis.ttl(key)
+                                if ttl > 0:  # Only refresh if key exists and has TTL
+                                    pipeline.expire(key, ttl_seconds)
+                            if pipeline.command_stack:
+                                pipeline.execute()
 
                 results[idx] = items
 

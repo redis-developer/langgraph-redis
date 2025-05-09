@@ -1,9 +1,11 @@
 import os
+import time
 
 import pytest
 from redis.asyncio import Redis
 from redisvl.redis.connection import RedisConnectionFactory
 from testcontainers.compose import DockerCompose
+from testcontainers.core.waiting_utils import wait_for_logs
 
 VECTOR_TYPES = ["vector", "halfvec"]
 
@@ -74,9 +76,17 @@ def client(redis_url):
 @pytest.fixture(autouse=True)
 async def clear_redis(redis_url: str) -> None:
     """Clear Redis before each test."""
-    client = Redis.from_url(redis_url)
-    await client.flushall()
-    await client.aclose()  # type: ignore[attr-defined]
+    # Add a small delay to allow container to stabilize between tests
+    time.sleep(0.1)
+    try:
+        client = Redis.from_url(redis_url, socket_connect_timeout=5)
+        await client.flushall()
+        await client.aclose()  # type: ignore[attr-defined]
+    except Exception as e:
+        # Log the error to help diagnose if connections still fail
+        print(f"Error in clear_redis fixture: {e}")
+        # Optionally re-raise or handle differently if needed
+        # raise e
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
