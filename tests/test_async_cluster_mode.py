@@ -174,9 +174,9 @@ async def test_async_cluster_mode_behavior_differs(
     mock_async_redis_cluster_client.pipeline_calls = []
     await async_cluster_store.aput(("test_ns",), "key_cluster", {"data": "c"}, ttl=1.0)
 
-    assert len(mock_async_redis_cluster_client.expire_calls) > 0, (
-        "Expire should be called directly for async cluster client"
-    )
+    assert (
+        len(mock_async_redis_cluster_client.expire_calls) > 0
+    ), "Expire should be called directly for async cluster client"
     assert not any(
         call.get("transaction") is True
         for call in mock_async_redis_cluster_client.pipeline_calls
