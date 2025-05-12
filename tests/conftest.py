@@ -1,11 +1,10 @@
+import asyncio
 import os
-import time
 
 import pytest
 from redis.asyncio import Redis
 from redisvl.redis.connection import RedisConnectionFactory
 from testcontainers.compose import DockerCompose
-from testcontainers.core.waiting_utils import wait_for_logs
 
 VECTOR_TYPES = ["vector", "halfvec"]
 
