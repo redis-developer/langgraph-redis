@@ -33,6 +33,7 @@ from langgraph.checkpoint.redis.util import (
     EMPTY_ID_SENTINEL,
     from_storage_safe_id,
     from_storage_safe_str,
+    safely_decode,
     to_storage_safe_id,
     to_storage_safe_str,
 )
@@ -212,12 +213,14 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             # Get the blob keys
             blob_key_pattern = f"{CHECKPOINT_BLOB_PREFIX}:{to_storage_safe_id(doc_thread_id)}:{to_storage_safe_str(doc_checkpoint_ns)}:*"
             blob_keys = await self._redis.keys(blob_key_pattern)
-            blob_keys = [key.decode() for key in blob_keys]
+            # Use safely_decode to handle both string and bytes responses
+            blob_keys = [safely_decode(key) for key in blob_keys]
 
             # Also get checkpoint write keys that should have the same TTL
             write_key_pattern = f"{CHECKPOINT_WRITE_PREFIX}:{to_storage_safe_id(doc_thread_id)}:{to_storage_safe_str(doc_checkpoint_ns)}:{to_storage_safe_id(doc_checkpoint_id)}:*"
             write_keys = await self._redis.keys(write_key_pattern)
-            write_keys = [key.decode() for key in write_keys]
+            # Use safely_decode to handle both string and bytes responses
+            write_keys = [safely_decode(key) for key in write_keys]
 
             # Apply TTL to checkpoint, blob keys, and write keys
             ttl_minutes = self.ttl_config.get("default_ttl")
@@ -895,9 +898,11 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             None,
         )
         matching_keys = await self._redis.keys(pattern=writes_key)
+        # Use safely_decode to handle both string and bytes responses
+        decoded_keys = [safely_decode(key) for key in matching_keys]
         parsed_keys = [
-            BaseRedisSaver._parse_redis_checkpoint_writes_key(key.decode())
-            for key in matching_keys
+            BaseRedisSaver._parse_redis_checkpoint_writes_key(key)
+            for key in decoded_keys
         ]
         pending_writes = BaseRedisSaver._load_writes(
             self.serde,

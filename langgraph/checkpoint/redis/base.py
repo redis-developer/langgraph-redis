@@ -18,6 +18,7 @@ from langgraph.checkpoint.serde.base import SerializerProtocol
 from langgraph.checkpoint.serde.types import ChannelProtocol
 
 from langgraph.checkpoint.redis.util import (
+    safely_decode,
     to_storage_safe_id,
     to_storage_safe_str,
 )
@@ -509,9 +510,12 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         # Cast the result to List[bytes] to help type checker
         matching_keys: List[bytes] = self._redis.keys(pattern=writes_key)  # type: ignore[assignment]
 
+        # Use safely_decode to handle both string and bytes responses
+        decoded_keys = [safely_decode(key) for key in matching_keys]
+
         parsed_keys = [
-            BaseRedisSaver._parse_redis_checkpoint_writes_key(key.decode())
-            for key in matching_keys
+            BaseRedisSaver._parse_redis_checkpoint_writes_key(key)
+            for key in decoded_keys
         ]
         pending_writes = BaseRedisSaver._load_writes(
             self.serde,
@@ -541,6 +545,9 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
 
     @staticmethod
     def _parse_redis_checkpoint_writes_key(redis_key: str) -> dict:
+        # Ensure redis_key is a string
+        redis_key = safely_decode(redis_key)
+
         parts = redis_key.split(REDIS_KEY_SEPARATOR)
         # Ensure we have at least 6 parts
         if len(parts) < 6:
