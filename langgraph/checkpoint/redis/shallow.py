@@ -26,6 +26,7 @@ from langgraph.checkpoint.redis.base import (
     REDIS_KEY_SEPARATOR,
     BaseRedisSaver,
 )
+from langgraph.checkpoint.redis.util import safely_decode
 
 SCHEMAS = [
     {
@@ -179,7 +180,9 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         # Process each existing blob key to determine if it should be kept or deleted
         if existing_blob_keys:
             for blob_key in existing_blob_keys:
-                key_parts = blob_key.decode().split(REDIS_KEY_SEPARATOR)
+                # Use safely_decode to handle both string and bytes responses
+                decoded_key = safely_decode(blob_key)
+                key_parts = decoded_key.split(REDIS_KEY_SEPARATOR)
                 # The key format is checkpoint_blob:thread_id:checkpoint_ns:channel:version
                 if len(key_parts) >= 5:
                     channel = key_parts[3]
@@ -387,7 +390,10 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
                     thread_id, checkpoint_ns
                 )
             )
-            blob_keys = [key.decode() for key in self._redis.keys(blob_key_pattern)]
+            # Use safely_decode to handle both string and bytes responses
+            blob_keys = [
+                safely_decode(key) for key in self._redis.keys(blob_key_pattern)
+            ]
 
             # Apply TTL
             self._apply_ttl_to_keys(checkpoint_key, blob_keys)
@@ -524,7 +530,9 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         # Process each existing writes key to determine if it should be kept or deleted
         if existing_writes_keys:
             for write_key in existing_writes_keys:
-                key_parts = write_key.decode().split(REDIS_KEY_SEPARATOR)
+                # Use safely_decode to handle both string and bytes responses
+                decoded_key = safely_decode(write_key)
+                key_parts = decoded_key.split(REDIS_KEY_SEPARATOR)
                 # The key format is checkpoint_write:thread_id:checkpoint_ns:checkpoint_id:task_id:idx
                 if len(key_parts) >= 5:
                     key_checkpoint_id = key_parts[3]
