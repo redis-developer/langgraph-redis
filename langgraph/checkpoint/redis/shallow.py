@@ -555,10 +555,10 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
                         pipeline.set(key, "$.blob", write_obj["blob"])
                     else:
                         # For new records, set the complete object
-                        pipeline.set(key, "$", write_obj)  # type: ignore[arg-type]
+                        pipeline.set(key, "$", write_obj)
                 else:
                     # INSERT case
-                    pipeline.set(key, "$", write_obj)  # type: ignore[arg-type]
+                    pipeline.set(key, "$", write_obj)
 
             pipeline.execute()
 

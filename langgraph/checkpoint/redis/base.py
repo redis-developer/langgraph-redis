@@ -154,7 +154,7 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
 
         try:
             # Try to use client_setinfo command if available
-            self._redis.client_setinfo("LIB-NAME", __full_lib_name__)  # type: ignore
+            self._redis.client_setinfo("LIB-NAME", __full_lib_name__)
         except (ResponseError, AttributeError):
             # Fall back to a simple echo if client_setinfo is not available
             try:
@@ -174,7 +174,7 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
 
         try:
             # Try to use client_setinfo command if available
-            await self._redis.client_setinfo("LIB-NAME", client_info)  # type: ignore
+            await self._redis.client_setinfo("LIB-NAME", client_info)
         except (ResponseError, AttributeError):
             # Fall back to a simple echo if client_setinfo is not available
             try:
@@ -468,17 +468,17 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
                     # UPSERT case - only update specific fields
                     if key_exists:
                         # Update only channel, type, and blob fields
-                        pipeline.set(key, "$.channel", write_obj["channel"])  # type: ignore[arg-type]
-                        pipeline.set(key, "$.type", write_obj["type"])  # type: ignore[arg-type]
-                        pipeline.set(key, "$.blob", write_obj["blob"])  # type: ignore[arg-type]
+                        pipeline.set(key, "$.channel", write_obj["channel"])
+                        pipeline.set(key, "$.type", write_obj["type"])
+                        pipeline.set(key, "$.blob", write_obj["blob"])
                     else:
                         # For new records, set the complete object
-                        pipeline.set(key, "$", write_obj)  # type: ignore[arg-type]
+                        pipeline.set(key, "$", write_obj)
                         created_keys.append(key)
                 else:
                     # INSERT case - only insert if doesn't exist
                     if not key_exists:
-                        pipeline.set(key, "$", write_obj)  # type: ignore[arg-type]
+                        pipeline.set(key, "$", write_obj)
                         created_keys.append(key)
 
             pipeline.execute()
