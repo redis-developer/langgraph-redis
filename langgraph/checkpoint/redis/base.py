@@ -288,19 +288,22 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         storage_safe_thread_id = to_storage_safe_id(thread_id)
         storage_safe_checkpoint_ns = to_storage_safe_str(checkpoint_ns)
 
+        # Ensure all versions are converted to strings to avoid TypeError with Tag filters
+        str_versions = {k: str(v) for k, v in versions.items()}
+
         return [
             (
                 BaseRedisSaver._make_redis_checkpoint_blob_key(
                     storage_safe_thread_id,
                     storage_safe_checkpoint_ns,
                     k,
-                    cast(str, ver),
+                    str_versions[k],  # Use the string version
                 ),
                 {
                     "thread_id": storage_safe_thread_id,
                     "checkpoint_ns": storage_safe_checkpoint_ns,
                     "channel": k,
-                    "version": cast(str, ver),
+                    "version": str_versions[k],  # Use the string version
                     "type": (
                         self._get_type_and_blob(values[k])[0]
                         if k in values
@@ -311,7 +314,7 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
                     ),
                 },
             )
-            for k, ver in versions.items()
+            for k in str_versions.keys()
         ]
 
     def _dump_writes(
