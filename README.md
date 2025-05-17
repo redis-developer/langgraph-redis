@@ -11,11 +11,33 @@ The project consists of two main components:
 
 ## Dependencies
 
-The project requires the following main dependencies:
+### Python Dependencies
+
+The project requires the following main Python dependencies:
 
 - `redis>=5.2.1`
 - `redisvl>=0.5.1`
 - `langgraph-checkpoint>=2.0.24`
+
+### Redis Modules Requirements
+
+**IMPORTANT:** This library requires Redis with the following modules:
+
+- **RedisJSON** - For storing and manipulating JSON data
+- **RediSearch** - For search and indexing capabilities
+
+#### Redis 8.0+
+
+If you're using Redis 8.0 or higher, both RedisJSON and RediSearch modules are included by default as part of the core Redis distribution. No additional installation is required.
+
+#### Redis < 8.0
+
+If you're using a Redis version lower than 8.0, you'll need to ensure these modules are installed:
+
+- Use [Redis Stack](https://redis.io/docs/stack/), which bundles Redis with these modules
+- Or install the modules separately in your Redis instance
+
+Failure to have these modules available will result in errors during index creation and checkpoint operations.
 
 ## Installation
 
@@ -259,9 +281,16 @@ To run the example notebooks with Docker:
 
 ## Implementation Details
 
+### Redis Module Usage
+
+This implementation relies on specific Redis modules:
+
+- **RedisJSON**: Used for storing structured JSON data as native Redis objects
+- **RediSearch**: Used for creating and querying indices on JSON data
+
 ### Indexing
 
-The Redis implementation creates these main indices:
+The Redis implementation creates these main indices using RediSearch:
 
 1. **Checkpoints Index**: Stores checkpoint metadata and versioning
 2. **Channel Values Index**: Stores channel-specific data
@@ -323,7 +352,7 @@ The project includes several make commands for development:
 - **Redis for Development/Testing**:
 
   ```bash
-  make redis-start   # Start Redis in Docker
+  make redis-start   # Start Redis Stack in Docker (includes RedisJSON and RediSearch modules)
   make redis-stop    # Stop Redis container
   ```
 
