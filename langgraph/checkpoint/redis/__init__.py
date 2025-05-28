@@ -354,13 +354,42 @@ class RedisSaver(BaseRedisSaver[Redis, SearchIndex]):
                 CHECKPOINT_WRITE_PREFIX,
             )
 
-            # Get the blob keys
-            blob_key_pattern = f"{CHECKPOINT_BLOB_PREFIX}:{to_storage_safe_id(doc_thread_id)}:{to_storage_safe_str(doc_checkpoint_ns)}:*"
-            blob_keys = [key.decode() for key in self._redis.keys(blob_key_pattern)]
+            # Get the blob keys using search index instead of keys()
+            blob_query = FilterQuery(
+                filter_expression=(
+                    Tag("thread_id") == to_storage_safe_id(doc_thread_id)
+                )
+                & (Tag("checkpoint_ns") == to_storage_safe_str(doc_checkpoint_ns)),
+                return_fields=["key"],  # Assuming the key field exists in the index
+                num_results=1000,
+            )
+            blob_results = self.checkpoint_blobs_index.search(blob_query)
+            blob_keys = [
+                f"{CHECKPOINT_BLOB_PREFIX}:{to_storage_safe_id(doc_thread_id)}:{to_storage_safe_str(doc_checkpoint_ns)}:{getattr(doc, 'channel', '')}:{getattr(doc, 'version', '')}"
+                for doc in blob_results.docs
+            ]
 
-            # Also get checkpoint write keys that should have the same TTL
-            write_key_pattern = f"{CHECKPOINT_WRITE_PREFIX}:{to_storage_safe_id(doc_thread_id)}:{to_storage_safe_str(doc_checkpoint_ns)}:{to_storage_safe_id(doc_checkpoint_id)}:*"
-            write_keys = [key.decode() for key in self._redis.keys(write_key_pattern)]
+            # Get checkpoint write keys using search index
+            write_query = FilterQuery(
+                filter_expression=(
+                    Tag("thread_id") == to_storage_safe_id(doc_thread_id)
+                )
+                & (Tag("checkpoint_ns") == to_storage_safe_str(doc_checkpoint_ns))
+                & (Tag("checkpoint_id") == to_storage_safe_id(doc_checkpoint_id)),
+                return_fields=["task_id", "idx"],
+                num_results=1000,
+            )
+            write_results = self.checkpoint_writes_index.search(write_query)
+            write_keys = [
+                BaseRedisSaver._make_redis_checkpoint_writes_key(
+                    to_storage_safe_id(doc_thread_id),
+                    to_storage_safe_str(doc_checkpoint_ns),
+                    to_storage_safe_id(doc_checkpoint_id),
+                    getattr(doc, "task_id", ""),
+                    getattr(doc, "idx", 0),
+                )
+                for doc in write_results.docs
+            ]
 
             # Apply TTL to checkpoint, blob keys, and write keys
             all_related_keys = blob_keys + write_keys
@@ -489,12 +518,15 @@ class RedisSaver(BaseRedisSaver[Redis, SearchIndex]):
             blob_results = self.checkpoint_blobs_index.search(blob_query)
             if blob_results.docs:
                 blob_doc = blob_results.docs[0]
-                blob_type = blob_doc.type
+                blob_type = getattr(blob_doc, "type", None)
                 blob_data = getattr(blob_doc, "$.blob", None)
 
-                if blob_data and blob_type != "empty":
+                if blob_data and blob_type and blob_type != "empty":
+                    # Ensure blob_data is bytes for deserialization
+                    if isinstance(blob_data, str):
+                        blob_data = blob_data.encode("utf-8")
                     channel_values[channel] = self.serde.loads_typed(
-                        (blob_type, blob_data)
+                        (str(blob_type), blob_data)
                     )
 
         return channel_values

@@ -16,6 +16,8 @@ from langgraph.checkpoint.base import (
 )
 from langgraph.checkpoint.serde.base import SerializerProtocol
 from langgraph.checkpoint.serde.types import ChannelProtocol
+from redisvl.query import FilterQuery
+from redisvl.query.filter import Tag
 
 from langgraph.checkpoint.redis.util import (
     safely_decode,
@@ -440,7 +442,7 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
             type_, blob = self.serde.dumps_typed(value)
             write_obj = {
                 "thread_id": to_storage_safe_id(thread_id),
-                "checkpoint_ns": to_storage_safe_str(checkpoint_ns),
+                "checkpoint_ns": checkpoint_ns,  # Don't use sentinel for tag fields in RediSearch
                 "checkpoint_id": to_storage_safe_id(checkpoint_id),
                 "task_id": task_id,
                 "task_path": task_path,
@@ -462,7 +464,7 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
                     checkpoint_ns,
                     checkpoint_id,
                     task_id,
-                    write_obj["idx"],  # type: ignore[arg-type]
+                    write_obj["idx"],
                 )
 
                 # First check if key exists
@@ -499,33 +501,40 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         if checkpoint_id is None:
             return []  # Early return if no checkpoint_id
 
-        writes_key = BaseRedisSaver._make_redis_checkpoint_writes_key(
-            to_storage_safe_id(thread_id),
-            to_storage_safe_str(checkpoint_ns),
-            to_storage_safe_id(checkpoint_id),
-            "*",
-            None,
+        # Use search index instead of keys() to avoid CrossSlot errors
+        # Note: For checkpoint_ns, we use the raw value for tag searches
+        # because RediSearch may not handle sentinel values correctly in tag fields
+        writes_query = FilterQuery(
+            filter_expression=(Tag("thread_id") == to_storage_safe_id(thread_id))
+            & (Tag("checkpoint_ns") == checkpoint_ns)
+            & (Tag("checkpoint_id") == to_storage_safe_id(checkpoint_id)),
+            return_fields=["task_id", "idx", "channel", "type", "$.blob"],
+            num_results=1000,  # Adjust as needed
         )
 
-        # Cast the result to List[bytes] to help type checker
-        matching_keys: List[bytes] = self._redis.keys(pattern=writes_key)  # type: ignore[assignment]
+        writes_results = self.checkpoint_writes_index.search(writes_query)
 
-        # Use safely_decode to handle both string and bytes responses
-        decoded_keys = [safely_decode(key) for key in matching_keys]
+        # Sort results by idx to maintain order
+        sorted_writes = sorted(writes_results.docs, key=lambda x: getattr(x, "idx", 0))
 
-        parsed_keys = [
-            BaseRedisSaver._parse_redis_checkpoint_writes_key(key)
-            for key in decoded_keys
-        ]
-        pending_writes = BaseRedisSaver._load_writes(
-            self.serde,
-            {
-                (parsed_key["task_id"], parsed_key["idx"]): self._redis.json().get(key)
-                for key, parsed_key in sorted(
-                    zip(matching_keys, parsed_keys), key=lambda x: x[1]["idx"]
-                )
-            },
-        )
+        # Build the writes dictionary
+        writes_dict: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        for doc in sorted_writes:
+            task_id = str(getattr(doc, "task_id", ""))
+            idx = str(getattr(doc, "idx", 0))
+            blob_data = getattr(doc, "$.blob", "")
+            # Ensure blob is bytes for deserialization
+            if isinstance(blob_data, str):
+                blob_data = blob_data.encode("utf-8")
+            writes_dict[(task_id, idx)] = {
+                "task_id": task_id,
+                "idx": idx,
+                "channel": str(getattr(doc, "channel", "")),
+                "type": str(getattr(doc, "type", "")),
+                "blob": blob_data,
+            }
+
+        pending_writes = BaseRedisSaver._load_writes(self.serde, writes_dict)
         return pending_writes
 
     @staticmethod
