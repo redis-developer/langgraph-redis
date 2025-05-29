@@ -25,7 +25,7 @@ redis = "^5.2.1"
 python-ulid = "^3.0.0"
 
 [tool.poetry.group.dev.dependencies]
-langgraph = ">=0.3.0"
+langgraph = ">=0.3.0,<0.5.0"
 black = "^25.1.0"
 codespell = "^2.2.0"
 pytest = "^7.2.1"
