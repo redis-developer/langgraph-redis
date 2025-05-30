@@ -20,7 +20,7 @@ packages = [{ include = "langgraph" }]
 [tool.poetry.dependencies]
 python = ">=3.9,<3.14"
 langgraph-checkpoint = "^2.0.24"
-redisvl = "^0.5.1"
+redisvl = ">=0.5.1,<0.8.0"
 redis = "^5.2.1"
 python-ulid = "^3.0.0"
 

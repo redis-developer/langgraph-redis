@@ -269,7 +269,10 @@ def test_from_conn_string_errors(redis_url: str) -> None:
             saver.setup()
 
     # Test with empty URL
-    with pytest.raises(ValueError, match="REDIS_URL env var not set"):
+    # Handle both old and new RedisVL error message formats
+    with pytest.raises(
+        ValueError, match="REDIS_URL (env var|environment variable) not set"
+    ):
         with ShallowRedisSaver.from_conn_string("") as saver:
             saver.setup()
 
