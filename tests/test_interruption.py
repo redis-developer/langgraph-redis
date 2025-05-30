@@ -24,7 +24,7 @@ class InterruptionError(Exception):
     pass
 
 
-class MockRedis:
+class MockRedis(Redis):
     """Mock Redis class that can simulate interruptions during operations."""
 
     def __init__(self, real_redis: Redis, interrupt_on: str = None) -> None:
@@ -34,14 +34,36 @@ class MockRedis:
             real_redis: The real Redis client to delegate to
             interrupt_on: Operation name to interrupt on (e.g., 'json().set', 'Pipeline.execute')
         """
+        # Copy connection info from real_redis to satisfy Redis base class
+        super().__init__(
+            connection_pool=real_redis.connection_pool,
+            single_connection_client=real_redis.single_connection_client,
+        )
         self.real_redis = real_redis
         self.interrupt_on = interrupt_on
         self.operations_count = {}
         self.interrupt_after_count = {}
 
-    def __getattr__(self, name):
+    def __getattribute__(self, name):
         """Proxy attribute access to the real Redis client, but track operations."""
-        attr = getattr(self.real_redis, name)
+        # For special attributes we've set in __init__, use the parent implementation
+        if name in [
+            "real_redis",
+            "interrupt_on",
+            "operations_count",
+            "interrupt_after_count",
+        ]:
+            return super().__getattribute__(name)
+
+        # For Redis base class attributes
+        if name in ["connection_pool", "single_connection_client", "_parser", "_lock"]:
+            return super().__getattribute__(name)
+
+        try:
+            attr = getattr(self.real_redis, name)
+        except AttributeError:
+            # Fall back to parent class
+            return super().__getattribute__(name)
 
         # For methods we want to potentially interrupt
         if callable(attr) and name == self.interrupt_on:
