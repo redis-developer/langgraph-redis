@@ -925,3 +925,75 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
 
         pending_writes = BaseRedisSaver._load_writes(self.serde, writes_dict)
         return pending_writes
+
+    async def adelete_thread(self, thread_id: str) -> None:
+        """Delete all checkpoints and writes associated with a specific thread ID.
+
+        Args:
+            thread_id: The thread ID whose checkpoints should be deleted.
+        """
+        storage_safe_thread_id = to_storage_safe_id(thread_id)
+
+        # Delete all checkpoints for this thread
+        checkpoint_query = FilterQuery(
+            filter_expression=Tag("thread_id") == storage_safe_thread_id,
+            return_fields=["checkpoint_ns", "checkpoint_id"],
+            num_results=10000,  # Get all checkpoints for this thread
+        )
+
+        checkpoint_results = await self.checkpoints_index.search(checkpoint_query)
+
+        # Delete all checkpoint-related keys
+        pipeline = self._redis.pipeline()
+
+        for doc in checkpoint_results.docs:
+            checkpoint_ns = getattr(doc, "checkpoint_ns", "")
+            checkpoint_id = getattr(doc, "checkpoint_id", "")
+
+            # Delete checkpoint key
+            checkpoint_key = BaseRedisSaver._make_redis_checkpoint_key(
+                storage_safe_thread_id, checkpoint_ns, checkpoint_id
+            )
+            pipeline.delete(checkpoint_key)
+
+        # Delete all blobs for this thread
+        blob_query = FilterQuery(
+            filter_expression=Tag("thread_id") == storage_safe_thread_id,
+            return_fields=["checkpoint_ns", "channel", "version"],
+            num_results=10000,
+        )
+
+        blob_results = await self.checkpoint_blobs_index.search(blob_query)
+
+        for doc in blob_results.docs:
+            checkpoint_ns = getattr(doc, "checkpoint_ns", "")
+            channel = getattr(doc, "channel", "")
+            version = getattr(doc, "version", "")
+
+            blob_key = BaseRedisSaver._make_redis_checkpoint_blob_key(
+                storage_safe_thread_id, checkpoint_ns, channel, version
+            )
+            pipeline.delete(blob_key)
+
+        # Delete all writes for this thread
+        writes_query = FilterQuery(
+            filter_expression=Tag("thread_id") == storage_safe_thread_id,
+            return_fields=["checkpoint_ns", "checkpoint_id", "task_id", "idx"],
+            num_results=10000,
+        )
+
+        writes_results = await self.checkpoint_writes_index.search(writes_query)
+
+        for doc in writes_results.docs:
+            checkpoint_ns = getattr(doc, "checkpoint_ns", "")
+            checkpoint_id = getattr(doc, "checkpoint_id", "")
+            task_id = getattr(doc, "task_id", "")
+            idx = getattr(doc, "idx", 0)
+
+            write_key = BaseRedisSaver._make_redis_checkpoint_writes_key(
+                storage_safe_thread_id, checkpoint_ns, checkpoint_id, task_id, idx
+            )
+            pipeline.delete(write_key)
+
+        # Execute all deletions
+        await pipeline.execute()
