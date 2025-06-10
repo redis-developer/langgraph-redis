@@ -8,7 +8,6 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any, Generic, Iterable, Optional, Sequence, TypedDict, TypeVar, Union
 
-from langchain_core.embeddings import Embeddings
 from langgraph.store.base import (
     GetOp,
     IndexConfig,
@@ -25,7 +24,6 @@ from langgraph.store.base import (
 )
 from redis import Redis
 from redis.asyncio import Redis as AsyncRedis
-from redis.cluster import RedisCluster as SyncRedisCluster
 from redis.exceptions import ResponseError
 from redisvl.index import SearchIndex
 from redisvl.query.filter import Tag, Text
@@ -263,7 +261,6 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
 
     def set_client_info(self) -> None:
         """Set client info for Redis monitoring."""
-        from redis.exceptions import ResponseError
 
         from langgraph.checkpoint.redis.version import __redisvl_version__
 
@@ -283,7 +280,6 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
 
     async def aset_client_info(self) -> None:
         """Set client info for Redis monitoring asynchronously."""
-        from redis.exceptions import ResponseError
 
         from langgraph.checkpoint.redis.version import __redisvl_version__
 

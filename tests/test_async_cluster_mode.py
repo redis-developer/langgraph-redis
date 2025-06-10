@@ -11,6 +11,7 @@ from redis.asyncio.cluster import (
 )
 
 from langgraph.store.redis import AsyncRedisStore
+from langgraph.checkpoint.redis.aio import AsyncRedisSaver
 
 
 # Override session-scoped redis_container fixture to prevent Docker operations and provide dummy host/port
@@ -92,6 +93,27 @@ class AsyncMockRedisCluster(
         self.pipeline_calls = []
         self.expire_calls = []
         self.delete_calls = []
+
+        # Add required cluster attributes to prevent AttributeError
+        self.cluster_error_retry_attempts = 3
+        self.connection_pool = AsyncMock()
+
+    # Mock the client_setinfo method that's called during setup
+    async def client_setinfo(self, *args, **kwargs):
+        return True
+
+    # Mock execute_command to avoid cluster-specific execution
+    async def execute_command(self, *args, **kwargs):
+        command = args[0] if args else ""
+        if command == "CLIENT SETINFO":
+            return True
+        # Add other command responses as needed
+        return None
+
+    # Mock module_list method for Redis modules check
+    async def module_list(self):
+        # Return mock modules that satisfy the validation requirements
+        return [{"name": "search", "ver": 20600}, {"name": "json", "ver": 20600}]
 
     # Mock pipeline to record calls and simulate async behavior
     def pipeline(self, transaction=True):
@@ -204,3 +226,130 @@ async def test_async_cluster_mode_behavior_differs(
         call.get("transaction") is True
         for call in mock_async_redis_client.pipeline_calls
     ), "Transactional pipeline expected for async non-cluster TTL"
+
+
+@pytest.fixture(params=[False, True])
+async def async_checkpoint_saver(request):
+    """Parameterized fixture for AsyncRedisSaver with regular or cluster client."""
+    is_cluster = request.param
+    client = AsyncMockRedisCluster() if is_cluster else AsyncMockRedis()
+
+    saver = AsyncRedisSaver(redis_client=client)
+
+    # Mock the search indices
+    saver.checkpoints_index = AsyncMock()
+    saver.checkpoints_index.create = AsyncMock()
+    saver.checkpoints_index.search = AsyncMock(return_value=MagicMock(docs=[]))
+    saver.checkpoints_index.load = AsyncMock()
+
+    saver.checkpoint_blobs_index = AsyncMock()
+    saver.checkpoint_blobs_index.create = AsyncMock()
+    saver.checkpoint_blobs_index.search = AsyncMock(return_value=MagicMock(docs=[]))
+    saver.checkpoint_blobs_index.load = AsyncMock()
+
+    saver.checkpoint_writes_index = AsyncMock()
+    saver.checkpoint_writes_index.create = AsyncMock()
+    saver.checkpoint_writes_index.search = AsyncMock(return_value=MagicMock(docs=[]))
+    saver.checkpoint_writes_index.load = AsyncMock()
+
+    # Skip asetup() to avoid complex RedisVL index creation, just test cluster detection
+    await saver._detect_cluster_mode()
+    return saver
+
+
+@pytest.mark.asyncio
+async def test_async_checkpoint_saver_cluster_detection(async_checkpoint_saver):
+    """Test that async checkpoint saver cluster_mode is set correctly."""
+    is_client_cluster = isinstance(async_checkpoint_saver._redis, AsyncRedisCluster)
+    assert async_checkpoint_saver.cluster_mode == is_client_cluster
+
+
+@pytest.mark.asyncio
+async def test_async_checkpoint_saver_aput_ttl_behavior(async_checkpoint_saver):
+    """Test TTL behavior in aput for async checkpoint saver in cluster vs. non-cluster mode."""
+    from langgraph.checkpoint.base import Checkpoint, CheckpointMetadata
+
+    client = async_checkpoint_saver._redis
+    client.expire_calls.clear()
+    client.pipeline_calls.clear()
+
+    # Set up TTL config
+    async_checkpoint_saver.ttl_config = {"default_ttl": 5.0}
+
+    # Mock the JSON operations to avoid actual data operations
+    mock_json = AsyncMock()
+    mock_json.set = AsyncMock(return_value=True)
+    client.json = MagicMock(return_value=mock_json)
+
+    # Create mock checkpoint and metadata
+    config = {
+        "configurable": {
+            "thread_id": "test_thread",
+            "checkpoint_ns": "",
+            "checkpoint_id": "test_checkpoint",
+        }
+    }
+    checkpoint: Checkpoint = {"channel_values": {}, "version": "1.0"}
+    metadata: CheckpointMetadata = {"source": "test", "step": 1}
+    new_versions = {}
+
+    # Call aput which should trigger TTL operations
+    await async_checkpoint_saver.aput(config, checkpoint, metadata, new_versions)
+
+    if async_checkpoint_saver.cluster_mode:
+        # In cluster mode, TTL operations should be called directly
+        assert len(client.expire_calls) >= 1  # At least one TTL call for the checkpoint
+        # Check that expire was called with correct TTL (5 minutes = 300 seconds)
+        ttl_calls = [call for call in client.expire_calls if call.get("ttl") == 300]
+        assert len(ttl_calls) >= 1
+    else:
+        # In non-cluster mode, pipeline should be used for TTL operations
+        assert len(client.pipeline_calls) > 0
+        # Should have pipeline calls for the main operations and potentially TTL operations
+
+
+@pytest.mark.asyncio
+async def test_async_checkpoint_saver_delete_thread_behavior(async_checkpoint_saver):
+    """Test delete_thread behavior for async checkpoint saver in cluster vs. non-cluster mode."""
+    client = async_checkpoint_saver._redis
+    client.delete_calls.clear()
+    client.pipeline_calls.clear()
+
+    # Mock search results to simulate existing data
+    mock_checkpoint_doc = MagicMock()
+    mock_checkpoint_doc.checkpoint_ns = "test_ns"
+    mock_checkpoint_doc.checkpoint_id = "test_checkpoint"
+
+    mock_blob_doc = MagicMock()
+    mock_blob_doc.checkpoint_ns = "test_ns"
+    mock_blob_doc.channel = "test_channel"
+    mock_blob_doc.version = "1"
+
+    mock_write_doc = MagicMock()
+    mock_write_doc.checkpoint_ns = "test_ns"
+    mock_write_doc.checkpoint_id = "test_checkpoint"
+    mock_write_doc.task_id = "test_task"
+    mock_write_doc.idx = 0
+
+    async_checkpoint_saver.checkpoints_index.search.return_value = MagicMock(
+        docs=[mock_checkpoint_doc]
+    )
+    async_checkpoint_saver.checkpoint_blobs_index.search.return_value = MagicMock(
+        docs=[]
+    )
+    async_checkpoint_saver.checkpoint_writes_index.search.return_value = MagicMock(
+        docs=[]
+    )
+
+    await async_checkpoint_saver.adelete_thread("test_thread")
+
+    if async_checkpoint_saver.cluster_mode:
+        # In cluster mode, delete operations should be called directly
+        assert len(client.delete_calls) > 0  # At least one checkpoint key deletion
+        # Pipeline should not be used for deletions in cluster mode
+        # (it might be called for other reasons but not for delete operations)
+    else:
+        # In non-cluster mode, pipeline should be used for deletions
+        assert len(client.pipeline_calls) > 0  # At least one pipeline used
+        # Direct delete calls should not be made in non-cluster mode
+        assert len(client.delete_calls) == 0
