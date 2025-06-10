@@ -190,6 +190,53 @@ class AsyncRedisSaver(
             logger.info("Redis client is a standalone client")
             self.cluster_mode = False
 
+    async def _apply_ttl_to_keys(
+        self,
+        main_key: str,
+        related_keys: Optional[list[str]] = None,
+        ttl_minutes: Optional[float] = None,
+    ) -> Any:
+        """Apply Redis native TTL to keys asynchronously.
+
+        Args:
+            main_key: The primary Redis key
+            related_keys: Additional Redis keys that should expire at the same time
+            ttl_minutes: Time-to-live in minutes, overrides default_ttl if provided
+
+        Returns:
+            Result of the Redis operation
+        """
+        if ttl_minutes is None:
+            # Check if there's a default TTL in config
+            if self.ttl_config and "default_ttl" in self.ttl_config:
+                ttl_minutes = self.ttl_config.get("default_ttl")
+
+        if ttl_minutes is not None:
+            ttl_seconds = int(ttl_minutes * 60)
+
+            if self.cluster_mode:
+                # For cluster mode, execute TTL operations individually
+                await self._redis.expire(main_key, ttl_seconds)
+
+                if related_keys:
+                    for key in related_keys:
+                        await self._redis.expire(key, ttl_seconds)
+
+                return True
+            else:
+                # For non-cluster mode, use pipeline for efficiency
+                pipeline = self._redis.pipeline()
+
+                # Set TTL for main key
+                pipeline.expire(main_key, ttl_seconds)
+
+                # Set TTL for related keys
+                if related_keys:
+                    for key in related_keys:
+                        pipeline.expire(key, ttl_seconds)
+
+                return await pipeline.execute()
+
     async def aget_tuple(self, config: RunnableConfig) -> Optional[CheckpointTuple]:
         """Get a checkpoint tuple from Redis asynchronously."""
         thread_id = config["configurable"]["thread_id"]
@@ -263,29 +310,10 @@ class AsyncRedisSaver(
             write_keys = [safely_decode(key) for key in write_keys]
 
             # Apply TTL to checkpoint, blob keys, and write keys
-            ttl_minutes = self.ttl_config.get("default_ttl")
-            if ttl_minutes is not None:
-                ttl_seconds = int(ttl_minutes * 60)
-
-                if self.cluster_mode:
-                    # For cluster mode, execute TTL operations individually
-                    await self._redis.expire(checkpoint_key, ttl_seconds)
-
-                    # Combine blob keys and write keys for TTL refresh
-                    all_related_keys = blob_keys + write_keys
-                    for key in all_related_keys:
-                        await self._redis.expire(key, ttl_seconds)
-                else:
-                    # For non-cluster mode, use pipeline for TTL operations
-                    pipeline = self._redis.pipeline()
-                    pipeline.expire(checkpoint_key, ttl_seconds)
-
-                    # Combine blob keys and write keys for TTL refresh
-                    all_related_keys = blob_keys + write_keys
-                    for key in all_related_keys:
-                        pipeline.expire(key, ttl_seconds)
-
-                    await pipeline.execute()
+            all_related_keys = blob_keys + write_keys
+            await self._apply_ttl_to_keys(
+                checkpoint_key, all_related_keys if all_related_keys else None
+            )
 
         # Fetch channel_values
         channel_values = await self.aget_channel_values(
@@ -801,14 +829,10 @@ class AsyncRedisSaver(
                     and self.ttl_config
                     and "default_ttl" in self.ttl_config
                 ):
-                    ttl_minutes = self.ttl_config.get("default_ttl")
-                    ttl_seconds = int(ttl_minutes * 60)
-
-                    # Use a new pipeline for TTL operations
-                    ttl_pipeline = self._redis.pipeline()
-                    for key in created_keys:
-                        ttl_pipeline.expire(key, ttl_seconds)
-                    await ttl_pipeline.execute()
+                    await self._apply_ttl_to_keys(
+                        created_keys[0],
+                        created_keys[1:] if len(created_keys) > 1 else None,
+                    )
 
         except asyncio.CancelledError:
             # Handle cancellation/interruption
