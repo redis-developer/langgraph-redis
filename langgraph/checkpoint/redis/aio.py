@@ -4,11 +4,23 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 from contextlib import asynccontextmanager
 from functools import partial
 from types import TracebackType
-from typing import Any, AsyncIterator, Dict, List, Optional, Sequence, Tuple, Type, cast
+from typing import (
+    Any,
+    AsyncIterator,
+    Dict,
+    List,
+    Optional,
+    Sequence,
+    Tuple,
+    Type,
+    Union,
+    cast,
+)
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import (
@@ -23,6 +35,7 @@ from langgraph.checkpoint.base import (
 from langgraph.constants import TASKS
 from redis.asyncio import Redis as AsyncRedis
 from redis.asyncio.client import Pipeline
+from redis.asyncio.cluster import RedisCluster as AsyncRedisCluster
 from redisvl.index import AsyncSearchIndex
 from redisvl.query import FilterQuery
 from redisvl.query.filter import Num, Tag
@@ -37,6 +50,8 @@ from langgraph.checkpoint.redis.util import (
     to_storage_safe_id,
     to_storage_safe_str,
 )
+
+logger = logging.getLogger(__name__)
 
 
 async def _write_obj_tx(
@@ -58,7 +73,9 @@ async def _write_obj_tx(
             await pipe.json().set(key, "$", write_obj)
 
 
-class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
+class AsyncRedisSaver(
+    BaseRedisSaver[Union[AsyncRedis, AsyncRedisCluster], AsyncSearchIndex]
+):
     """Async Redis implementation for checkpoint saver."""
 
     _redis_url: str
@@ -66,13 +83,17 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
     checkpoint_blobs_index: AsyncSearchIndex
     checkpoint_writes_index: AsyncSearchIndex
 
-    _redis: AsyncRedis  # Override the type from the base class
+    _redis: Union[
+        AsyncRedis, AsyncRedisCluster
+    ]  # Support both standalone and cluster clients
+    # Whether to assume the Redis server is a cluster; None triggers auto-detection
+    cluster_mode: Optional[bool] = None
 
     def __init__(
         self,
         redis_url: Optional[str] = None,
         *,
-        redis_client: Optional[AsyncRedis] = None,
+        redis_client: Optional[Union[AsyncRedis, AsyncRedisCluster]] = None,
         connection_args: Optional[Dict[str, Any]] = None,
         ttl: Optional[Dict[str, Any]] = None,
     ) -> None:
@@ -87,7 +108,7 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
     def configure_client(
         self,
         redis_url: Optional[str] = None,
-        redis_client: Optional[AsyncRedis] = None,
+        redis_client: Optional[Union[AsyncRedis, AsyncRedisCluster]] = None,
         connection_args: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Configure the Redis client."""
@@ -144,11 +165,77 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             self.checkpoint_writes_index._redis_client = None
 
     async def asetup(self) -> None:
-        """Initialize Redis indexes asynchronously."""
-        # Create indexes in Redis asynchronously
+        """Set up the checkpoint saver."""
+        self.create_indexes()
         await self.checkpoints_index.create(overwrite=False)
         await self.checkpoint_blobs_index.create(overwrite=False)
         await self.checkpoint_writes_index.create(overwrite=False)
+
+        # Detect cluster mode if not explicitly set
+        await self._detect_cluster_mode()
+
+    async def _detect_cluster_mode(self) -> None:
+        """Detect if the Redis client is a cluster client by inspecting its class."""
+        if self.cluster_mode is not None:
+            logger.info(
+                f"Redis cluster_mode explicitly set to {self.cluster_mode}, skipping detection."
+            )
+            return
+
+        # Determine cluster mode based on client class
+        if isinstance(self._redis, AsyncRedisCluster):
+            logger.info("Redis client is a cluster client")
+            self.cluster_mode = True
+        else:
+            logger.info("Redis client is a standalone client")
+            self.cluster_mode = False
+
+    async def _apply_ttl_to_keys(
+        self,
+        main_key: str,
+        related_keys: Optional[list[str]] = None,
+        ttl_minutes: Optional[float] = None,
+    ) -> Any:
+        """Apply Redis native TTL to keys asynchronously.
+
+        Args:
+            main_key: The primary Redis key
+            related_keys: Additional Redis keys that should expire at the same time
+            ttl_minutes: Time-to-live in minutes, overrides default_ttl if provided
+
+        Returns:
+            Result of the Redis operation
+        """
+        if ttl_minutes is None:
+            # Check if there's a default TTL in config
+            if self.ttl_config and "default_ttl" in self.ttl_config:
+                ttl_minutes = self.ttl_config.get("default_ttl")
+
+        if ttl_minutes is not None:
+            ttl_seconds = int(ttl_minutes * 60)
+
+            if self.cluster_mode:
+                # For cluster mode, execute TTL operations individually
+                await self._redis.expire(main_key, ttl_seconds)
+
+                if related_keys:
+                    for key in related_keys:
+                        await self._redis.expire(key, ttl_seconds)
+
+                return True
+            else:
+                # For non-cluster mode, use pipeline for efficiency
+                pipeline = self._redis.pipeline()
+
+                # Set TTL for main key
+                pipeline.expire(main_key, ttl_seconds)
+
+                # Set TTL for related keys
+                if related_keys:
+                    for key in related_keys:
+                        pipeline.expire(key, ttl_seconds)
+
+                return await pipeline.execute()
 
     async def aget_tuple(self, config: RunnableConfig) -> Optional[CheckpointTuple]:
         """Get a checkpoint tuple from Redis asynchronously."""
@@ -223,18 +310,10 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             write_keys = [safely_decode(key) for key in write_keys]
 
             # Apply TTL to checkpoint, blob keys, and write keys
-            ttl_minutes = self.ttl_config.get("default_ttl")
-            if ttl_minutes is not None:
-                ttl_seconds = int(ttl_minutes * 60)
-                pipeline = self._redis.pipeline()
-                pipeline.expire(checkpoint_key, ttl_seconds)
-
-                # Combine blob keys and write keys for TTL refresh
-                all_related_keys = blob_keys + write_keys
-                for key in all_related_keys:
-                    pipeline.expire(key, ttl_seconds)
-
-                await pipeline.execute()
+            all_related_keys = blob_keys + write_keys
+            await self._apply_ttl_to_keys(
+                checkpoint_key, all_related_keys if all_related_keys else None
+            )
 
         # Fetch channel_values
         channel_values = await self.aget_channel_values(
@@ -474,11 +553,8 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             }
         }
 
-        # Store checkpoint data with transaction handling
+        # Store checkpoint data with cluster-aware handling
         try:
-            # Create a pipeline with transaction=True for atomicity
-            pipeline = self._redis.pipeline(transaction=True)
-
             # Store checkpoint data
             checkpoint_data = {
                 "thread_id": storage_safe_thread_id,
@@ -501,9 +577,6 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
                 storage_safe_checkpoint_id,
             )
 
-            # Add checkpoint data to Redis
-            await pipeline.json().set(checkpoint_key, "$", checkpoint_data)
-
             # Store blob values
             blobs = self._dump_blobs(
                 storage_safe_thread_id,
@@ -512,29 +585,56 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
                 new_versions,
             )
 
-            if blobs:
-                # Add all blob operations to the pipeline
-                for key, data in blobs:
-                    await pipeline.json().set(key, "$", data)
+            if self.cluster_mode:
+                # For cluster mode, execute operations individually
+                await self._redis.json().set(checkpoint_key, "$", checkpoint_data)
 
-            # Execute all operations atomically
-            await pipeline.execute()
+                if blobs:
+                    for key, data in blobs:
+                        await self._redis.json().set(key, "$", data)
 
-            # Apply TTL to checkpoint and blob keys if configured
-            if self.ttl_config and "default_ttl" in self.ttl_config:
-                all_keys = (
-                    [checkpoint_key] + [key for key, _ in blobs]
-                    if blobs
-                    else [checkpoint_key]
-                )
-                ttl_minutes = self.ttl_config.get("default_ttl")
-                ttl_seconds = int(ttl_minutes * 60)
+                # Apply TTL if configured
+                if self.ttl_config and "default_ttl" in self.ttl_config:
+                    all_keys = (
+                        [checkpoint_key] + [key for key, _ in blobs]
+                        if blobs
+                        else [checkpoint_key]
+                    )
+                    ttl_minutes = self.ttl_config.get("default_ttl")
+                    ttl_seconds = int(ttl_minutes * 60)
 
-                # Use a new pipeline for TTL operations
-                ttl_pipeline = self._redis.pipeline()
-                for key in all_keys:
-                    ttl_pipeline.expire(key, ttl_seconds)
-                await ttl_pipeline.execute()
+                    for key in all_keys:
+                        await self._redis.expire(key, ttl_seconds)
+            else:
+                # For non-cluster mode, use pipeline with transaction for atomicity
+                pipeline = self._redis.pipeline(transaction=True)
+
+                # Add checkpoint data to pipeline
+                await pipeline.json().set(checkpoint_key, "$", checkpoint_data)
+
+                if blobs:
+                    # Add all blob operations to the pipeline
+                    for key, data in blobs:
+                        await pipeline.json().set(key, "$", data)
+
+                # Execute all operations atomically
+                await pipeline.execute()
+
+                # Apply TTL to checkpoint and blob keys if configured
+                if self.ttl_config and "default_ttl" in self.ttl_config:
+                    all_keys = (
+                        [checkpoint_key] + [key for key, _ in blobs]
+                        if blobs
+                        else [checkpoint_key]
+                    )
+                    ttl_minutes = self.ttl_config.get("default_ttl")
+                    ttl_seconds = int(ttl_minutes * 60)
+
+                    # Use a new pipeline for TTL operations
+                    ttl_pipeline = self._redis.pipeline()
+                    for key in all_keys:
+                        ttl_pipeline.expire(key, ttl_seconds)
+                    await ttl_pipeline.execute()
 
             return next_config
 
@@ -544,9 +644,6 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
                 # For these modes, we want to ensure any partial state is committed
                 # to allow resuming the stream later
                 try:
-                    # Try to commit what we have so far
-                    pipeline = self._redis.pipeline(transaction=True)
-
                     # Store minimal checkpoint data
                     checkpoint_data = {
                         "thread_id": storage_safe_thread_id,
@@ -570,9 +667,16 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
                         storage_safe_checkpoint_id,
                     )
 
-                    # Add checkpoint data to Redis
-                    await pipeline.json().set(checkpoint_key, "$", checkpoint_data)
-                    await pipeline.execute()
+                    if self.cluster_mode:
+                        # For cluster mode, execute operation directly
+                        await self._redis.json().set(
+                            checkpoint_key, "$", checkpoint_data
+                        )
+                    else:
+                        # For non-cluster mode, use pipeline
+                        pipeline = self._redis.pipeline(transaction=True)
+                        await pipeline.json().set(checkpoint_key, "$", checkpoint_data)
+                        await pipeline.execute()
                 except Exception:
                     # If this also fails, we just propagate the original cancellation
                     pass
@@ -630,57 +734,105 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             writes_objects.append(write_obj)
 
         try:
-            # Use a transaction pipeline for atomicity
-            pipeline = self._redis.pipeline(transaction=True)
-
             # Determine if this is an upsert case
             upsert_case = all(w[0] in WRITES_IDX_MAP for w in writes)
             created_keys = []
 
-            # Add all write operations to the pipeline
-            for write_obj in writes_objects:
-                key = self._make_redis_checkpoint_writes_key(
-                    thread_id,
-                    checkpoint_ns,
-                    checkpoint_id,
-                    task_id,
-                    write_obj["idx"],  # type: ignore[arg-type]
-                )
+            if self.cluster_mode:
+                # For cluster mode, execute operations individually
+                for write_obj in writes_objects:
+                    key = self._make_redis_checkpoint_writes_key(
+                        thread_id,
+                        checkpoint_ns,
+                        checkpoint_id,
+                        task_id,
+                        write_obj["idx"],  # type: ignore[arg-type]
+                    )
 
-                if upsert_case:
-                    # For upsert case, we need to check if the key exists and update differently
-                    exists = await self._redis.exists(key)
-                    if exists:
-                        # Update existing key
-                        await pipeline.json().set(
-                            key, "$.channel", write_obj["channel"]
-                        )
-                        await pipeline.json().set(key, "$.type", write_obj["type"])
-                        await pipeline.json().set(key, "$.blob", write_obj["blob"])
+                    if upsert_case:
+                        # For upsert case, check if key exists and update differently
+                        exists = await self._redis.exists(key)
+                        if exists:
+                            # Update existing key
+                            await self._redis.json().set(
+                                key, "$.channel", write_obj["channel"]
+                            )
+                            await self._redis.json().set(
+                                key, "$.type", write_obj["type"]
+                            )
+                            await self._redis.json().set(
+                                key, "$.blob", write_obj["blob"]
+                            )
+                        else:
+                            # Create new key
+                            await self._redis.json().set(key, "$", write_obj)
+                            created_keys.append(key)
                     else:
-                        # Create new key
-                        await pipeline.json().set(key, "$", write_obj)
-                        created_keys.append(key)
-                else:
-                    # For non-upsert case, only set if key doesn't exist
-                    exists = await self._redis.exists(key)
-                    if not exists:
-                        await pipeline.json().set(key, "$", write_obj)
-                        created_keys.append(key)
+                        # For non-upsert case, only set if key doesn't exist
+                        exists = await self._redis.exists(key)
+                        if not exists:
+                            await self._redis.json().set(key, "$", write_obj)
+                            created_keys.append(key)
 
-            # Execute all operations atomically
-            await pipeline.execute()
+                # Apply TTL to newly created keys
+                if (
+                    created_keys
+                    and self.ttl_config
+                    and "default_ttl" in self.ttl_config
+                ):
+                    ttl_minutes = self.ttl_config.get("default_ttl")
+                    ttl_seconds = int(ttl_minutes * 60)
 
-            # Apply TTL to newly created keys
-            if created_keys and self.ttl_config and "default_ttl" in self.ttl_config:
-                ttl_minutes = self.ttl_config.get("default_ttl")
-                ttl_seconds = int(ttl_minutes * 60)
+                    for key in created_keys:
+                        await self._redis.expire(key, ttl_seconds)
+            else:
+                # For non-cluster mode, use transaction pipeline for atomicity
+                pipeline = self._redis.pipeline(transaction=True)
 
-                # Use a new pipeline for TTL operations
-                ttl_pipeline = self._redis.pipeline()
-                for key in created_keys:
-                    ttl_pipeline.expire(key, ttl_seconds)
-                await ttl_pipeline.execute()
+                # Add all write operations to the pipeline
+                for write_obj in writes_objects:
+                    key = self._make_redis_checkpoint_writes_key(
+                        thread_id,
+                        checkpoint_ns,
+                        checkpoint_id,
+                        task_id,
+                        write_obj["idx"],  # type: ignore[arg-type]
+                    )
+
+                    if upsert_case:
+                        # For upsert case, we need to check if the key exists and update differently
+                        exists = await self._redis.exists(key)
+                        if exists:
+                            # Update existing key
+                            await pipeline.json().set(
+                                key, "$.channel", write_obj["channel"]
+                            )
+                            await pipeline.json().set(key, "$.type", write_obj["type"])
+                            await pipeline.json().set(key, "$.blob", write_obj["blob"])
+                        else:
+                            # Create new key
+                            await pipeline.json().set(key, "$", write_obj)
+                            created_keys.append(key)
+                    else:
+                        # For non-upsert case, only set if key doesn't exist
+                        exists = await self._redis.exists(key)
+                        if not exists:
+                            await pipeline.json().set(key, "$", write_obj)
+                            created_keys.append(key)
+
+                # Execute all operations atomically
+                await pipeline.execute()
+
+                # Apply TTL to newly created keys
+                if (
+                    created_keys
+                    and self.ttl_config
+                    and "default_ttl" in self.ttl_config
+                ):
+                    await self._apply_ttl_to_keys(
+                        created_keys[0],
+                        created_keys[1:] if len(created_keys) > 1 else None,
+                    )
 
         except asyncio.CancelledError:
             # Handle cancellation/interruption
@@ -780,7 +932,7 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         cls,
         redis_url: Optional[str] = None,
         *,
-        redis_client: Optional[AsyncRedis] = None,
+        redis_client: Optional[Union[AsyncRedis, AsyncRedisCluster]] = None,
         connection_args: Optional[Dict[str, Any]] = None,
         ttl: Optional[Dict[str, Any]] = None,
     ) -> AsyncIterator[AsyncRedisSaver]:
@@ -943,8 +1095,8 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
 
         checkpoint_results = await self.checkpoints_index.search(checkpoint_query)
 
-        # Delete all checkpoint-related keys
-        pipeline = self._redis.pipeline()
+        # Collect all keys to delete
+        keys_to_delete = []
 
         for doc in checkpoint_results.docs:
             checkpoint_ns = getattr(doc, "checkpoint_ns", "")
@@ -954,7 +1106,7 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             checkpoint_key = BaseRedisSaver._make_redis_checkpoint_key(
                 storage_safe_thread_id, checkpoint_ns, checkpoint_id
             )
-            pipeline.delete(checkpoint_key)
+            keys_to_delete.append(checkpoint_key)
 
         # Delete all blobs for this thread
         blob_query = FilterQuery(
@@ -973,7 +1125,7 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             blob_key = BaseRedisSaver._make_redis_checkpoint_blob_key(
                 storage_safe_thread_id, checkpoint_ns, channel, version
             )
-            pipeline.delete(blob_key)
+            keys_to_delete.append(blob_key)
 
         # Delete all writes for this thread
         writes_query = FilterQuery(
@@ -993,7 +1145,16 @@ class AsyncRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             write_key = BaseRedisSaver._make_redis_checkpoint_writes_key(
                 storage_safe_thread_id, checkpoint_ns, checkpoint_id, task_id, idx
             )
-            pipeline.delete(write_key)
+            keys_to_delete.append(write_key)
 
-        # Execute all deletions
-        await pipeline.execute()
+        # Execute all deletions based on cluster mode
+        if self.cluster_mode:
+            # For cluster mode, delete keys individually
+            for key in keys_to_delete:
+                await self._redis.delete(key)
+        else:
+            # For non-cluster mode, use pipeline for efficiency
+            pipeline = self._redis.pipeline()
+            for key in keys_to_delete:
+                pipeline.delete(key)
+            await pipeline.execute()

@@ -18,6 +18,8 @@ from langgraph.store.redis.base import (
     STORE_PREFIX,
     STORE_VECTOR_PREFIX,
 )
+from langgraph.checkpoint.redis import RedisSaver
+from langgraph.checkpoint.base import Checkpoint, CheckpointMetadata
 
 
 # Override session-scoped redis_container fixture to prevent Docker operations and provide dummy host/port
@@ -364,3 +366,120 @@ def test_batch_list_namespaces_ops_behavior(store):
     assert ("test", "documents") in results[1]
     assert ("test", "images") in results[1]
     assert ("prod", "documents") in results[1]
+
+
+@pytest.fixture(params=[False, True])
+def checkpoint_saver(request):
+    """Parameterized fixture for RedisSaver with regular or cluster client."""
+    is_cluster = request.param
+    client = MockRedisCluster() if is_cluster else MockRedis()
+
+    saver = RedisSaver(redis_client=client)
+
+    # Mock the search indices
+    saver.checkpoints_index = MagicMock()
+    saver.checkpoints_index.create = MagicMock()
+    saver.checkpoints_index.search = MagicMock(return_value=MagicMock(docs=[]))
+    saver.checkpoints_index.load = MagicMock()
+
+    saver.checkpoint_blobs_index = MagicMock()
+    saver.checkpoint_blobs_index.create = MagicMock()
+    saver.checkpoint_blobs_index.search = MagicMock(return_value=MagicMock(docs=[]))
+    saver.checkpoint_blobs_index.load = MagicMock()
+
+    saver.checkpoint_writes_index = MagicMock()
+    saver.checkpoint_writes_index.create = MagicMock()
+    saver.checkpoint_writes_index.search = MagicMock(return_value=MagicMock(docs=[]))
+    saver.checkpoint_writes_index.load = MagicMock()
+
+    saver.setup()
+    return saver
+
+
+def test_checkpoint_saver_cluster_detection(checkpoint_saver):
+    """Test that checkpoint saver cluster_mode is set correctly."""
+    is_client_cluster = isinstance(checkpoint_saver._redis, SyncRedisCluster)
+    assert checkpoint_saver.cluster_mode == is_client_cluster
+
+
+def test_checkpoint_saver_ttl_behavior(checkpoint_saver):
+    """Test TTL behavior for checkpoint saver in cluster vs. non-cluster mode."""
+    client = checkpoint_saver._redis
+    client.expire_calls.clear()
+    client.pipeline_calls.clear()
+
+    # Set up TTL config
+    checkpoint_saver.ttl_config = {"default_ttl": 5.0}
+
+    main_key = "checkpoint:test:key"
+    blob_keys = ["blob:key1", "blob:key2"]
+
+    checkpoint_saver._apply_ttl_to_keys(main_key, blob_keys)
+
+    if checkpoint_saver.cluster_mode:
+        # In cluster mode, TTL operations should be called directly
+        assert len(client.expire_calls) == 3
+        assert {
+            "key": main_key,
+            "ttl": 300,
+        } in client.expire_calls  # 5 minutes = 300 seconds
+        assert {"key": "blob:key1", "ttl": 300} in client.expire_calls
+        assert {"key": "blob:key2", "ttl": 300} in client.expire_calls
+        # Pipeline should not be used
+        assert len(client.pipeline_calls) == 0
+    else:
+        # In non-cluster mode, pipeline should be used
+        assert len(client.pipeline_calls) > 0
+        assert client.pipeline_calls[0]["transaction"] is True
+        client._pipeline.expire.assert_any_call(main_key, 300)
+        client._pipeline.expire.assert_any_call("blob:key1", 300)
+        client._pipeline.expire.assert_any_call("blob:key2", 300)
+        # Direct expire calls should not be made
+        assert len(client.expire_calls) == 0
+
+
+def test_checkpoint_saver_delete_thread_behavior(checkpoint_saver):
+    """Test delete_thread behavior for checkpoint saver in cluster vs. non-cluster mode."""
+    client = checkpoint_saver._redis
+    client.delete_calls.clear()
+    client.pipeline_calls.clear()
+
+    # Mock search results to simulate existing data
+    mock_checkpoint_doc = MagicMock()
+    mock_checkpoint_doc.checkpoint_ns = "test_ns"
+    mock_checkpoint_doc.checkpoint_id = "test_checkpoint"
+
+    mock_blob_doc = MagicMock()
+    mock_blob_doc.checkpoint_ns = "test_ns"
+    mock_blob_doc.channel = "test_channel"
+    mock_blob_doc.version = "1"
+
+    mock_write_doc = MagicMock()
+    mock_write_doc.checkpoint_ns = "test_ns"
+    mock_write_doc.checkpoint_id = "test_checkpoint"
+    mock_write_doc.task_id = "test_task"
+    mock_write_doc.idx = 0
+
+    checkpoint_saver.checkpoints_index.search.return_value = MagicMock(
+        docs=[mock_checkpoint_doc]
+    )
+    checkpoint_saver.checkpoint_blobs_index.search.return_value = MagicMock(
+        docs=[mock_blob_doc]
+    )
+    checkpoint_saver.checkpoint_writes_index.search.return_value = MagicMock(
+        docs=[mock_write_doc]
+    )
+
+    checkpoint_saver.delete_thread("test_thread")
+
+    if checkpoint_saver.cluster_mode:
+        # In cluster mode, delete operations should be called directly
+        assert len(client.delete_calls) > 0
+        # Pipeline should not be used for deletions
+        assert not any(call.get("transaction") for call in client.pipeline_calls)
+    else:
+        # In non-cluster mode, pipeline should be used for deletions
+        assert len(client.pipeline_calls) > 0
+        client._pipeline.delete.assert_called()
+        # Direct delete calls should not be made
+        assert len(client.delete_calls) == 0

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -41,13 +42,14 @@ from langgraph.store.redis.base import (
     _namespace_to_text,
     _row_to_item,
     _row_to_search_item,
-    logger,
 )
 
 from .token_unescaper import TokenUnescaper
 
 _token_escaper = TokenEscaper()
 _token_unescaper = TokenUnescaper()
+
+logger = logging.getLogger(__name__)
 
 
 def _convert_redis_score_to_similarity(score: float, distance_type: str) -> float:

@@ -241,17 +241,32 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
 
         if ttl_minutes is not None:
             ttl_seconds = int(ttl_minutes * 60)
-            pipeline = self._redis.pipeline()
 
-            # Set TTL for main key
-            pipeline.expire(main_key, ttl_seconds)
+            # Check if cluster mode is detected (for sync checkpoint savers)
+            cluster_mode = getattr(self, "cluster_mode", False)
 
-            # Set TTL for related keys
-            if related_keys:
-                for key in related_keys:
-                    pipeline.expire(key, ttl_seconds)
+            if cluster_mode:
+                # For cluster mode, execute TTL operations individually
+                self._redis.expire(main_key, ttl_seconds)
 
-            return pipeline.execute()
+                if related_keys:
+                    for key in related_keys:
+                        self._redis.expire(key, ttl_seconds)
+
+                return True
+            else:
+                # For non-cluster mode, use pipeline for efficiency
+                pipeline = self._redis.pipeline()
+
+                # Set TTL for main key
+                pipeline.expire(main_key, ttl_seconds)
+
+                # Set TTL for related keys
+                if related_keys:
+                    for key in related_keys:
+                        pipeline.expire(key, ttl_seconds)
+
+                return pipeline.execute()
 
     def _dump_checkpoint(self, checkpoint: Checkpoint) -> dict[str, Any]:
         """Convert checkpoint to Redis format."""

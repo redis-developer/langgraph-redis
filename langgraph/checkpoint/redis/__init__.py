@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
-from typing import Any, Dict, Iterator, List, Optional, Tuple, cast
+import logging
+from typing import Any, Dict, Iterator, List, Optional, Tuple, Union, cast
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import (
@@ -14,6 +15,7 @@ from langgraph.checkpoint.base import (
 )
 from langgraph.constants import TASKS
 from redis import Redis
+from redis.cluster import RedisCluster
 from redisvl.index import SearchIndex
 from redisvl.query import FilterQuery
 from redisvl.query.filter import Num, Tag
@@ -32,15 +34,21 @@ from langgraph.checkpoint.redis.util import (
 )
 from langgraph.checkpoint.redis.version import __lib_name__, __version__
 
+logger = logging.getLogger(__name__)
 
-class RedisSaver(BaseRedisSaver[Redis, SearchIndex]):
+
+class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
     """Standard Redis implementation for checkpoint saving."""
+
+    _redis: Union[Redis, RedisCluster]  # Support both standalone and cluster clients
+    # Whether to assume the Redis server is a cluster; None triggers auto-detection
+    cluster_mode: Optional[bool] = None
 
     def __init__(
         self,
         redis_url: Optional[str] = None,
         *,
-        redis_client: Optional[Redis] = None,
+        redis_client: Optional[Union[Redis, RedisCluster]] = None,
         connection_args: Optional[Dict[str, Any]] = None,
         ttl: Optional[Dict[str, Any]] = None,
     ) -> None:
@@ -54,7 +62,7 @@ class RedisSaver(BaseRedisSaver[Redis, SearchIndex]):
     def configure_client(
         self,
         redis_url: Optional[str] = None,
-        redis_client: Optional[Redis] = None,
+        redis_client: Optional[Union[Redis, RedisCluster]] = None,
         connection_args: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Configure the Redis client."""
@@ -73,6 +81,27 @@ class RedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         self.checkpoint_writes_index = SearchIndex.from_dict(
             self.SCHEMAS[2], redis_client=self._redis
         )
+
+    def setup(self) -> None:
+        """Initialize the indices in Redis and detect cluster mode."""
+        self._detect_cluster_mode()
+        super().setup()
+
+    def _detect_cluster_mode(self) -> None:
+        """Detect if the Redis client is a cluster client by inspecting its class."""
+        if self.cluster_mode is not None:
+            logger.info(
+                f"Redis cluster_mode explicitly set to {self.cluster_mode}, skipping detection."
+            )
+            return
+
+        # Determine cluster mode based on client class
+        if isinstance(self._redis, RedisCluster):
+            logger.info("Redis client is a cluster client")
+            self.cluster_mode = True
+        else:
+            logger.info("Redis client is a standalone client")
+            self.cluster_mode = False
 
     def list(
         self,
@@ -458,7 +487,7 @@ class RedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         cls,
         redis_url: Optional[str] = None,
         *,
-        redis_client: Optional[Redis] = None,
+        redis_client: Optional[Union[Redis, RedisCluster]] = None,
         connection_args: Optional[Dict[str, Any]] = None,
         ttl: Optional[Dict[str, Any]] = None,
     ) -> Iterator[RedisSaver]:
@@ -592,8 +621,8 @@ class RedisSaver(BaseRedisSaver[Redis, SearchIndex]):
 
         checkpoint_results = self.checkpoints_index.search(checkpoint_query)
 
-        # Delete all checkpoint-related keys
-        pipeline = self._redis.pipeline()
+        # Collect all keys to delete
+        keys_to_delete = []
 
         for doc in checkpoint_results.docs:
             checkpoint_ns = getattr(doc, "checkpoint_ns", "")
@@ -603,7 +632,7 @@ class RedisSaver(BaseRedisSaver[Redis, SearchIndex]):
             checkpoint_key = BaseRedisSaver._make_redis_checkpoint_key(
                 storage_safe_thread_id, checkpoint_ns, checkpoint_id
             )
-            pipeline.delete(checkpoint_key)
+            keys_to_delete.append(checkpoint_key)
 
         # Delete all blobs for this thread
         blob_query = FilterQuery(
@@ -622,7 +651,7 @@ class RedisSaver(BaseRedisSaver[Redis, SearchIndex]):
             blob_key = BaseRedisSaver._make_redis_checkpoint_blob_key(
                 storage_safe_thread_id, checkpoint_ns, channel, version
             )
-            pipeline.delete(blob_key)
+            keys_to_delete.append(blob_key)
 
         # Delete all writes for this thread
         writes_query = FilterQuery(
@@ -642,10 +671,19 @@ class RedisSaver(BaseRedisSaver[Redis, SearchIndex]):
             write_key = BaseRedisSaver._make_redis_checkpoint_writes_key(
                 storage_safe_thread_id, checkpoint_ns, checkpoint_id, task_id, idx
             )
-            pipeline.delete(write_key)
+            keys_to_delete.append(write_key)
 
-        # Execute all deletions
-        pipeline.execute()
+        # Execute all deletions based on cluster mode
+        if self.cluster_mode:
+            # For cluster mode, delete keys individually
+            for key in keys_to_delete:
+                self._redis.delete(key)
+        else:
+            # For non-cluster mode, use pipeline for efficiency
+            pipeline = self._redis.pipeline()
+            for key in keys_to_delete:
+                pipeline.delete(key)
+            pipeline.execute()
 
 
 __all__ = [
