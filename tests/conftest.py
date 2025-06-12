@@ -1,7 +1,7 @@
 import asyncio
 import os
-import time
 import socket
+import time
 
 import pytest
 from redis.asyncio import Redis
