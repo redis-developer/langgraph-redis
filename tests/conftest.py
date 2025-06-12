@@ -1,5 +1,7 @@
 import asyncio
 import os
+import time
+import socket
 
 import pytest
 from redis.asyncio import Redis
@@ -58,6 +60,20 @@ def redis_url(redis_container):
     on container port 6379 (mapped to an ephemeral port on the host).
     """
     host, port = redis_container.get_service_host_and_port("redis", 6379)
+
+    # Wait up to 15 seconds for the container to accept TCP connections.
+    deadline = time.time() + 15
+    while True:
+        try:
+            with socket.create_connection((host, int(port)), timeout=1):
+                break  # Redis is accepting connections
+        except OSError:
+            if time.time() > deadline:
+                pytest.skip(
+                    "Redis container failed to become ready for this worker – skipping tests."
+                )
+            time.sleep(0.5)
+
     return f"redis://{host}:{port}"
 
 
