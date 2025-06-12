@@ -595,16 +595,10 @@ class AsyncRedisSaver(
 
                 # Apply TTL if configured
                 if self.ttl_config and "default_ttl" in self.ttl_config:
-                    all_keys = (
-                        [checkpoint_key] + [key for key, _ in blobs]
-                        if blobs
-                        else [checkpoint_key]
+                    await self._apply_ttl_to_keys(
+                        checkpoint_key,
+                        [key for key, _ in blobs] if blobs else None,
                     )
-                    ttl_minutes = self.ttl_config.get("default_ttl")
-                    ttl_seconds = int(ttl_minutes * 60)
-
-                    for key in all_keys:
-                        await self._redis.expire(key, ttl_seconds)
             else:
                 # For non-cluster mode, use pipeline with transaction for atomicity
                 pipeline = self._redis.pipeline(transaction=True)
@@ -622,19 +616,10 @@ class AsyncRedisSaver(
 
                 # Apply TTL to checkpoint and blob keys if configured
                 if self.ttl_config and "default_ttl" in self.ttl_config:
-                    all_keys = (
-                        [checkpoint_key] + [key for key, _ in blobs]
-                        if blobs
-                        else [checkpoint_key]
+                    await self._apply_ttl_to_keys(
+                        checkpoint_key,
+                        [key for key, _ in blobs] if blobs else None,
                     )
-                    ttl_minutes = self.ttl_config.get("default_ttl")
-                    ttl_seconds = int(ttl_minutes * 60)
-
-                    # Use a new pipeline for TTL operations
-                    ttl_pipeline = self._redis.pipeline()
-                    for key in all_keys:
-                        ttl_pipeline.expire(key, ttl_seconds)
-                    await ttl_pipeline.execute()
 
             return next_config
 
@@ -780,11 +765,10 @@ class AsyncRedisSaver(
                     and self.ttl_config
                     and "default_ttl" in self.ttl_config
                 ):
-                    ttl_minutes = self.ttl_config.get("default_ttl")
-                    ttl_seconds = int(ttl_minutes * 60)
-
-                    for key in created_keys:
-                        await self._redis.expire(key, ttl_seconds)
+                    await self._apply_ttl_to_keys(
+                        created_keys[0],
+                        created_keys[1:] if len(created_keys) > 1 else None,
+                    )
             else:
                 # For non-cluster mode, use transaction pipeline for atomicity
                 pipeline = self._redis.pipeline(transaction=True)

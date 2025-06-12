@@ -7,19 +7,19 @@ from unittest import mock
 from unittest.mock import MagicMock
 
 import pytest
+from langgraph.checkpoint.base import Checkpoint, CheckpointMetadata
 from langgraph.store.base import GetOp, ListNamespacesOp, PutOp, SearchOp
 from redis import Redis
 from redis.cluster import RedisCluster as SyncRedisCluster
 from ulid import ULID
 
+from langgraph.checkpoint.redis import RedisSaver
 from langgraph.store.redis import RedisStore
 from langgraph.store.redis.base import (
     REDIS_KEY_SEPARATOR,
     STORE_PREFIX,
     STORE_VECTOR_PREFIX,
 )
-from langgraph.checkpoint.redis import RedisSaver
-from langgraph.checkpoint.base import Checkpoint, CheckpointMetadata
 
 
 # Override session-scoped redis_container fixture to prevent Docker operations and provide dummy host/port
