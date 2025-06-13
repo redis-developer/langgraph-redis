@@ -675,7 +675,7 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
             filter_expression=(Tag("thread_id") == thread_id)
             & (Tag("checkpoint_ns") == checkpoint_ns)
             & (Tag("channel") == TASKS),
-            return_fields=["type", "blob", "task_path", "task_id", "idx"],
+            return_fields=["type", "$.blob", "task_path", "task_id", "idx"],
             num_results=100,
         )
         parent_writes_results = self.checkpoint_writes_index.search(parent_writes_query)
@@ -691,7 +691,11 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         )
 
         # Extract type and blob pairs
-        return [(doc.type, doc.blob) for doc in sorted_writes]
+        return [
+            (doc.type.encode(), blob)
+            for doc in sorted_writes
+            if (blob := getattr(doc, "$.blob", getattr(doc, "blob", None))) is not None
+        ]
 
     @staticmethod
     def _make_shallow_redis_checkpoint_key(thread_id: str, checkpoint_ns: str) -> str:

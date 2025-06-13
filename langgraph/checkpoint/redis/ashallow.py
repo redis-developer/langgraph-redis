@@ -676,7 +676,7 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             filter_expression=(Tag("thread_id") == thread_id)
             & (Tag("checkpoint_ns") == checkpoint_ns)
             & (Tag("channel") == TASKS),
-            return_fields=["type", "blob", "task_path", "task_id", "idx"],
+            return_fields=["type", "$.blob", "task_path", "task_id", "idx"],
             num_results=100,
         )
         parent_writes_results = await self.checkpoint_writes_index.search(
@@ -694,7 +694,11 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         )
 
         # Extract type and blob pairs
-        return [(doc.type, doc.blob) for doc in sorted_writes]
+        return [
+            (doc.type.encode(), blob)
+            for doc in sorted_writes
+            if (blob := getattr(doc, "$.blob", getattr(doc, "blob", None))) is not None
+        ]
 
     async def _aload_pending_writes(
         self, thread_id: str, checkpoint_ns: str, checkpoint_id: str

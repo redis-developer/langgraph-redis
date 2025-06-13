@@ -576,17 +576,16 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
         Returns:
             List of (type, blob) tuples representing pending sends
         """
-        storage_safe_thread_id = to_storage_safe_str(thread_id)
-        storage_safe_checkpoint_ns = to_storage_safe_str(checkpoint_ns)
-        storage_safe_parent_checkpoint_id = to_storage_safe_str(parent_checkpoint_id)
+        storage_safe_thread_id = to_storage_safe_id(thread_id)
+        storage_safe_parent_checkpoint_id = to_storage_safe_id(parent_checkpoint_id)
 
         # Query checkpoint_writes for parent checkpoint's TASKS channel
         parent_writes_query = FilterQuery(
             filter_expression=(Tag("thread_id") == storage_safe_thread_id)
-            & (Tag("checkpoint_ns") == storage_safe_checkpoint_ns)
+            & (Tag("checkpoint_ns") == checkpoint_ns)
             & (Tag("checkpoint_id") == storage_safe_parent_checkpoint_id)
             & (Tag("channel") == TASKS),
-            return_fields=["type", "blob", "task_path", "task_id", "idx"],
+            return_fields=["type", "$.blob", "task_path", "task_id", "idx"],
             num_results=100,  # Adjust as needed
         )
         parent_writes_results = self.checkpoint_writes_index.search(parent_writes_query)
@@ -602,7 +601,11 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
         )
 
         # Extract type and blob pairs
-        return [(doc.type, doc.blob) for doc in sorted_writes]
+        return [
+            (doc.type.encode(), blob)
+            for doc in sorted_writes
+            if (blob := getattr(doc, "$.blob", getattr(doc, "blob", None))) is not None
+        ]
 
     def delete_thread(self, thread_id: str) -> None:
         """Delete all checkpoints and writes associated with a specific thread ID.
