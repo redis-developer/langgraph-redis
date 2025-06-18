@@ -1003,7 +1003,7 @@ class AsyncRedisSaver(
             num_results=100,
         )
         res = await self.checkpoint_writes_index.search(parent_writes_query)
-        
+
         # Sort results for deterministic order
         docs = sorted(
             res.docs,
@@ -1013,7 +1013,7 @@ class AsyncRedisSaver(
                 getattr(d, "idx", 0),
             ),
         )
-        
+
         # Convert to expected format
         return [
             (d.type.encode(), blob)

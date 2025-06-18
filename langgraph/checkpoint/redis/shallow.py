@@ -26,7 +26,11 @@ from langgraph.checkpoint.redis.base import (
     REDIS_KEY_SEPARATOR,
     BaseRedisSaver,
 )
-from langgraph.checkpoint.redis.util import safely_decode
+from langgraph.checkpoint.redis.util import (
+    safely_decode,
+    to_storage_safe_id,
+    to_storage_safe_str,
+)
 
 SCHEMAS = [
     {
@@ -713,7 +717,13 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
     ) -> str:
         """Create a pattern to match all blob keys for a thread and namespace."""
         return (
-            REDIS_KEY_SEPARATOR.join([CHECKPOINT_BLOB_PREFIX, thread_id, checkpoint_ns])
+            REDIS_KEY_SEPARATOR.join(
+                [
+                    CHECKPOINT_BLOB_PREFIX,
+                    str(to_storage_safe_id(thread_id)),
+                    to_storage_safe_str(checkpoint_ns),
+                ]
+            )
             + ":*"
         )
 
@@ -724,7 +734,11 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         """Create a pattern to match all writes keys for a thread and namespace."""
         return (
             REDIS_KEY_SEPARATOR.join(
-                [CHECKPOINT_WRITE_PREFIX, thread_id, checkpoint_ns]
+                [
+                    CHECKPOINT_WRITE_PREFIX,
+                    str(to_storage_safe_id(thread_id)),
+                    to_storage_safe_str(checkpoint_ns),
+                ]
             )
             + ":*"
         )
