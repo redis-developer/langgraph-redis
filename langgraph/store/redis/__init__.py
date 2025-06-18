@@ -372,17 +372,38 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
 
             vector_docs: list[dict[str, Any]] = []
             vector_keys: list[str] = []
+
+            # Check if we're using hash storage for vectors
+            vector_storage_type = "json"  # default
+            if self.index_config:
+                index_dict = dict(self.index_config)
+                vector_storage_type = index_dict.get("vector_storage_type", "json")
+
             for (ns, key, path, _), vector in zip(text_params, vectors):
                 vector_key: tuple[str, str] = (ns, key)
                 doc_id = doc_ids[vector_key]
+
+                # Prepare vector based on storage type
+                if vector_storage_type == "hash":
+                    # For hash storage, convert vector to byte string
+                    from redisvl.redis.utils import array_to_buffer
+
+                    vector_list = (
+                        vector.tolist() if hasattr(vector, "tolist") else vector
+                    )
+                    embedding_value = array_to_buffer(vector_list, "float32")
+                else:
+                    # For JSON storage, keep as list
+                    embedding_value = (
+                        vector.tolist() if hasattr(vector, "tolist") else vector
+                    )
+
                 vector_docs.append(
                     {
                         "prefix": ns,
                         "key": key,
                         "field_name": path,
-                        "embedding": (
-                            vector.tolist() if hasattr(vector, "tolist") else vector
-                        ),
+                        "embedding": embedding_value,
                         "created_at": datetime.now(timezone.utc).timestamp(),
                         "updated_at": datetime.now(timezone.utc).timestamp(),
                     }

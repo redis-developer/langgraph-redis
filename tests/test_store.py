@@ -642,3 +642,231 @@ def test_redis_store_graceful_failure(redis_url: str, monkeypatch) -> None:
     finally:
         client.close()
         client.connection_pool.disconnect()
+
+
+def test_vector_storage_json(redis_url, fake_embeddings: CharacterEmbeddings) -> None:
+    """Test JSON vector storage (default behavior)."""
+    # Test data
+    docs = [
+        ("doc1", {"text": "hello world"}),
+        ("doc2", {"text": "hello universe"}),
+        ("doc3", {"text": "goodbye world"}),
+    ]
+
+    index_config = {
+        "dims": fake_embeddings.dims,
+        "embed": fake_embeddings,
+        "distance_type": "cosine",
+        "fields": ["text"],
+        # vector_storage_type defaults to "json"
+    }
+
+    ttl_config = {"default_ttl": 2, "refresh_on_read": True}
+
+    with RedisStore.from_conn_string(
+        redis_url, index=index_config, ttl=ttl_config
+    ) as store:
+        store.setup()
+
+        # Insert documents
+        for key, value in docs:
+            store.put(("test_json",), key, value)
+
+        # Test vector search functionality
+        results = store.search(("test_json",), query="hello")
+        assert len(results) >= 2, "Vector search failed for JSON storage"
+
+        # Verify both hello documents are found
+        doc_keys = [r.key for r in results]
+        assert "doc1" in doc_keys, "doc1 not found in JSON storage"
+        assert "doc2" in doc_keys, "doc2 not found in JSON storage"
+
+        # Test that scores are reasonable (should be > 0 for cosine similarity)
+        for result in results:
+            if result.key in ["doc1", "doc2"]:
+                assert (
+                    result.score > 0
+                ), f"Invalid score for JSON storage: {result.score}"
+
+        # Test retrieval by key still works
+        item = store.get(("test_json",), "doc1")
+        assert item is not None, "Get operation failed for JSON storage"
+        assert (
+            item.value["text"] == "hello world"
+        ), "Retrieved wrong value for JSON storage"
+
+
+def test_vector_storage_hash(redis_url, fake_embeddings: CharacterEmbeddings) -> None:
+    """Test hash vector storage for improved memory efficiency."""
+    # Test data
+    docs = [
+        ("doc1", {"text": "hello world"}),
+        ("doc2", {"text": "hello universe"}),
+        ("doc3", {"text": "goodbye world"}),
+    ]
+
+    index_config = {
+        "dims": fake_embeddings.dims,
+        "embed": fake_embeddings,
+        "distance_type": "cosine",
+        "fields": ["text"],
+        "vector_storage_type": "hash",  # Enable hash storage
+    }
+
+    ttl_config = {"default_ttl": 2, "refresh_on_read": True}
+
+    with RedisStore.from_conn_string(
+        redis_url, index=index_config, ttl=ttl_config
+    ) as store:
+        store.setup()
+
+        # Insert documents
+        for key, value in docs:
+            store.put(("test_hash",), key, value)
+
+        # Test vector search functionality
+        results = store.search(("test_hash",), query="hello")
+        assert len(results) >= 2, "Vector search failed for hash storage"
+
+        # Verify both hello documents are found
+        doc_keys = [r.key for r in results]
+        assert "doc1" in doc_keys, "doc1 not found in hash storage"
+        assert "doc2" in doc_keys, "doc2 not found in hash storage"
+
+        # Test that scores are reasonable (should be > 0 for cosine similarity)
+        for result in results:
+            if result.key in ["doc1", "doc2"]:
+                assert (
+                    result.score > 0
+                ), f"Invalid score for hash storage: {result.score}"
+
+        # Test retrieval by key still works
+        item = store.get(("test_hash",), "doc1")
+        assert item is not None, "Get operation failed for hash storage"
+        assert (
+            item.value["text"] == "hello world"
+        ), "Retrieved wrong value for hash storage"
+
+
+def test_vector_search_hash(redis_url, fake_embeddings: CharacterEmbeddings) -> None:
+    """Test vector search functionality with hash storage."""
+    index_config = {
+        "dims": fake_embeddings.dims,
+        "embed": fake_embeddings,
+        "distance_type": "cosine",
+        "fields": ["text"],
+        "vector_storage_type": "hash",
+    }
+
+    ttl_config = {"default_ttl": 2, "refresh_on_read": True}
+
+    with RedisStore.from_conn_string(
+        redis_url, index=index_config, ttl=ttl_config
+    ) as store:
+        store.setup()
+
+        # Insert documents with text that can be embedded
+        docs = [
+            ("doc1", {"text": "short text"}),
+            ("doc2", {"text": "longer text document"}),
+            ("doc3", {"text": "longest text document here"}),
+        ]
+
+        for key, value in docs:
+            store.put(("test",), key, value)
+
+        # Search with query
+        results = store.search(("test",), query="longer text")
+        assert len(results) >= 2
+
+        # Doc2 and doc3 should be closer matches to "longer text"
+        doc_keys = [r.key for r in results]
+        assert "doc2" in doc_keys
+        assert "doc3" in doc_keys
+
+
+def test_vector_search_with_filters_hash(
+    redis_url, fake_embeddings: CharacterEmbeddings
+) -> None:
+    """Test vector search with additional filters using hash storage."""
+    index_config = {
+        "dims": fake_embeddings.dims,
+        "embed": fake_embeddings,
+        "distance_type": "cosine",
+        "fields": ["text"],
+        "vector_storage_type": "hash",
+    }
+
+    ttl_config = {"default_ttl": 2, "refresh_on_read": True}
+
+    with RedisStore.from_conn_string(
+        redis_url, index=index_config, ttl=ttl_config
+    ) as store:
+        store.setup()
+
+        # Insert test documents
+        docs = [
+            ("doc1", {"text": "red apple", "color": "red", "score": 4.5}),
+            ("doc2", {"text": "red car", "color": "red", "score": 3.0}),
+            ("doc3", {"text": "green apple", "color": "green", "score": 4.0}),
+            ("doc4", {"text": "blue car", "color": "blue", "score": 3.5}),
+        ]
+
+        for key, value in docs:
+            store.put(("test",), key, value)
+
+        # Search for "apple" within red items
+        results = store.search(("test",), query="apple", filter={"color": "red"})
+        assert len(results) >= 1
+        # Doc1 should be the closest match for "apple" with color=red
+        assert results[0].key == "doc1"
+
+        # Search for "car" within red items
+        results = store.search(("test",), query="car", filter={"color": "red"})
+        assert len(results) >= 1
+        # Doc2 should be the closest match for "car" with color=red
+        assert results[0].key == "doc2"
+
+
+def test_vector_update_with_score_verification_hash(
+    redis_url, fake_embeddings: CharacterEmbeddings
+) -> None:
+    """Test that updating items properly updates their embeddings with hash storage."""
+    index_config = {
+        "dims": fake_embeddings.dims,
+        "embed": fake_embeddings,
+        "distance_type": "cosine",
+        "fields": ["text"],
+        "vector_storage_type": "hash",
+    }
+
+    ttl_config = {"default_ttl": 2, "refresh_on_read": True}
+
+    with RedisStore.from_conn_string(
+        redis_url, index=index_config, ttl=ttl_config
+    ) as store:
+        store.setup()
+
+        store.put(("test",), "doc1", {"text": "zany zebra xylophone"})
+        store.put(("test",), "doc2", {"text": "something about dogs"})
+
+        # Search for a term similar to doc1's content
+        results_initial = store.search(("test",), query="zany xylophone")
+        assert len(results_initial) >= 1
+        assert results_initial[0].key == "doc1"
+        initial_score = results_initial[0].score
+
+        # Update doc1 to be about dogs instead
+        store.put(("test",), "doc1", {"text": "new text about dogs"})
+
+        # The original query should now match doc1 less strongly
+        results_after = store.search(("test",), query="zany xylophone")
+        assert len(results_after) >= 1
+        after_score = next((r.score for r in results_after if r.key == "doc1"), None)
+        if after_score is not None:
+            assert after_score < initial_score
+
+        # A dog-related query should now match doc1 more strongly
+        results_new = store.search(("test",), query="dogs text")
+        doc1_score = next((r.score for r in results_new if r.key == "doc1"), None)
+        assert doc1_score is not None

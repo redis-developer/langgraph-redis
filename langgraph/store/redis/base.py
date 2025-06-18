@@ -2,11 +2,22 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 import threading
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
-from typing import Any, Generic, Iterable, Optional, Sequence, TypedDict, TypeVar, Union
+from typing import (
+    Any,
+    Dict,
+    Generic,
+    Iterable,
+    Optional,
+    Sequence,
+    TypedDict,
+    TypeVar,
+    Union,
+)
 
 from langgraph.store.base import (
     GetOp,
@@ -222,7 +233,15 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
 
         # Configure vector index if needed
         if self.index_config:
-            vector_schema = self.SCHEMAS[1].copy()
+            # Get storage type from index config, default to "json" for backward compatibility
+            # Cast to dict to safely access potential extra fields
+            index_dict = dict(self.index_config)
+            vector_storage_type = index_dict.get("vector_storage_type", "json")
+
+            vector_schema: Dict[str, Any] = copy.deepcopy(self.SCHEMAS[1])
+            # Update storage type in schema
+            vector_schema["index"]["storage_type"] = vector_storage_type
+
             vector_fields = vector_schema.get("fields", [])
             vector_field = None
             for f in vector_fields:
@@ -243,14 +262,14 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
                         "l2": "L2",
                     }[
                         _ensure_string_or_literal(
-                            self.index_config.get("distance_type", "cosine")
+                            index_dict.get("distance_type", "cosine")
                         )
                     ],
                 }
 
                 # Apply any additional vector type config
-                if "ann_index_config" in self.index_config:
-                    vector_field["attrs"].update(self.index_config["ann_index_config"])
+                if "ann_index_config" in index_dict:
+                    vector_field["attrs"].update(index_dict["ann_index_config"])
 
             self.vector_index = SearchIndex.from_dict(
                 vector_schema, redis_client=self._redis
