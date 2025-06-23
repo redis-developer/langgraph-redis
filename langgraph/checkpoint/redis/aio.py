@@ -350,7 +350,7 @@ class AsyncRedisSaver(
             "configurable": {
                 "thread_id": thread_id,
                 "checkpoint_ns": checkpoint_ns,
-                "checkpoint_id": checkpoint_id,
+                "checkpoint_id": doc_checkpoint_id,
             }
         }
 
@@ -361,7 +361,7 @@ class AsyncRedisSaver(
         )
 
         pending_writes = await self._aload_pending_writes(
-            thread_id, checkpoint_ns, checkpoint_id or EMPTY_ID_SENTINEL
+            thread_id, checkpoint_ns, doc_checkpoint_id
         )
 
         return CheckpointTuple(
