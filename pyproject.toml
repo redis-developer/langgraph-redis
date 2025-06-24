@@ -19,7 +19,7 @@ packages = [{ include = "langgraph" }]
 
 [tool.poetry.dependencies]
 python = ">=3.9,<3.14"
-langgraph-checkpoint = "^2.0.26"
+langgraph-checkpoint = ">=2.0.26"
 redisvl = ">=0.5.1,<1.0.0"
 
 [tool.poetry.group.dev.dependencies]
@@ -31,7 +31,7 @@ anyio = "^4.4.0"
 pytest-asyncio = "^0.21.1"
 pytest-xdist = {extras = ["psutil"], version = "^3.6.1"}
 pytest-mock = "^3.11.1"
-mypy = "^1.10.0"
+mypy = ">=1.11.0,<2"
 aioconsole = "^0.8.1"
 langchain-openai = "^0.3.2"
 testcontainers = "^4.9.1"

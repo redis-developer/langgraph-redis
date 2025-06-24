@@ -568,7 +568,7 @@ class AsyncRedisSaver(
             # store at top-level for filters in list()
             if all(key in metadata for key in ["source", "step"]):
                 checkpoint_data["source"] = metadata["source"]
-                checkpoint_data["step"] = metadata["step"]  # type: ignore
+                checkpoint_data["step"] = metadata["step"]
 
             # Prepare checkpoint key
             checkpoint_key = BaseRedisSaver._make_redis_checkpoint_key(

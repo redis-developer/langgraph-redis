@@ -87,7 +87,7 @@ class AsyncRedisStore(
 
         # Set up store configuration
         self.index_config = index
-        self.ttl_config = ttl  # type: ignore
+        self.ttl_config = ttl
 
         if self.index_config:
             self.index_config = self.index_config.copy()
