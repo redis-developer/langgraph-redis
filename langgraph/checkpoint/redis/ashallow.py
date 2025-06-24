@@ -90,11 +90,11 @@ SCHEMAS = [
 async def _write_obj_tx(pipe: Pipeline, key: str, write_obj: dict[str, Any]) -> None:
     exists: int = await pipe.exists(key)
     if exists:
-        await pipe.json().set(key, "$.channel", write_obj["channel"])
-        await pipe.json().set(key, "$.type", write_obj["type"])
-        await pipe.json().set(key, "$.blob", write_obj["blob"])
+        pipe.json().set(key, "$.channel", write_obj["channel"])
+        pipe.json().set(key, "$.type", write_obj["type"])
+        pipe.json().set(key, "$.blob", write_obj["blob"])
     else:
-        await pipe.json().set(key, "$", write_obj)
+        pipe.json().set(key, "$", write_obj)
 
 
 class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
@@ -240,7 +240,7 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             )
 
             # Add checkpoint data to pipeline
-            await pipeline.json().set(checkpoint_key, "$", checkpoint_data)
+            pipeline.json().set(checkpoint_key, "$", checkpoint_data)
 
             # Before storing the new blobs, clean up old ones that won't be needed
             # - Get a list of all blob keys for this thread_id and checkpoint_ns
@@ -274,7 +274,7 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
                             continue
                         else:
                             # This is an old version, delete it
-                            await pipeline.delete(blob_key)
+                            pipeline.delete(blob_key)
 
             # Store the new blob values
             blobs = self._dump_blobs(
@@ -287,7 +287,7 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             if blobs:
                 # Add all blob data to pipeline
                 for key, data in blobs:
-                    await pipeline.json().set(key, "$", data)
+                    pipeline.json().set(key, "$", data)
 
             # Execute all operations atomically
             await pipeline.execute()
@@ -571,7 +571,7 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
 
                         # If the write is for a different checkpoint_id, delete it
                         if key_checkpoint_id != checkpoint_id:
-                            await pipeline.delete(write_key)
+                            pipeline.delete(write_key)
 
             # Add new writes to the pipeline
             upsert_case = all(w[0] in WRITES_IDX_MAP for w in writes)
@@ -589,17 +589,15 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
                     exists = await self._redis.exists(key)
                     if exists:
                         # Update existing key
-                        await pipeline.json().set(
-                            key, "$.channel", write_obj["channel"]
-                        )
-                        await pipeline.json().set(key, "$.type", write_obj["type"])
-                        await pipeline.json().set(key, "$.blob", write_obj["blob"])
+                        pipeline.json().set(key, "$.channel", write_obj["channel"])
+                        pipeline.json().set(key, "$.type", write_obj["type"])
+                        pipeline.json().set(key, "$.blob", write_obj["blob"])
                     else:
                         # Create new key
-                        await pipeline.json().set(key, "$", write_obj)
+                        pipeline.json().set(key, "$", write_obj)
                 else:
                     # For shallow implementation, always set the full object
-                    await pipeline.json().set(key, "$", write_obj)
+                    pipeline.json().set(key, "$", write_obj)
 
             # Execute all operations atomically
             await pipeline.execute()

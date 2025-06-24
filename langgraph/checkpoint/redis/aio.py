@@ -63,14 +63,14 @@ async def _write_obj_tx(
     exists: int = await pipe.exists(key)
     if upsert_case:
         if exists:
-            await pipe.json().set(key, "$.channel", write_obj["channel"])
-            await pipe.json().set(key, "$.type", write_obj["type"])
-            await pipe.json().set(key, "$.blob", write_obj["blob"])
+            pipe.json().set(key, "$.channel", write_obj["channel"])
+            pipe.json().set(key, "$.type", write_obj["type"])
+            pipe.json().set(key, "$.blob", write_obj["blob"])
         else:
-            await pipe.json().set(key, "$", write_obj)
+            pipe.json().set(key, "$", write_obj)
     else:
         if not exists:
-            await pipe.json().set(key, "$", write_obj)
+            pipe.json().set(key, "$", write_obj)
 
 
 class AsyncRedisSaver(
@@ -604,12 +604,12 @@ class AsyncRedisSaver(
                 pipeline = self._redis.pipeline(transaction=True)
 
                 # Add checkpoint data to pipeline
-                await pipeline.json().set(checkpoint_key, "$", checkpoint_data)
+                pipeline.json().set(checkpoint_key, "$", checkpoint_data)
 
                 if blobs:
                     # Add all blob operations to the pipeline
                     for key, data in blobs:
-                        await pipeline.json().set(key, "$", data)
+                        pipeline.json().set(key, "$", data)
 
                 # Execute all operations atomically
                 await pipeline.execute()
@@ -660,7 +660,7 @@ class AsyncRedisSaver(
                     else:
                         # For non-cluster mode, use pipeline
                         pipeline = self._redis.pipeline(transaction=True)
-                        await pipeline.json().set(checkpoint_key, "$", checkpoint_data)
+                        pipeline.json().set(checkpoint_key, "$", checkpoint_data)
                         await pipeline.execute()
                 except Exception:
                     # If this also fails, we just propagate the original cancellation
@@ -788,20 +788,18 @@ class AsyncRedisSaver(
                         exists = await self._redis.exists(key)
                         if exists:
                             # Update existing key
-                            await pipeline.json().set(
-                                key, "$.channel", write_obj["channel"]
-                            )
-                            await pipeline.json().set(key, "$.type", write_obj["type"])
-                            await pipeline.json().set(key, "$.blob", write_obj["blob"])
+                            pipeline.json().set(key, "$.channel", write_obj["channel"])
+                            pipeline.json().set(key, "$.type", write_obj["type"])
+                            pipeline.json().set(key, "$.blob", write_obj["blob"])
                         else:
                             # Create new key
-                            await pipeline.json().set(key, "$", write_obj)
+                            pipeline.json().set(key, "$", write_obj)
                             created_keys.append(key)
                     else:
                         # For non-upsert case, only set if key doesn't exist
                         exists = await self._redis.exists(key)
                         if not exists:
-                            await pipeline.json().set(key, "$", write_obj)
+                            pipeline.json().set(key, "$", write_obj)
                             created_keys.append(key)
 
                 # Execute all operations atomically
