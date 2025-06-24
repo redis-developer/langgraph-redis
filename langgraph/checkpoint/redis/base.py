@@ -420,7 +420,7 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
             return []
 
         writes = []
-        for write in result["writes"]:
+        for write in result["writes"]:  # type: ignore[call-overload]
             writes.append(
                 (
                     write["task_id"],

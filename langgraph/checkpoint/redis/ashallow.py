@@ -720,7 +720,9 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
                 (
                     parsed_key["task_id"],
                     parsed_key["idx"],
-                ): await self._redis.json().get(key)
+                ): await self._redis.json().get(
+                    key
+                )  # type: ignore[misc]
                 for key, parsed_key in sorted(
                     zip(matching_keys, parsed_keys), key=lambda x: x[1]["idx"]
                 )
