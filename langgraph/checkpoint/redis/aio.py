@@ -32,6 +32,13 @@ from langgraph.checkpoint.base import (
     get_checkpoint_id,
 )
 from langgraph.constants import TASKS
+from redis.asyncio import Redis as AsyncRedis
+from redis.asyncio.client import Pipeline
+from redis.asyncio.cluster import RedisCluster as AsyncRedisCluster
+from redisvl.index import AsyncSearchIndex
+from redisvl.query import FilterQuery
+from redisvl.query.filter import Num, Tag
+
 from langgraph.checkpoint.redis.base import BaseRedisSaver
 from langgraph.checkpoint.redis.util import (
     EMPTY_ID_SENTINEL,
@@ -41,12 +48,6 @@ from langgraph.checkpoint.redis.util import (
     to_storage_safe_id,
     to_storage_safe_str,
 )
-from redis.asyncio import Redis as AsyncRedis
-from redis.asyncio.client import Pipeline
-from redis.asyncio.cluster import RedisCluster as AsyncRedisCluster
-from redisvl.index import AsyncSearchIndex
-from redisvl.query import FilterQuery
-from redisvl.query.filter import Num, Tag
 
 logger = logging.getLogger(__name__)
 
