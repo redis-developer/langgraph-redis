@@ -52,25 +52,6 @@ from langgraph.checkpoint.redis.util import (
 logger = logging.getLogger(__name__)
 
 
-async def _write_obj_tx(
-    pipe: Pipeline,
-    key: str,
-    write_obj: Dict[str, Any],
-    upsert_case: bool,
-) -> None:
-    exists: int = await pipe.exists(key)
-    if upsert_case:
-        if exists:
-            pipe.json().set(key, "$.channel", write_obj["channel"])
-            pipe.json().set(key, "$.type", write_obj["type"])
-            pipe.json().set(key, "$.blob", write_obj["blob"])
-        else:
-            pipe.json().set(key, "$", write_obj)
-    else:
-        if not exists:
-            pipe.json().set(key, "$", write_obj)
-
-
 class AsyncRedisSaver(
     BaseRedisSaver[Union[AsyncRedis, AsyncRedisCluster], AsyncSearchIndex]
 ):

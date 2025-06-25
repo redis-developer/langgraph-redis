@@ -86,17 +86,6 @@ SCHEMAS = [
 ]
 
 
-#        func: Callable[["Pipeline"], Union[Any, Awaitable[Any]]],
-async def _write_obj_tx(pipe: Pipeline, key: str, write_obj: dict[str, Any]) -> None:
-    exists: int = await pipe.exists(key)
-    if exists:
-        pipe.json().set(key, "$.channel", write_obj["channel"])
-        pipe.json().set(key, "$.type", write_obj["type"])
-        pipe.json().set(key, "$.blob", write_obj["blob"])
-    else:
-        pipe.json().set(key, "$", write_obj)
-
-
 class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
     """Async Redis implementation that only stores the most recent checkpoint."""
 
