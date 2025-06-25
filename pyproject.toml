@@ -1,12 +1,12 @@
 [tool.poetry]
 name = "langgraph-checkpoint-redis"
-version = "0.0.7"
-description = "Library with a Redis implementation of LangGraph checkpoint saver."
+version = "0.0.8"
+description = "Redis implementation of the LangGraph agent checkpoint saver and store."
 authors = ["Redis Inc. <applied.ai@redis.com>"]
 license = "MIT"
 readme = "README.md"
 repository = "https://www.github.com/redis-developer/langgraph-redis"
-keywords = ["ai", "redis", "redis-client", "vector-database", "vector-search"]
+keywords = ["ai", "redis", "redis-client", "vector-database", "agents", "langgraph", "langchain"]
 classifiers = [
   "Programming Language :: Python :: 3.9",
   "Programming Language :: Python :: 3.10",
@@ -19,10 +19,8 @@ packages = [{ include = "langgraph" }]
 
 [tool.poetry.dependencies]
 python = ">=3.9,<3.14"
-langgraph-checkpoint = "^2.0.26"
-redisvl = ">=0.5.1,<0.8.0"
-redis = ">=5.0,<7.0"
-python-ulid = "^3.0.0"
+langgraph-checkpoint = ">=2.0.26"
+redisvl = ">=0.5.1,<1.0.0"
 
 [tool.poetry.group.dev.dependencies]
 langgraph = ">=0.3.0,<0.5.0"
@@ -33,7 +31,7 @@ anyio = "^4.4.0"
 pytest-asyncio = "^0.21.1"
 pytest-xdist = {extras = ["psutil"], version = "^3.6.1"}
 pytest-mock = "^3.11.1"
-mypy = "^1.10.0"
+mypy = ">=1.11.0,<2"
 aioconsole = "^0.8.1"
 langchain-openai = "^0.3.2"
 testcontainers = "^4.9.1"

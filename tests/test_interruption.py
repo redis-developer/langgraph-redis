@@ -420,8 +420,9 @@ async def test_aput_writes_interruption(redis_url: str) -> None:
 
             # Either there are no pending writes or they are not the ones we tried to save
             if checkpoint_tuple and checkpoint_tuple.pending_writes:
+                print(checkpoint_tuple.pending_writes, flush=True)
                 for write in checkpoint_tuple.pending_writes:
-                    assert write.channel not in [
+                    assert write[1] not in [
                         "channel1",
                         "channel2",
                     ], "Transaction should have been rolled back"

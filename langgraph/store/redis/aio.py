@@ -87,7 +87,7 @@ class AsyncRedisStore(
 
         # Set up store configuration
         self.index_config = index
-        self.ttl_config = ttl  # type: ignore
+        self.ttl_config = ttl
 
         if self.index_config:
             self.index_config = self.index_config.copy()
@@ -744,7 +744,7 @@ class AsyncRedisStore(
                             store_key = f"{STORE_PREFIX}{REDIS_KEY_SEPARATOR}{doc_uuid}"
                             result_map[store_key] = doc
                             # Fetch individually in cluster mode
-                            store_doc_item = await self._redis.json().get(store_key)
+                            store_doc_item = await self._redis.json().get(store_key)  # type: ignore
                             store_docs.append(store_doc_item)
                     store_docs_raw = store_docs
                 else:

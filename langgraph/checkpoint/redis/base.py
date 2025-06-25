@@ -383,7 +383,9 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         # NOTE: we're using JSON serializer (not msgpack), so we need to remove null characters before writing
         return serialized_metadata.decode().replace("\\u0000", "")
 
-    def get_next_version(self, current: Optional[str], channel: ChannelProtocol) -> str:
+    def get_next_version(  # type: ignore[override]
+        self, current: Optional[str], channel: ChannelProtocol[Any, Any, Any]
+    ) -> str:
         """Generate next version number."""
         if current is None:
             current_v = 0
@@ -420,7 +422,7 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
             return []
 
         writes = []
-        for write in result["writes"]:
+        for write in result["writes"]:  # type: ignore[call-overload]
             writes.append(
                 (
                     write["task_id"],

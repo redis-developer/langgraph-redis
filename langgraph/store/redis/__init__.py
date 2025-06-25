@@ -515,7 +515,7 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
                         if not isinstance(store_doc, dict):
                             try:
                                 store_doc = json.loads(
-                                    store_doc
+                                    store_doc  # type: ignore[arg-type]
                                 )  # Attempt to parse if it's a JSON string
                             except (json.JSONDecodeError, TypeError):
                                 logger.error(f"Failed to parse store_doc: {store_doc}")
@@ -578,16 +578,14 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
                         if self.cluster_mode:
                             for key in refresh_keys:
                                 ttl = self._redis.ttl(key)
-                                if ttl > 0:  # type: ignore
+                                if ttl > 0:
                                     self._redis.expire(key, ttl_seconds)
                         else:
                             pipeline = self._redis.pipeline(transaction=True)
                             for key in refresh_keys:
                                 # Only refresh TTL if the key exists and has a TTL
                                 ttl = self._redis.ttl(key)
-                                if (
-                                    ttl > 0
-                                ):  # Only refresh if key exists and has TTL  # type: ignore
+                                if ttl > 0:  # Only refresh if key exists and has TTL
                                     pipeline.expire(key, ttl_seconds)
                             if pipeline.command_stack:
                                 pipeline.execute()
@@ -645,16 +643,14 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
                         if self.cluster_mode:
                             for key in refresh_keys:
                                 ttl = self._redis.ttl(key)
-                                if ttl > 0:  # type: ignore
+                                if ttl > 0:
                                     self._redis.expire(key, ttl_seconds)
                         else:
                             pipeline = self._redis.pipeline(transaction=True)
                             for key in refresh_keys:
                                 # Only refresh TTL if the key exists and has a TTL
                                 ttl = self._redis.ttl(key)
-                                if (
-                                    ttl > 0
-                                ):  # Only refresh if key exists and has TTL  # type: ignore
+                                if ttl > 0:  # Only refresh if key exists and has TTL
                                     pipeline.expire(key, ttl_seconds)
                             if pipeline.command_stack:
                                 pipeline.execute()
