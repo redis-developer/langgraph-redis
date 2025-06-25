@@ -753,14 +753,14 @@ tiktoken = ">=0.7,<1"
 
 [[package]]
 name = "langgraph"
-version = "0.4.8"
+version = "0.4.9"
 description = "Building stateful, multi-actor applications with LLMs"
 optional = false
 python-versions = ">=3.9"
 groups = ["dev"]
 files = [
-    {file = "langgraph-0.4.8-py3-none-any.whl", hash = "sha256:273b02782669a474ba55ef4296607ac3bac9e93639d37edc0d32d8cf1a41a45b"},
-    {file = "langgraph-0.4.8.tar.gz", hash = "sha256:48445ac8a351b7bdc6dee94e2e6a597f8582e0516ebd9dea0fd0164ae01b915e"},
+    {file = "langgraph-0.4.9-py3-none-any.whl", hash = "sha256:03312d769edec311dac3ec9ed83a595f1a74590b9ad141387f1fb006b5b3f753"},
+    {file = "langgraph-0.4.9.tar.gz", hash = "sha256:f815d4cc804862fb32c280bb17e634c3f0e88b4e0df1fb6573aebb73fb959a1e"},
 ]
 
 [package.dependencies]
@@ -821,14 +821,14 @@ orjson = ">=3.10.1"
 
 [[package]]
 name = "langsmith"
-version = "0.4.1"
+version = "0.4.2"
 description = "Client library to connect to the LangSmith LLM Tracing and Evaluation Platform."
 optional = false
 python-versions = ">=3.9"
 groups = ["main", "dev"]
 files = [
-    {file = "langsmith-0.4.1-py3-none-any.whl", hash = "sha256:19c4c40bbb6735cb1136c453b2edcde265ca5ba1b108b7e0e3583ec4bda28625"},
-    {file = "langsmith-0.4.1.tar.gz", hash = "sha256:ae8ec403fb2b9cabcfc3b0c54556d65555598c85879dac83b009576927f7eb1d"},
+    {file = "langsmith-0.4.2-py3-none-any.whl", hash = "sha256:2b1a3f889e134546dc5d67e23e5e8c6be5f91fd86827276ac874e3a25a04498a"},
+    {file = "langsmith-0.4.2.tar.gz", hash = "sha256:51df086a9ae17ffa16538f52ef3bb8b3d85b0e52c84958980553cb6cadd9e565"},
 ]
 
 [package.dependencies]

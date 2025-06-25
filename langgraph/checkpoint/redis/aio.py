@@ -760,18 +760,30 @@ class AsyncRedisSaver(
                         exists = await self._redis.exists(key)
                         if exists:
                             # Update existing key
-                            await self._redis.json().set(key, "$.channel", write_obj["channel"])  # type: ignore[misc, arg-type]
-                            await self._redis.json().set(key, "$.type", write_obj["type"])  # type: ignore[misc, arg-type]
-                            await self._redis.json().set(key, "$.blob", write_obj["blob"])  # type: ignore[misc, arg-type]
+                            pipeline.json().set(
+                                key,
+                                "$.channel",
+                                write_obj["channel"],  # type: ignore[arg-type]
+                            )
+                            pipeline.json().set(
+                                key,
+                                "$.type",
+                                write_obj["type"],  # type: ignore[arg-type]
+                            )
+                            pipeline.json().set(
+                                key,
+                                "$.blob",
+                                write_obj["blob"],  # type: ignore[arg-type]
+                            )
                         else:
                             # Create new key
-                            await self._redis.json().set(key, "$", write_obj)  # type: ignore[misc]
+                            pipeline.json().set(key, "$", write_obj)
                             created_keys.append(key)
                     else:
                         # For non-upsert case, only set if key doesn't exist
                         exists = await self._redis.exists(key)
                         if not exists:
-                            await self._redis.json().set(key, "$", write_obj)  # type: ignore[misc]
+                            pipeline.json().set(key, "$", write_obj)
                             created_keys.append(key)
 
                 # Execute all operations atomically
