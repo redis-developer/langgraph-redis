@@ -222,3 +222,4 @@ libs/redis/docs/.Trash*
 .idea/*
 examples/.Trash*
 .claude
+/benchmarks/reports/*
