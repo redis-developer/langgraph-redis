@@ -152,6 +152,17 @@ class AsyncRedisSaver(
         # Detect cluster mode if not explicitly set
         await self._detect_cluster_mode()
 
+    async def setup(self) -> None:
+        """Set up the checkpoint saver asynchronously.
+        
+        This method creates the necessary indices in Redis and detects cluster mode.
+        It MUST be called before using the checkpointer.
+        
+        This is the async version that should be awaited. It delegates to asetup()
+        for the actual implementation.
+        """
+        await self.asetup()
+
     async def _detect_cluster_mode(self) -> None:
         """Detect if the Redis client is a cluster client by inspecting its class."""
         if self.cluster_mode is not None:
