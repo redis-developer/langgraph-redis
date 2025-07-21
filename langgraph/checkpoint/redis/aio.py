@@ -152,6 +152,21 @@ class AsyncRedisSaver(
         # Detect cluster mode if not explicitly set
         await self._detect_cluster_mode()
 
+    async def setup(self) -> None:  # type: ignore[override]
+        """Set up the checkpoint saver asynchronously.
+
+        This method creates the necessary indices in Redis and detects cluster mode.
+        It MUST be called before using the checkpointer.
+
+        This async method follows the canonical pattern used by PostgreSQL and SQLite
+        checkpointers in the LangGraph ecosystem. The type ignore is necessary because
+        the base class defines a sync setup() method, but async checkpointers require
+        an async setup() method to properly handle coroutines.
+
+        Usage: await checkpointer.setup()
+        """
+        await self.asetup()
+
     async def _detect_cluster_mode(self) -> None:
         """Detect if the Redis client is a cluster client by inspecting its class."""
         if self.cluster_mode is not None:
