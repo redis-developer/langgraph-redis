@@ -44,9 +44,10 @@ class AsyncMockRedis(AsyncRedis):
         mock_pipeline.delete = MagicMock(return_value=1)
         mock_pipeline.execute = AsyncMock(return_value=[])
 
-        # Mock json().get() behavior within pipeline
+        # Mock json().set() behavior within pipeline - set must return pipeline for method chaining
         mock_json_pipeline = AsyncMock()
-        mock_json_pipeline.get = MagicMock()
+        mock_json_pipeline.get = MagicMock(return_value=mock_pipeline)
+        mock_json_pipeline.set = MagicMock(return_value=mock_pipeline)
         mock_pipeline.json = MagicMock(return_value=mock_json_pipeline)
         return mock_pipeline
 
@@ -124,8 +125,10 @@ class AsyncMockRedisCluster(
         mock_pipeline.expire = MagicMock(return_value=True)
         mock_pipeline.delete = MagicMock(return_value=1)
 
-        mock_json_pipeline = MagicMock()
-        mock_json_pipeline.get = MagicMock()
+        # Mock json().set() behavior within pipeline - set must return pipeline for method chaining
+        mock_json_pipeline = AsyncMock()
+        mock_json_pipeline.get = MagicMock(return_value=mock_pipeline)
+        mock_json_pipeline.set = MagicMock(return_value=mock_pipeline)
         mock_pipeline.json = MagicMock(return_value=mock_json_pipeline)
         return mock_pipeline
 
