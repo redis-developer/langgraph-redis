@@ -539,7 +539,7 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
                 filter_expression=(Tag("thread_id") == storage_safe_thread_id)
                 & (Tag("checkpoint_ns") == storage_safe_checkpoint_ns)
                 & (Tag("channel") == channel)
-                & (Tag("version") == version),
+                & (Tag("version") == str(version)),
                 return_fields=["type", "$.blob"],
                 num_results=1,
             )
