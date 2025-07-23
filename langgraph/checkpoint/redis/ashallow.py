@@ -629,7 +629,7 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
                 filter_expression=(Tag("thread_id") == thread_id)
                 & (Tag("checkpoint_ns") == checkpoint_ns)
                 & (Tag("channel") == channel)
-                & (Tag("version") == version),
+                & (Tag("version") == str(version)),
                 return_fields=["type", "$.blob"],
                 num_results=1,
             )
