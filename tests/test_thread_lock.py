@@ -1,8 +1,11 @@
-import concurrent.futures 
-import pytest  
-from langchain_core.runnables import RunnableConfig  
-from langgraph.checkpoint.base import empty_checkpoint 
-from langgraph.checkpoint.redis import RedisSaver  
+import concurrent.futures
+
+import pytest
+from langchain_core.runnables import RunnableConfig
+from langgraph.checkpoint.base import empty_checkpoint
+
+from langgraph.checkpoint.redis import RedisSaver
+
 
 # Helper function to increment a value in a thread-safe manner
 def _increment(
@@ -19,9 +22,12 @@ def _increment(
             cp.setdefault("channel_values", {}).setdefault("count", 0)
             cp.setdefault("channel_versions", {}).setdefault("count", "0")
             cp["channel_values"]["count"] += 1  # Increment the count
-            cp["channel_versions"]["count"] = str(cp["channel_values"]["count"])  # Update version
+            cp["channel_versions"]["count"] = str(
+                cp["channel_values"]["count"]
+            )  # Update version
             # Save the updated checkpoint
             checkpointer.put(config, cp, {}, {"count": cp["channel_versions"]["count"]})
+
 
 # Test function to verify thread-safe serialization of checkpoints
 def test_thread_lock_serialization(redis_url: str) -> None:
