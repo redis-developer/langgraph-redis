@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+from collections import defaultdict
 from contextlib import asynccontextmanager
 from types import TracebackType
 from typing import (
@@ -74,14 +75,20 @@ class AsyncRedisSaver(
         redis_client: Optional[Union[AsyncRedis, AsyncRedisCluster]] = None,
         connection_args: Optional[Dict[str, Any]] = None,
         ttl: Optional[Dict[str, Any]] = None,
+        lock_block: bool = True,
+        lock_timeout: float = 1.0,
     ) -> None:
         super().__init__(
             redis_url=redis_url,
             redis_client=redis_client,
             connection_args=connection_args,
             ttl=ttl,
+            lock_block=lock_block,
+            lock_timeout=lock_timeout,
         )
         self.loop = asyncio.get_running_loop()
+        # Per-thread locks for async operations
+        self._thread_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
     def configure_client(
         self,
@@ -113,6 +120,41 @@ class AsyncRedisSaver(
         self.checkpoint_writes_index = AsyncSearchIndex.from_dict(
             self.SCHEMAS[2], redis_client=self._redis
         )
+
+    @asynccontextmanager
+    async def athread_lock(
+        self,
+        thread_id: str,
+        *,
+        block: Optional[bool] = None,
+        timeout: Optional[float] = None,
+    ) -> AsyncIterator[None]:
+        """Async context manager to serialize access per thread."""
+        lock = self._thread_locks[thread_id]
+        if block is None:
+            block = self.lock_block
+        if timeout is None:
+            timeout = self.lock_timeout
+        acquired = False
+        if block:
+            try:
+                await asyncio.wait_for(lock.acquire(), timeout=timeout)
+                acquired = True
+            except asyncio.TimeoutError:
+                acquired = False
+        else:
+            if not lock.locked():
+                await lock.acquire()
+                acquired = True
+        if not acquired:
+            raise TimeoutError(
+                f"Could not acquire lock for {thread_id} within {timeout}s"
+            )
+        try:
+            yield
+        finally:
+            if acquired:
+                lock.release()
 
     async def __aenter__(self) -> AsyncRedisSaver:
         """Async context manager enter."""

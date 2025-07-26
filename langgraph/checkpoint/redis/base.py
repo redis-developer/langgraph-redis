@@ -3,7 +3,10 @@ import binascii
 import json
 import random
 from abc import abstractmethod
-from typing import Any, Dict, Generic, List, Optional, Sequence, Tuple, cast
+from collections import defaultdict
+from contextlib import contextmanager
+from threading import Lock
+from typing import Any, Dict, Generic, Iterator, List, Optional, Sequence, Tuple, cast
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import (
@@ -104,6 +107,8 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         redis_client: Optional[RedisClientType] = None,
         connection_args: Optional[Dict[str, Any]] = None,
         ttl: Optional[Dict[str, Any]] = None,
+        lock_block: bool = True,
+        lock_timeout: float = 1.0,
     ) -> None:
         """Initialize Redis-backed checkpoint saver.
 
@@ -114,6 +119,8 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
             ttl: Optional TTL configuration dict with optional keys:
                 - default_ttl: TTL in minutes for all checkpoint keys
                 - refresh_on_read: Whether to refresh TTL on reads
+            lock_block: Whether lock acquisition should block by default
+            lock_timeout: Seconds to wait when acquiring a lock by default
         """
         super().__init__(serde=JsonPlusRedisSerializer())
         if redis_url is None and redis_client is None:
@@ -121,6 +128,12 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
 
         # Store TTL configuration
         self.ttl_config = ttl
+        # Default lock behaviour
+        self.lock_block = lock_block
+        self.lock_timeout = lock_timeout
+
+        # Per-thread locks to serialize operations
+        self._thread_locks: dict[str, Lock] = defaultdict(Lock)
 
         self.configure_client(
             redis_url=redis_url,
@@ -148,6 +161,34 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
     ) -> None:
         """Configure the Redis client."""
         pass
+
+    @contextmanager
+    def thread_lock(
+        self,
+        thread_id: str,
+        *,
+        block: Optional[bool] = None,
+        timeout: Optional[float] = None,
+    ) -> Iterator[None]:
+        """Context manager to serialize access per thread."""
+        lock = self._thread_locks[thread_id]
+        if block is None:
+            block = self.lock_block
+        if timeout is None:
+            timeout = self.lock_timeout
+        if block:
+            acquired = lock.acquire(timeout=timeout)
+        else:
+            acquired = lock.acquire(blocking=False)
+        if not acquired:
+            raise TimeoutError(
+                f"Could not acquire lock for {thread_id} within {timeout}s"
+            )
+        try:
+            yield
+        finally:
+            if acquired:
+                lock.release()
 
     def set_client_info(self) -> None:
         """Set client info for Redis monitoring."""
