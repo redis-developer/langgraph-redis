@@ -695,7 +695,11 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         )
 
         # Extract type and blob pairs
-        return [(doc.type, doc.blob) for doc in sorted_writes]
+        return [
+            (d.type.encode(), blob)
+            for d in sorted_writes
+            if (blob := getattr(d, "$.blob", getattr(d, "blob", None))) is not None
+        ]
 
     @staticmethod
     def _make_shallow_redis_checkpoint_key(thread_id: str, checkpoint_ns: str) -> str:

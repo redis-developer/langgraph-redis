@@ -602,7 +602,11 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
         )
 
         # Extract type and blob pairs
-        return [(doc.type, doc.blob) for doc in sorted_writes]
+        return [
+            (d.type.encode(), blob)
+            for d in sorted_writes
+            if (blob := getattr(d, "$.blob", getattr(d, "blob", None))) is not None
+        ]
 
     def delete_thread(self, thread_id: str) -> None:
         """Delete all checkpoints and writes associated with a specific thread ID.
