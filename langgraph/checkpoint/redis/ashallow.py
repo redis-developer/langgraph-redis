@@ -685,7 +685,11 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         )
 
         # Extract type and blob pairs
-        return [(doc.type, doc.blob) for doc in sorted_writes]
+        return [
+            (d.type.encode(), blob)
+            for d in sorted_writes
+            if (blob := getattr(d, "$.blob", getattr(d, "blob", None))) is not None
+        ]
 
     async def _aload_pending_writes(
         self, thread_id: str, checkpoint_ns: str, checkpoint_id: str
