@@ -2,18 +2,16 @@
 
 from __future__ import annotations
 
-import os
 import time
-from typing import Any, Dict, Generator, Iterator, Optional, TypedDict, cast
+from typing import Generator, TypedDict
 
 import pytest
 from langchain_core.runnables import RunnableConfig
-from langgraph.checkpoint.base import Checkpoint, CheckpointMetadata, CheckpointTuple
-from langgraph.graph import END, StateGraph
+from langgraph.checkpoint.base import Checkpoint, CheckpointMetadata
+from langgraph.graph import StateGraph
 from redis import Redis
 
 from langgraph.checkpoint.redis import RedisSaver
-from langgraph.checkpoint.redis.util import to_storage_safe_id
 
 
 class State(TypedDict):

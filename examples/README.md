@@ -14,12 +14,16 @@ To run these notebooks using Docker (recommended for consistent environment):
    docker compose up
    ```
 
-4. Look for a URL in the console output that starts with `http://127.0.0.1:8888/tree`. Open this URL in your web browser to access Jupyter Notebook.
+4. Look for a URL in the console output that starts with `http://127.0.0.1:8888/tree`. Open this URL in your web browser
+   to access Jupyter Notebook.
 5. You can now run the notebooks with all dependencies pre-installed.
 
-Note: 
+Note:
+
 - The first time you run this, it may take a few minutes to build the Docker image.
-- The Docker setup uses a simplified structure where the examples are self-contained, making it portable and independent of the repository structure.
+- When running with Docker Compose, the local library code from `../langgraph` is automatically mounted and installed,
+  allowing you to test changes to the library immediately without rebuilding.
+- If running the Docker image standalone (without docker-compose), it will install the library from PyPI instead.
 
 To stop the Docker containers, use Ctrl+C in the terminal where you ran `docker compose up`, then run:
 
@@ -56,16 +60,20 @@ If you prefer to run these notebooks locally without Docker:
 
 ## Notebook Contents
 
-- `persistence-functional.ipynb`: Demonstrates the usage of `RedisSaver` and functional persistence patterns with LangGraph.
+- `persistence-functional.ipynb`: Demonstrates the usage of `RedisSaver` and functional persistence patterns with
+  LangGraph.
 - `create-react-agent-memory.ipynb`: Shows how to create an agent with persistent memory using Redis.
 - `cross-thread-persistence.ipynb`: Demonstrates cross-thread persistence capabilities with Redis.
 - `cross-thread-persistence-functional.ipynb`: Shows functional cross-thread persistence patterns with Redis.
-- `create-react-agent-manage-message-history.ipynb`: Shows how to manage conversation history in a ReAct agent with Redis.
+- `create-react-agent-manage-message-history.ipynb`: Shows how to manage conversation history in a ReAct agent with
+  Redis.
 - `subgraph-persistence.ipynb`: Demonstrates persistence with subgraphs using Redis.
 - `subgraphs-manage-state.ipynb`: Shows how to manage state in subgraphs with Redis.
 - `create-react-agent-hitl.ipynb`: Demonstrates human-in-the-loop (HITL) capabilities with Redis.
 - `human_in_the_loop/*.ipynb`: Demonstrates various human-in-the-loop interaction patterns with LangGraph and Redis.
 
-All notebooks have been updated to use the Redis implementation instead of memory implementation, showcasing the proper usage of Redis integration with LangGraph.
+All notebooks have been updated to use the Redis implementation instead of memory implementation, showcasing the proper
+usage of Redis integration with LangGraph.
 
-These notebooks are designed to work both within this Docker environment (using local package builds) and standalone (using installed packages via pip).
+These notebooks are designed to work both within this Docker environment (using local package builds) and standalone (
+using installed packages via pip).

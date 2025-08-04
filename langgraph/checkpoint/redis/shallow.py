@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import json
+import logging
+import time
+from collections import OrderedDict
 from contextlib import contextmanager
+from datetime import datetime
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple, cast
 
 from langchain_core.runnables import RunnableConfig
@@ -11,6 +15,8 @@ from langgraph.checkpoint.base import (
     Checkpoint,
     CheckpointMetadata,
     CheckpointTuple,
+    PendingWrite,
+    get_checkpoint_id,
 )
 from langgraph.constants import TASKS
 from redis import Redis
@@ -18,6 +24,7 @@ from redisvl.index import SearchIndex
 from redisvl.query import FilterQuery
 from redisvl.query.filter import Num, Tag
 from redisvl.redis.connection import RedisConnectionFactory
+from ulid import ULID
 
 from langgraph.checkpoint.redis.base import (
     CHECKPOINT_BLOB_PREFIX,
@@ -27,10 +34,15 @@ from langgraph.checkpoint.redis.base import (
     BaseRedisSaver,
 )
 from langgraph.checkpoint.redis.util import (
-    safely_decode,
     to_storage_safe_id,
     to_storage_safe_str,
 )
+
+# Constants
+MILLISECONDS_PER_SECOND = 1000
+
+# Logger for this module
+logger = logging.getLogger(__name__)
 
 SCHEMAS = [
     {
@@ -81,6 +93,10 @@ SCHEMAS = [
 class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
     """Redis implementation that only stores the most recent checkpoint."""
 
+    # Default cache size limits
+    DEFAULT_KEY_CACHE_MAX_SIZE = 1000
+    DEFAULT_CHANNEL_CACHE_MAX_SIZE = 100
+
     def __init__(
         self,
         redis_url: Optional[str] = None,
@@ -88,6 +104,8 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         redis_client: Optional[Redis] = None,
         connection_args: Optional[dict[str, Any]] = None,
         ttl: Optional[dict[str, Any]] = None,
+        key_cache_max_size: Optional[int] = None,
+        channel_cache_max_size: Optional[int] = None,
     ) -> None:
         super().__init__(
             redis_url=redis_url,
@@ -95,6 +113,20 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
             connection_args=connection_args,
             ttl=ttl,
         )
+
+        # Instance-level cache for frequently used keys (limited size to prevent memory issues)
+        # Using OrderedDict for LRU cache eviction
+        self._key_cache: OrderedDict[str, str] = OrderedDict()
+        self._key_cache_max_size = key_cache_max_size or self.DEFAULT_KEY_CACHE_MAX_SIZE
+        self._channel_cache: OrderedDict[str, Any] = OrderedDict()
+        self._channel_cache_max_size = (
+            channel_cache_max_size or self.DEFAULT_CHANNEL_CACHE_MAX_SIZE
+        )
+
+        # Cache commonly used prefixes
+        self._checkpoint_prefix = CHECKPOINT_PREFIX
+        self._checkpoint_write_prefix = CHECKPOINT_WRITE_PREFIX
+        self._separator = REDIS_KEY_SEPARATOR
 
     @classmethod
     @contextmanager
@@ -105,6 +137,8 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         redis_client: Optional[Redis] = None,
         connection_args: Optional[dict[str, Any]] = None,
         ttl: Optional[dict[str, Any]] = None,
+        key_cache_max_size: Optional[int] = None,
+        channel_cache_max_size: Optional[int] = None,
     ) -> Iterator[ShallowRedisSaver]:
         """Create a new ShallowRedisSaver instance."""
         saver: Optional[ShallowRedisSaver] = None
@@ -114,6 +148,8 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
                 redis_client=redis_client,
                 connection_args=connection_args,
                 ttl=ttl,
+                key_cache_max_size=key_cache_max_size,
+                channel_cache_max_size=channel_cache_max_size,
             )
             yield saver
         finally:
@@ -128,7 +164,7 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         metadata: CheckpointMetadata,
         new_versions: ChannelVersions,
     ) -> RunnableConfig:
-        """Store only the latest checkpoint and clean up old blobs."""
+        """Store checkpoint with inline channel values."""
         configurable = config["configurable"].copy()
         thread_id = configurable.pop("thread_id")
         checkpoint_ns = configurable.pop("checkpoint_ns")
@@ -142,91 +178,96 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
             }
         }
 
-        # Store checkpoint data
+        # Extract timestamp from checkpoint_id (ULID)
+        checkpoint_ts = None
+        if checkpoint["id"]:
+            try:
+                ulid_obj = ULID.from_str(checkpoint["id"])
+                checkpoint_ts = ulid_obj.timestamp  # milliseconds since epoch
+            except Exception as e:
+                # If not a valid ULID, use checkpoint's timestamp if available, else current time
+                logger.warning(
+                    f"Invalid ULID checkpoint_id '{checkpoint['id']}': {e}. "
+                    f"Using fallback timestamp."
+                )
+                # Try to use checkpoint's own timestamp field if available
+                ts_value = checkpoint.get("ts")
+                if ts_value:
+                    # Handle both ISO string and numeric timestamps
+                    if isinstance(ts_value, str):
+                        try:
+                            dt = datetime.fromisoformat(ts_value.replace("Z", "+00:00"))
+                            checkpoint_ts = dt.timestamp() * MILLISECONDS_PER_SECOND
+                        except Exception:
+                            checkpoint_ts = time.time() * MILLISECONDS_PER_SECOND
+                    else:
+                        checkpoint_ts = ts_value
+                else:
+                    checkpoint_ts = time.time() * MILLISECONDS_PER_SECOND
+
+        # Parse metadata from string to dict to avoid double serialization
+        metadata_str = self._dump_metadata(metadata)
+        metadata_dict = (
+            json.loads(metadata_str) if isinstance(metadata_str, str) else metadata_str
+        )
+
+        # Store channel values inline in the checkpoint
+        copy["channel_values"] = checkpoint.get("channel_values", {})
+
         checkpoint_data = {
             "thread_id": thread_id,
-            "checkpoint_ns": checkpoint_ns,
+            "checkpoint_ns": to_storage_safe_str(checkpoint_ns),
             "checkpoint_id": checkpoint["id"],
+            "checkpoint_ts": checkpoint_ts,
             "checkpoint": self._dump_checkpoint(copy),
-            "metadata": self._dump_metadata(metadata),
+            "metadata": metadata_dict,
+            # Note: has_writes tracking removed to support put_writes before checkpoint exists
         }
 
-        # store at top-level for filters in list()
+        # Store at top-level for filters in list()
         if all(key in metadata for key in ["source", "step"]):
             checkpoint_data["source"] = metadata["source"]
             checkpoint_data["step"] = metadata["step"]
 
-        # Note: Need to keep track of the current versions to keep
-        current_channel_versions = new_versions.copy()
-
-        self.checkpoints_index.load(
-            [checkpoint_data],
-            keys=[
-                ShallowRedisSaver._make_shallow_redis_checkpoint_key(
-                    thread_id, checkpoint_ns
-                )
-            ],
-        )
-
-        # Before storing the new blobs, clean up old ones that won't be needed
-        # - Get a list of all blob keys for this thread_id and checkpoint_ns
-        # - Then delete the ones that aren't in new_versions
-        cleanup_pipeline = self._redis.json().pipeline(transaction=False)
-
-        # Get all blob keys for this thread/namespace
-        blob_key_pattern = (
-            ShallowRedisSaver._make_shallow_redis_checkpoint_blob_key_pattern(
-                thread_id, checkpoint_ns
-            )
-        )
-        existing_blob_keys = self._redis.keys(blob_key_pattern)
-
-        # Process each existing blob key to determine if it should be kept or deleted
-        if existing_blob_keys:
-            for blob_key in existing_blob_keys:
-                # Use safely_decode to handle both string and bytes responses
-                decoded_key = safely_decode(blob_key)
-                key_parts = decoded_key.split(REDIS_KEY_SEPARATOR)
-                # The key format is checkpoint_blob:thread_id:checkpoint_ns:channel:version
-                if len(key_parts) >= 5:
-                    channel = key_parts[3]
-                    version = key_parts[4]
-
-                    # Only keep the blob if it's referenced by the current versions
-                    if (
-                        channel in current_channel_versions
-                        and current_channel_versions[channel] == version
-                    ):
-                        # This is a current version, keep it
-                        continue
-                    else:
-                        # This is an old version, delete it
-                        cleanup_pipeline.delete(blob_key)
-
-            # Execute the cleanup
-            cleanup_pipeline.execute()
-
-        # Store blob values
-        blobs = self._dump_blobs(
-            thread_id,
-            checkpoint_ns,
-            copy.get("channel_values", {}),
-            new_versions,
-        )
-
-        blob_keys = []
-        if blobs:
-            # Unzip the list of tuples into separate lists for keys and data
-            keys, data = zip(*blobs)
-            blob_keys = list(keys)
-            self.checkpoint_blobs_index.load(list(data), keys=blob_keys)
-
-        # Apply TTL to checkpoint and blob keys if configured
-        checkpoint_key = ShallowRedisSaver._make_shallow_redis_checkpoint_key(
+        checkpoint_key = self._make_shallow_redis_checkpoint_key_cached(
             thread_id, checkpoint_ns
         )
-        if self.ttl_config and "default_ttl" in self.ttl_config:
-            self._apply_ttl_to_keys(checkpoint_key, blob_keys)
+
+        # Get the previous checkpoint ID to clean up its writes
+        prev_checkpoint_data = self._redis.json().get(checkpoint_key)
+        prev_checkpoint_id = None
+        if prev_checkpoint_data and isinstance(prev_checkpoint_data, dict):
+            prev_checkpoint_id = prev_checkpoint_data.get("checkpoint_id")
+
+        with self._redis.pipeline(transaction=False) as pipeline:
+            pipeline.json().set(checkpoint_key, "$", checkpoint_data)
+
+            # If checkpoint changed, clean up old writes
+            if prev_checkpoint_id and prev_checkpoint_id != checkpoint["id"]:
+                # Clean up writes from the previous checkpoint
+                thread_write_registry_key = (
+                    f"write_registry:{thread_id}:{checkpoint_ns}:shallow"
+                )
+
+                # Get all existing write keys and delete them
+                existing_write_keys = self._redis.zrange(
+                    thread_write_registry_key, 0, -1
+                )
+                for old_key in existing_write_keys:
+                    old_key_str = (
+                        old_key.decode() if isinstance(old_key, bytes) else old_key
+                    )
+                    pipeline.delete(old_key_str)
+
+                # Clear the registry
+                pipeline.delete(thread_write_registry_key)
+
+            # Apply TTL if configured
+            if self.ttl_config and "default_ttl" in self.ttl_config:
+                ttl_seconds = int(self.ttl_config.get("default_ttl") * 60)
+                pipeline.expire(checkpoint_key, ttl_seconds)
+
+            pipeline.execute()
 
         return next_config
 
@@ -243,10 +284,13 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         filter_expression = []
         if config:
             filter_expression.append(
-                Tag("thread_id") == config["configurable"]["thread_id"]
+                Tag("thread_id")
+                == to_storage_safe_id(config["configurable"]["thread_id"])
             )
             if checkpoint_ns := config["configurable"].get("checkpoint_ns"):
-                filter_expression.append(Tag("checkpoint_ns") == checkpoint_ns)
+                filter_expression.append(
+                    Tag("checkpoint_ns") == to_storage_safe_str(checkpoint_ns)
+                )
 
         if filter:
             for k, v in filter.items():
@@ -257,15 +301,24 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
                 else:
                     raise ValueError(f"Unsupported filter key: {k}")
 
-        # if before:
-        #     filter_expression.append(Tag("checkpoint_id") < get_checkpoint_id(before))
+        if before:
+            before_checkpoint_id = get_checkpoint_id(before)
+            if before_checkpoint_id:
+                try:
+                    before_ulid = ULID.from_str(before_checkpoint_id)
+                    before_ts = before_ulid.timestamp
+                    # Use numeric range query: checkpoint_ts < before_ts
+                    filter_expression.append(Num("checkpoint_ts") < before_ts)
+                except Exception:
+                    # If not a valid ULID, ignore the before filter
+                    pass
 
         # Combine all filter expressions
         combined_filter = filter_expression[0] if filter_expression else "*"
         for expr in filter_expression[1:]:
             combined_filter &= expr
 
-        # Construct the Redis query
+        # Get checkpoint data
         query = FilterQuery(
             filter_expression=combined_filter,
             return_fields=[
@@ -286,20 +339,12 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
             checkpoint_ns = cast(str, getattr(doc, "checkpoint_ns", ""))
             checkpoint = json.loads(doc["$.checkpoint"])
 
-            # Fetch channel_values
-            channel_values = self.get_channel_values(
-                thread_id=thread_id,
-                checkpoint_ns=checkpoint_ns,
-                checkpoint_id=checkpoint["id"],
-            )
+            # Extract channel values from the checkpoint (they're stored inline)
+            channel_values: Dict[str, Any] = checkpoint.get("channel_values", {})
+            # Deserialize them since they're stored in serialized form
+            channel_values = self._deserialize_channel_values(channel_values)
 
-            # Fetch pending_sends from parent checkpoint
-            pending_sends = self._load_pending_sends(
-                thread_id=thread_id,
-                checkpoint_ns=checkpoint_ns,
-            )
-
-            # Fetch and parse metadata
+            # Parse metadata
             raw_metadata = getattr(doc, "$.metadata", "{}")
             metadata_dict = (
                 json.loads(raw_metadata)
@@ -307,7 +352,7 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
                 else raw_metadata
             )
 
-            # Ensure metadata matches CheckpointMetadata type
+            # Sanitize metadata
             sanitized_metadata = {
                 k.replace("\u0000", ""): (
                     v.replace("\u0000", "") if isinstance(v, str) else v
@@ -316,10 +361,11 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
             }
             metadata = cast(CheckpointMetadata, sanitized_metadata)
 
+            # Load checkpoint with inline channel values
             checkpoint_param = self._load_checkpoint(
                 doc["$.checkpoint"],
-                channel_values,
-                pending_sends,
+                channel_values,  # Pass the extracted channel values
+                [],  # No pending_sends in shallow mode
             )
 
             config_param: RunnableConfig = {
@@ -330,6 +376,7 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
                 }
             }
 
+            # Load pending writes (still uses separate keys - already efficient)
             pending_writes = self._load_pending_writes(
                 thread_id, checkpoint_ns, checkpoint_param["id"]
             )
@@ -343,117 +390,71 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
             )
 
     def get_tuple(self, config: RunnableConfig) -> Optional[CheckpointTuple]:
-        """Get a checkpoint tuple from Redis.
-
-        Args:
-            config (RunnableConfig): The config to use for retrieving the checkpoint.
-
-        Returns:
-            Optional[CheckpointTuple]: The retrieved checkpoint tuple, or None if no matching checkpoint was found.
-        """
+        """Get checkpoint with inline channel values."""
         thread_id = config["configurable"]["thread_id"]
         checkpoint_ns = config["configurable"].get("checkpoint_ns", "")
 
-        checkpoint_filter_expression = (Tag("thread_id") == thread_id) & (
-            Tag("checkpoint_ns") == checkpoint_ns
+        # Single key access gets everything inline
+        checkpoint_key = self._make_shallow_redis_checkpoint_key_cached(
+            thread_id, checkpoint_ns
         )
 
-        # Construct the query
-        checkpoints_query = FilterQuery(
-            filter_expression=checkpoint_filter_expression,
-            return_fields=[
-                "thread_id",
-                "checkpoint_ns",
-                "parent_checkpoint_id",
-                "$.checkpoint",
-                "$.metadata",
-            ],
-            num_results=1,
-        )
-
-        # Execute the query
-        results = self.checkpoints_index.search(checkpoints_query)
-        if not results.docs:
+        checkpoint_data = self._redis.json().get(checkpoint_key)
+        if not checkpoint_data or not isinstance(checkpoint_data, dict):
             return None
 
-        doc = results.docs[0]
-
-        # If refresh_on_read is enabled, refresh TTL for checkpoint key and related keys
+        # TTL refresh if enabled - always refresh for shallow implementation
+        # Since there's only one checkpoint, the overhead is minimal
         if self.ttl_config and self.ttl_config.get("refresh_on_read"):
-            thread_id = getattr(doc, "thread_id", "")
-            checkpoint_ns = getattr(doc, "checkpoint_ns", "")
+            default_ttl_minutes = self.ttl_config.get("default_ttl", 60)
+            ttl_seconds = int(default_ttl_minutes * 60)
+            self._redis.expire(checkpoint_key, ttl_seconds)
 
-            # Get the checkpoint key
-            checkpoint_key = ShallowRedisSaver._make_shallow_redis_checkpoint_key(
-                thread_id, checkpoint_ns
-            )
+        # Parse the checkpoint data
+        checkpoint = checkpoint_data.get("checkpoint", {})
+        if isinstance(checkpoint, str):
+            checkpoint = json.loads(checkpoint)
 
-            # Get all blob keys related to this checkpoint
-            blob_key_pattern = (
-                ShallowRedisSaver._make_shallow_redis_checkpoint_blob_key_pattern(
-                    thread_id, checkpoint_ns
-                )
-            )
-            # Use safely_decode to handle both string and bytes responses
-            blob_keys = [
-                safely_decode(key) for key in self._redis.keys(blob_key_pattern)
-            ]
+        # Extract channel values from the checkpoint (they're stored inline)
+        channel_values: Dict[str, Any] = checkpoint.get("channel_values", {})
+        # Deserialize them since they're stored in serialized form
+        channel_values = self._deserialize_channel_values(channel_values)
 
-            # Apply TTL
-            self._apply_ttl_to_keys(checkpoint_key, blob_keys)
+        # Parse metadata
+        metadata = checkpoint_data.get("metadata", {})
+        if isinstance(metadata, str):
+            metadata = json.loads(metadata)
 
-        checkpoint = json.loads(doc["$.checkpoint"])
-
-        # Fetch channel_values
-        channel_values = self.get_channel_values(
-            thread_id=doc["thread_id"],
-            checkpoint_ns=doc["checkpoint_ns"],
-            checkpoint_id=checkpoint["id"],
-        )
-
-        # Fetch pending_sends from parent checkpoint
-        pending_sends = self._load_pending_sends(
-            thread_id=thread_id,
-            checkpoint_ns=checkpoint_ns,
-        )
-
-        # Fetch and parse metadata
-        raw_metadata = getattr(doc, "$.metadata", "{}")
-        metadata_dict = (
-            json.loads(raw_metadata) if isinstance(raw_metadata, str) else raw_metadata
-        )
-
-        # Ensure metadata matches CheckpointMetadata type
+        # Sanitize metadata
         sanitized_metadata = {
             k.replace("\u0000", ""): (
                 v.replace("\u0000", "") if isinstance(v, str) else v
             )
-            for k, v in metadata_dict.items()
-        }
-        metadata = cast(CheckpointMetadata, sanitized_metadata)
-
-        config_param: RunnableConfig = {
-            "configurable": {
-                "thread_id": thread_id,
-                "checkpoint_ns": checkpoint_ns,
-                "checkpoint_id": checkpoint["id"],
-            }
+            for k, v in metadata.items()
         }
 
+        # Load checkpoint with inline channel values
         checkpoint_param = self._load_checkpoint(
-            doc["$.checkpoint"],
-            channel_values,
-            pending_sends,
+            json.dumps(checkpoint),
+            channel_values,  # Pass the raw channel values - no deserialization needed
+            [],  # No pending_sends in shallow mode
         )
 
+        # Load pending writes (still uses separate keys - already efficient)
         pending_writes = self._load_pending_writes(
             thread_id, checkpoint_ns, checkpoint_param["id"]
         )
 
         return CheckpointTuple(
-            config=config_param,
+            config={
+                "configurable": {
+                    "thread_id": thread_id,
+                    "checkpoint_ns": checkpoint_ns,
+                    "checkpoint_id": checkpoint["id"],
+                }
+            },
             checkpoint=checkpoint_param,
-            metadata=metadata,
+            metadata=cast(CheckpointMetadata, sanitized_metadata),
             parent_config=None,
             pending_writes=pending_writes,
         )
@@ -477,12 +478,20 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         self.checkpoints_index = SearchIndex.from_dict(
             self.SCHEMAS[0], redis_client=self._redis
         )
+        # Shallow implementation doesn't use blobs, but base class requires the attribute
         self.checkpoint_blobs_index = SearchIndex.from_dict(
             self.SCHEMAS[1], redis_client=self._redis
         )
         self.checkpoint_writes_index = SearchIndex.from_dict(
             self.SCHEMAS[2], redis_client=self._redis
         )
+
+    def setup(self) -> None:
+        """Initialize the indices in Redis (skip blob index for shallow implementation)."""
+        # Create only the indexes we actually use
+        self.checkpoints_index.create(overwrite=False)
+        # Skip creating blob index since shallow doesn't use separate blobs
+        self.checkpoint_writes_index.create(overwrite=False)
 
     def put_writes(
         self,
@@ -491,7 +500,7 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         task_id: str,
         task_path: str = "",
     ) -> None:
-        """Store intermediate writes linked to a checkpoint and clean up old writes.
+        """Store intermediate writes linked to a checkpoint with checkpoint-level registry.
 
         Args:
             config: Configuration of the related checkpoint.
@@ -509,7 +518,7 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
             type_, blob = self.serde.dumps_typed(value)
             write_obj = {
                 "thread_id": thread_id,
-                "checkpoint_ns": checkpoint_ns,
+                "checkpoint_ns": to_storage_safe_str(checkpoint_ns),
                 "checkpoint_id": checkpoint_id,
                 "task_id": task_id,
                 "task_path": task_path,
@@ -520,144 +529,114 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
             }
             writes_objects.append(write_obj)
 
-        # First clean up old writes for this thread and namespace if they're for a different checkpoint_id
-        cleanup_pipeline = self._redis.json().pipeline(transaction=False)
-
-        # Get all writes keys for this thread/namespace
-        writes_key_pattern = (
-            ShallowRedisSaver._make_shallow_redis_checkpoint_writes_key_pattern(
-                thread_id, checkpoint_ns
-            )
+        # THREAD-LEVEL REGISTRY: Only keep writes for the current checkpoint
+        thread_write_registry_key = (
+            f"write_registry:{thread_id}:{checkpoint_ns}:shallow"
         )
-        existing_writes_keys = self._redis.keys(writes_key_pattern)
 
-        # Process each existing writes key to determine if it should be kept or deleted
-        if existing_writes_keys:
-            for write_key in existing_writes_keys:
-                # Use safely_decode to handle both string and bytes responses
-                decoded_key = safely_decode(write_key)
-                key_parts = decoded_key.split(REDIS_KEY_SEPARATOR)
-                # The key format is checkpoint_write:thread_id:checkpoint_ns:checkpoint_id:task_id:idx
-                if len(key_parts) >= 5:
-                    key_checkpoint_id = key_parts[3]
+        # Collect all write keys
+        write_keys = []
+        for write_obj in writes_objects:
+            key = self._make_redis_checkpoint_writes_key_cached(
+                thread_id, checkpoint_ns, checkpoint_id, task_id, write_obj["idx"]
+            )
+            write_keys.append(key)
 
-                    # If the write is for a different checkpoint_id, delete it
-                    if key_checkpoint_id != checkpoint_id:
-                        cleanup_pipeline.delete(write_key)
+        # Create a unified pipeline for all operations
+        with self._redis.pipeline(transaction=False) as pipeline:
 
-            # Execute the cleanup
-            cleanup_pipeline.execute()
+            # Add all JSON write operations - always overwrite for simplicity
+            for idx, write_obj in enumerate(writes_objects):
+                key = write_keys[idx]
+                # Always set the complete object - simpler and faster than checking existence
+                pipeline.json().set(key, "$", write_obj)
 
-        # For each write, check existence and then perform appropriate operation
-        with self._redis.json().pipeline(transaction=False) as pipeline:
-            for write_obj in writes_objects:
-                key = self._make_redis_checkpoint_writes_key(
-                    thread_id, checkpoint_ns, checkpoint_id, task_id, write_obj["idx"]
-                )
+            # THREAD-LEVEL REGISTRY: Store write keys in thread-level sorted set
+            # These will be cleared when checkpoint changes
+            zadd_mapping = {key: idx for idx, key in enumerate(write_keys)}
+            pipeline.zadd(thread_write_registry_key, zadd_mapping)
 
-                # First check if key exists
-                key_exists = self._redis.exists(key) == 1
+            # Note: We don't update has_writes on the checkpoint anymore
+            # because put_writes can be called before the checkpoint exists
 
-                if all(w[0] in WRITES_IDX_MAP for w in writes):
-                    # UPSERT case - only update specific fields
-                    if key_exists:
-                        # Update only channel, type, and blob fields
-                        pipeline.set(key, "$.channel", write_obj["channel"])
-                        pipeline.set(key, "$.type", write_obj["type"])
-                        pipeline.set(key, "$.blob", write_obj["blob"])
-                    else:
-                        # For new records, set the complete object
-                        pipeline.set(key, "$", write_obj)
-                else:
-                    # INSERT case
-                    pipeline.set(key, "$", write_obj)
+            # Apply TTL to registry key if configured
+            if self.ttl_config and "default_ttl" in self.ttl_config:
+                ttl_seconds = int(self.ttl_config.get("default_ttl") * 60)
+                pipeline.expire(thread_write_registry_key, ttl_seconds)
+                # Also apply TTL to all write keys
+                for key in write_keys:
+                    pipeline.expire(key, ttl_seconds)
 
+            # Execute everything in one round trip
             pipeline.execute()
 
-    def _dump_blobs(
+    def _load_pending_writes(
+        self, thread_id: str, checkpoint_ns: str, checkpoint_id: str
+    ) -> List[PendingWrite]:
+        """Load pending writes efficiently using thread-level write registry."""
+        if checkpoint_id is None:
+            return []
+
+        # Use thread-level registry that only contains current checkpoint writes
+        # All writes belong to the current checkpoint
+        thread_write_registry_key = (
+            f"write_registry:{thread_id}:{checkpoint_ns}:shallow"
+        )
+
+        # Get all write keys from the thread's registry (already sorted by index)
+        write_keys = self._redis.zrange(thread_write_registry_key, 0, -1)
+
+        if not write_keys:
+            return []
+
+        # Batch fetch all writes using pipeline
+        with self._redis.pipeline(transaction=False) as pipeline:
+            for key in write_keys:
+                # Decode bytes to string if needed
+                key_str = key.decode() if isinstance(key, bytes) else key
+                pipeline.json().get(key_str)
+
+            results = pipeline.execute()
+
+        # Build the writes dictionary
+        writes_dict: Dict[Tuple[str, str], Dict[str, Any]] = {}
+
+        for write_data in results:
+            if write_data:
+                task_id = write_data.get("task_id", "")
+                idx = write_data.get("idx", 0)
+                writes_dict[(task_id, idx)] = write_data
+
+        # Use base class method to deserialize
+        return BaseRedisSaver._load_writes(self.serde, writes_dict)
+
+    def get_channel_values(
         self,
         thread_id: str,
         checkpoint_ns: str,
-        values: dict[str, Any],
-        versions: ChannelVersions,
-    ) -> List[Tuple[str, dict[str, Any]]]:
-        """Convert blob data for Redis storage.
-
-        In the shallow implementation, we use the version in the key to allow
-        storing multiple versions without conflicts and to facilitate cleanup.
-        """
-        if not versions:
-            return []
-
-        return [
-            (
-                # Use the base Redis checkpoint blob key to include version, enabling version tracking
-                BaseRedisSaver._make_redis_checkpoint_blob_key(
-                    thread_id, checkpoint_ns, k, str(ver)
-                ),
-                {
-                    "thread_id": thread_id,
-                    "checkpoint_ns": checkpoint_ns,
-                    "channel": k,
-                    "version": ver,  # Include version in the data as well
-                    "type": (
-                        self._get_type_and_blob(values[k])[0]
-                        if k in values
-                        else "empty"
-                    ),
-                    "blob": (
-                        self._get_type_and_blob(values[k])[1] if k in values else None
-                    ),
-                },
-            )
-            for k, ver in versions.items()
-        ]
-
-    def get_channel_values(
-        self, thread_id: str, checkpoint_ns: str, checkpoint_id: str
+        checkpoint_id: str,
+        channel_versions: Optional[Dict[str, Any]] = None,
     ) -> dict[str, Any]:
-        """Retrieve channel_values dictionary with properly constructed message objects."""
-        checkpoint_query = FilterQuery(
-            filter_expression=(Tag("thread_id") == thread_id)
-            & (Tag("checkpoint_ns") == checkpoint_ns)
-            & (Tag("checkpoint_id") == checkpoint_id),
-            return_fields=["$.checkpoint.channel_versions"],
-            num_results=1,
+        """Retrieve channel_values dictionary from inline checkpoint data."""
+        # For shallow checkpoints, channel values are stored inline in the checkpoint
+        checkpoint_key = self._make_shallow_redis_checkpoint_key_cached(
+            thread_id, checkpoint_ns
         )
 
-        checkpoint_result = self.checkpoints_index.search(checkpoint_query)
-        if not checkpoint_result.docs:
+        # Single JSON.GET operation to retrieve checkpoint with inline channel_values
+        checkpoint_data = self._redis.json().get(checkpoint_key, "$.checkpoint")
+
+        if not checkpoint_data:
             return {}
 
-        channel_versions = json.loads(
-            getattr(checkpoint_result.docs[0], "$.checkpoint.channel_versions", "{}")
+        # checkpoint_data[0] is already a deserialized dict
+        checkpoint = (
+            checkpoint_data[0] if isinstance(checkpoint_data, list) else checkpoint_data
         )
-        if not channel_versions:
-            return {}
+        channel_values = checkpoint.get("channel_values", {})
 
-        channel_values = {}
-        for channel, version in channel_versions.items():
-            blob_query = FilterQuery(
-                filter_expression=(Tag("thread_id") == thread_id)
-                & (Tag("checkpoint_ns") == checkpoint_ns)
-                & (Tag("channel") == channel)
-                & (Tag("version") == str(version)),
-                return_fields=["type", "$.blob"],
-                num_results=1,
-            )
-
-            blob_results = self.checkpoint_blobs_index.search(blob_query)
-            if blob_results.docs:
-                blob_doc = blob_results.docs[0]
-                blob_type = blob_doc.type
-                blob_data = getattr(blob_doc, "$.blob", None)
-
-                if blob_data and blob_type != "empty":
-                    channel_values[channel] = self.serde.loads_typed(
-                        (blob_type, blob_data)
-                    )
-
-        return channel_values
+        # Deserialize channel values since they're stored in serialized form
+        return self._deserialize_channel_values(channel_values)
 
     def _load_pending_sends(
         self,
@@ -677,9 +656,9 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         # Query checkpoint_writes for parent checkpoint's TASKS channel
         parent_writes_query = FilterQuery(
             filter_expression=(Tag("thread_id") == thread_id)
-            & (Tag("checkpoint_ns") == checkpoint_ns)
+            & (Tag("checkpoint_ns") == to_storage_safe_str(checkpoint_ns))
             & (Tag("channel") == TASKS),
-            return_fields=["type", "blob", "task_path", "task_id", "idx"],
+            return_fields=["type", "$.blob", "task_path", "task_id", "idx"],
             num_results=100,
         )
         parent_writes_results = self.checkpoint_writes_index.search(parent_writes_query)
@@ -695,20 +674,79 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         )
 
         # Extract type and blob pairs
-        return [(doc.type, doc.blob) for doc in sorted_writes]
+        # Handle both direct attribute access and JSON path access
+        return [
+            (
+                getattr(doc, "type", ""),
+                getattr(doc, "$.blob", getattr(doc, "blob", b"")),
+            )
+            for doc in sorted_writes
+        ]
+
+    def _make_shallow_redis_checkpoint_key_cached(
+        self, thread_id: str, checkpoint_ns: str
+    ) -> str:
+        """Create a cached key for shallow checkpoints using only thread_id and checkpoint_ns."""
+        cache_key = f"shallow_checkpoint:{thread_id}:{checkpoint_ns}"
+        if cache_key in self._key_cache:
+            # Move to end for LRU (most recently used)
+            self._key_cache.move_to_end(cache_key)
+        else:
+            # Add new entry, evicting oldest if necessary
+            if len(self._key_cache) >= self._key_cache_max_size:
+                # Remove least recently used (first item)
+                self._key_cache.popitem(last=False)
+            self._key_cache[cache_key] = self._separator.join(
+                [self._checkpoint_prefix, thread_id, checkpoint_ns]
+            )
+        return self._key_cache[cache_key]
 
     @staticmethod
     def _make_shallow_redis_checkpoint_key(thread_id: str, checkpoint_ns: str) -> str:
         """Create a key for shallow checkpoints using only thread_id and checkpoint_ns."""
         return REDIS_KEY_SEPARATOR.join([CHECKPOINT_PREFIX, thread_id, checkpoint_ns])
 
-    @staticmethod
-    def _make_shallow_redis_checkpoint_blob_key(
-        thread_id: str, checkpoint_ns: str, channel: str
+    def _make_redis_checkpoint_writes_key_cached(
+        self,
+        thread_id: str,
+        checkpoint_ns: str,
+        checkpoint_id: str,
+        task_id: str,
+        idx: Optional[int],
     ) -> str:
-        """Create a key for a blob in a shallow checkpoint."""
-        return REDIS_KEY_SEPARATOR.join(
-            [CHECKPOINT_BLOB_PREFIX, thread_id, checkpoint_ns, channel]
+        """Create a cached key for checkpoint writes."""
+        cache_key = (
+            f"writes:{thread_id}:{checkpoint_ns}:{checkpoint_id}:{task_id}:{idx}"
+        )
+        if cache_key in self._key_cache:
+            # Move to end for LRU (most recently used)
+            self._key_cache.move_to_end(cache_key)
+        else:
+            # Add new entry, evicting oldest if necessary
+            if len(self._key_cache) >= self._key_cache_max_size:
+                # Remove least recently used (first item)
+                self._key_cache.popitem(last=False)
+            self._key_cache[cache_key] = (
+                BaseRedisSaver._make_redis_checkpoint_writes_key(
+                    thread_id, checkpoint_ns, checkpoint_id, task_id, idx
+                )
+            )
+        return self._key_cache[cache_key]
+
+    @staticmethod
+    def _make_shallow_redis_checkpoint_writes_key_pattern(
+        thread_id: str, checkpoint_ns: str
+    ) -> str:
+        """Create a pattern to match all writes keys for a thread and namespace."""
+        return (
+            REDIS_KEY_SEPARATOR.join(
+                [
+                    CHECKPOINT_WRITE_PREFIX,
+                    str(to_storage_safe_id(thread_id)),
+                    to_storage_safe_str(checkpoint_ns),
+                ]
+            )
+            + ":*"
         )
 
     @staticmethod
@@ -727,18 +765,84 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
             + ":*"
         )
 
-    @staticmethod
-    def _make_shallow_redis_checkpoint_writes_key_pattern(
-        thread_id: str, checkpoint_ns: str
+    def _make_shallow_redis_checkpoint_blob_key_cached(
+        self, thread_id: str, checkpoint_ns: str, channel: str, version: str
     ) -> str:
-        """Create a pattern to match all writes keys for a thread and namespace."""
-        return (
-            REDIS_KEY_SEPARATOR.join(
-                [
-                    CHECKPOINT_WRITE_PREFIX,
-                    str(to_storage_safe_id(thread_id)),
-                    to_storage_safe_str(checkpoint_ns),
-                ]
+        """Create a cached key for checkpoint blobs."""
+        cache_key = f"shallow_blob:{thread_id}:{checkpoint_ns}:{channel}:{version}"
+        if cache_key in self._key_cache:
+            # Move to end for LRU (most recently used)
+            self._key_cache.move_to_end(cache_key)
+        else:
+            # Add new entry, evicting oldest if necessary
+            if len(self._key_cache) >= self._key_cache_max_size:
+                # Remove least recently used (first item)
+                self._key_cache.popitem(last=False)
+            self._key_cache[cache_key] = BaseRedisSaver._make_redis_checkpoint_blob_key(
+                thread_id, checkpoint_ns, channel, version
             )
-            + ":*"
+        return self._key_cache[cache_key]
+
+    def delete_thread(self, thread_id: str) -> None:
+        """Delete all checkpoints and writes associated with a specific thread ID.
+
+        Args:
+            thread_id: The thread ID whose checkpoints should be deleted.
+        """
+        # Only one checkpoint per thread/namespace combination
+        # Find all namespaces for this thread and delete them
+        storage_safe_thread_id = to_storage_safe_id(thread_id)
+
+        # Find all checkpoints for this thread to get checkpoint IDs
+        checkpoint_query = FilterQuery(
+            filter_expression=Tag("thread_id") == storage_safe_thread_id,
+            return_fields=["checkpoint_ns", "checkpoint_id"],
+            num_results=10000,
         )
+
+        checkpoint_results = self.checkpoints_index.search(checkpoint_query)
+
+        # Collect namespaces and checkpoint IDs
+        checkpoint_data = []
+        for doc in checkpoint_results.docs:
+            checkpoint_ns = getattr(doc, "checkpoint_ns", "")
+            checkpoint_id = getattr(doc, "checkpoint_id", "")
+            checkpoint_data.append((checkpoint_ns, checkpoint_id))
+
+        # Delete all checkpoints and related data
+        if checkpoint_data:
+            with self._redis.pipeline(transaction=False) as pipeline:
+                for checkpoint_ns, checkpoint_id in checkpoint_data:
+                    # Delete the main checkpoint key
+                    checkpoint_key = self._make_shallow_redis_checkpoint_key_cached(
+                        thread_id, checkpoint_ns
+                    )
+                    pipeline.delete(checkpoint_key)
+
+                    # Delete thread-level write registry and its writes
+                    # Each namespace has its own thread-level registry
+                    thread_write_registry_key = (
+                        f"write_registry:{thread_id}:{checkpoint_ns}:shallow"
+                    )
+
+                    # Get all write keys from the thread registry before deleting
+                    write_keys = self._redis.zrange(thread_write_registry_key, 0, -1)
+                    for write_key in write_keys:
+                        write_key_str = (
+                            write_key.decode()
+                            if isinstance(write_key, bytes)
+                            else write_key
+                        )
+                        pipeline.delete(write_key_str)
+
+                    # Delete the registry itself
+                    pipeline.delete(thread_write_registry_key)
+
+                    # Delete the current checkpoint tracker
+                    current_checkpoint_key = (
+                        f"current_checkpoint:{thread_id}:{checkpoint_ns}:shallow"
+                    )
+                    pipeline.delete(current_checkpoint_key)
+
+                # Execute all deletions
+                pipeline.execute()

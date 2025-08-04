@@ -6,7 +6,7 @@ import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from types import TracebackType
-from typing import Any, AsyncIterator, Iterable, Optional, Sequence, Union, cast
+from typing import Any, AsyncIterator, Iterable, Optional, Sequence, cast
 
 from langgraph.store.base import (
     GetOp,
@@ -22,7 +22,6 @@ from langgraph.store.base import (
     tokenize_path,
 )
 from langgraph.store.base.batch import AsyncBatchedBaseStore
-from redis import ResponseError
 from redis.asyncio import Redis as AsyncRedis
 from redis.commands.search.query import Query
 from redisvl.index import AsyncSearchIndex
@@ -267,7 +266,7 @@ class AsyncRedisStore(
 
     # This can't be properly typed due to covariance issues with async methods
     async def start_ttl_sweeper(  # type: ignore[override]
-        self, sweep_interval_minutes: Optional[int] = None
+        self, _sweep_interval_minutes: Optional[int] = None
     ) -> None:
         """Start TTL sweeper.
 
@@ -275,19 +274,19 @@ class AsyncRedisStore(
         Redis automatically removes expired keys.
 
         Args:
-            sweep_interval_minutes: Ignored parameter, kept for API compatibility
+            _sweep_interval_minutes: Ignored parameter, kept for API compatibility
         """
         # No-op: Redis handles TTL expiration automatically
         pass
 
     # This can't be properly typed due to covariance issues with async methods
-    async def stop_ttl_sweeper(self, timeout: Optional[float] = None) -> bool:  # type: ignore[override]
+    async def stop_ttl_sweeper(self, _timeout: Optional[float] = None) -> bool:  # type: ignore[override]
         """Stop TTL sweeper.
 
         This is a no-op with Redis native TTL, but kept for API compatibility.
 
         Args:
-            timeout: Ignored parameter, kept for API compatibility
+            _timeout: Ignored parameter, kept for API compatibility
 
         Returns:
             bool: Always True as there's no sweeper to stop
@@ -330,9 +329,9 @@ class AsyncRedisStore(
 
     async def __aexit__(
         self,
-        exc_type: Optional[type[BaseException]] = None,
-        exc_value: Optional[BaseException] = None,
-        traceback: Optional[TracebackType] = None,
+        _exc_type: Optional[type[BaseException]] = None,
+        _exc_value: Optional[BaseException] = None,
+        _traceback: Optional[TracebackType] = None,
     ) -> None:
         """Async context manager exit."""
         # Cancel the background task created by AsyncBatchedBaseStore

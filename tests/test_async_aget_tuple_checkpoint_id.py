@@ -1,6 +1,5 @@
 """Test for AsyncRedisSaver aget_tuple checkpoint_id issue (GitHub issue #64)."""
 
-import asyncio
 import uuid
 from typing import AsyncGenerator
 
@@ -34,21 +33,23 @@ async def test_aget_tuple_returns_correct_checkpoint_id(saver: AsyncRedisSaver):
         "configurable": {"thread_id": thread_id, "checkpoint_ns": ""}
     }
 
-    # Put several checkpoints
-    checkpoint_ids = []
+    # Put several checkpoints and track their actual IDs
+    saved_checkpoint_ids = []
     for run in range(3):
-        checkpoint_id = str(run)
-        checkpoint_ids.append(checkpoint_id)
+        # Create a checkpoint - it will have its own ID
+        checkpoint = empty_checkpoint()
+        actual_checkpoint_id = checkpoint["id"]
+        saved_checkpoint_ids.append(actual_checkpoint_id)
 
+        # Save checkpoint - no parent reference
         await saver.aput(
             {
                 "configurable": {
                     "thread_id": thread_id,
-                    "checkpoint_id": checkpoint_id,
                     "checkpoint_ns": "",
                 }
             },
-            empty_checkpoint(),
+            checkpoint,
             {
                 "source": "loop",
                 "step": run,
@@ -61,7 +62,7 @@ async def test_aget_tuple_returns_correct_checkpoint_id(saver: AsyncRedisSaver):
         # This should return the latest checkpoint
         get_tuple = await saver.aget_tuple(runnable_config)
 
-        # Verify the checkpoint_id is not None and matches the expected value
+        # Verify the checkpoint_id is not None
         assert (
             get_tuple is not None
         ), f"Expected checkpoint tuple, got None for run {run}"
@@ -72,10 +73,10 @@ async def test_aget_tuple_returns_correct_checkpoint_id(saver: AsyncRedisSaver):
             f"This indicates the bug where aget_tuple returns None for checkpoint_id."
         )
 
-        # Since we're getting the latest checkpoint each time, it should be the current checkpoint_id
+        # Since we're getting the latest checkpoint each time, it should be the current checkpoint's actual ID
         assert (
-            returned_checkpoint_id == checkpoint_id
-        ), f"Expected checkpoint_id {checkpoint_id}, got {returned_checkpoint_id} for run {run}"
+            returned_checkpoint_id == actual_checkpoint_id
+        ), f"Expected checkpoint_id {actual_checkpoint_id}, got {returned_checkpoint_id} for run {run}"
 
 
 @pytest.mark.asyncio
@@ -84,21 +85,23 @@ async def test_aget_tuple_with_explicit_checkpoint_id(saver: AsyncRedisSaver):
     # Create a unique thread ID
     thread_id = str(uuid.uuid4())
 
-    # Put several checkpoints
-    checkpoint_ids = []
+    # Put several checkpoints and track their actual IDs
+    saved_checkpoint_ids = []
     for run in range(3):
-        checkpoint_id = str(run)
-        checkpoint_ids.append(checkpoint_id)
+        # Create a checkpoint - it will have its own ID
+        checkpoint = empty_checkpoint()
+        actual_checkpoint_id = checkpoint["id"]
+        saved_checkpoint_ids.append(actual_checkpoint_id)
 
+        # Save checkpoint
         await saver.aput(
             {
                 "configurable": {
                     "thread_id": thread_id,
-                    "checkpoint_id": checkpoint_id,
                     "checkpoint_ns": "",
                 }
             },
-            empty_checkpoint(),
+            checkpoint,
             {
                 "source": "loop",
                 "step": run,
@@ -107,8 +110,8 @@ async def test_aget_tuple_with_explicit_checkpoint_id(saver: AsyncRedisSaver):
             {},
         )
 
-    # Test retrieving each checkpoint by explicit checkpoint_id
-    for checkpoint_id in checkpoint_ids:
+    # Test retrieving each checkpoint by its actual checkpoint_id
+    for checkpoint_id in saved_checkpoint_ids:
         config_with_id: RunnableConfig = {
             "configurable": {
                 "thread_id": thread_id,

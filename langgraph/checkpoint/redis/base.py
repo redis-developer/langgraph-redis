@@ -1,15 +1,14 @@
 import base64
 import binascii
-import json
 import random
 from abc import abstractmethod
-from typing import Any, Dict, Generic, List, Optional, Sequence, Tuple, cast
+from typing import Any, Dict, Generic, List, Optional, Sequence, Tuple, Union, cast
 
+import orjson
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import (
     WRITES_IDX_MAP,
     BaseCheckpointSaver,
-    ChannelVersions,
     Checkpoint,
     CheckpointMetadata,
     PendingWrite,
@@ -33,7 +32,6 @@ CHECKPOINT_PREFIX = "checkpoint"
 CHECKPOINT_BLOB_PREFIX = "checkpoint_blob"
 CHECKPOINT_WRITE_PREFIX = "checkpoint_write"
 
-
 SCHEMAS = [
     {
         "index": {
@@ -46,8 +44,10 @@ SCHEMAS = [
             {"name": "checkpoint_ns", "type": "tag"},
             {"name": "checkpoint_id", "type": "tag"},
             {"name": "parent_checkpoint_id", "type": "tag"},
+            {"name": "checkpoint_ts", "type": "numeric"},
             {"name": "source", "type": "tag"},
             {"name": "step", "type": "numeric"},
+            {"name": "has_writes", "type": "tag"},
         ],
     },
     {
@@ -59,6 +59,7 @@ SCHEMAS = [
         "fields": [
             {"name": "thread_id", "type": "tag"},
             {"name": "checkpoint_ns", "type": "tag"},
+            {"name": "checkpoint_id", "type": "tag"},
             {"name": "channel", "type": "tag"},
             {"name": "version", "type": "tag"},
             {"name": "type", "type": "tag"},
@@ -91,6 +92,7 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
 
     _redis: RedisClientType
     _owns_its_client: bool = False
+    _key_registry: Optional[Any] = None
     SCHEMAS = SCHEMAS
 
     checkpoints_index: IndexType
@@ -170,7 +172,7 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         """Set client info for Redis monitoring asynchronously."""
         from redis.exceptions import ResponseError
 
-        from langgraph.checkpoint.redis.version import __lib_name__, __redisvl_version__
+        from langgraph.checkpoint.redis.version import __redisvl_version__
 
         # Create the client info string with only the redisvl version
         client_info = f"redis-py(redisvl_v{__redisvl_version__})"
@@ -198,22 +200,25 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
 
     def _load_checkpoint(
         self,
-        checkpoint: Dict[str, Any],
+        checkpoint: Union[Dict[str, Any], str],
         channel_values: Dict[str, Any],
         pending_sends: List[Any],
     ) -> Checkpoint:
         if not checkpoint:
             return {}
 
-        loaded = json.loads(checkpoint)  # type: ignore[arg-type]
-
-        # Note: TTL refresh is now handled in get_tuple() to ensure it works
-        # with all Redis operations, not just internal deserialization
+        # OPTIMIZED: Handle both dict and string inputs efficiently
+        loaded = (
+            checkpoint
+            if isinstance(checkpoint, dict)
+            else cast(dict, orjson.loads(checkpoint))
+        )
 
         return {
             **loaded,
             "pending_sends": [
-                self.serde.loads_typed((c.decode(), b)) for c, b in pending_sends or []
+                self.serde.loads_typed((safely_decode(c), b))
+                for c, b in pending_sends or []
             ],
             "channel_values": channel_values,
         }
@@ -272,8 +277,14 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         """Convert checkpoint to Redis format."""
         type_, data = self.serde.dumps_typed(checkpoint)
 
-        # Decode bytes to avoid double serialization
-        checkpoint_data = json.loads(data)
+        # Since we're keeping JSON format, decode string data
+        checkpoint_data = cast(dict, orjson.loads(data))
+
+        # Ensure channel_versions are always strings to fix issue #40
+        if "channel_versions" in checkpoint_data:
+            checkpoint_data["channel_versions"] = {
+                k: str(v) for k, v in checkpoint_data["channel_versions"].items()
+            }
 
         return {"type": type_, **checkpoint_data, "pending_sends": []}
 
@@ -287,53 +298,41 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
             if v["type"] != "empty"
         }
 
-    def _get_type_and_blob(self, value: Any) -> Tuple[str, Optional[bytes]]:
-        """Helper to get type and blob from a value."""
-        t, b = self.serde.dumps_typed(value)
-        return t, b
+    def _deserialize_channel_values(
+        self, channel_values: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Deserialize channel values that were stored inline.
 
-    def _dump_blobs(
-        self,
-        thread_id: str,
-        checkpoint_ns: str,
-        values: Dict[str, Any],
-        versions: ChannelVersions,
-    ) -> List[Tuple[str, Dict[str, Any]]]:
-        """Convert blob data for Redis storage."""
-        if not versions:
-            return []
+        When channel values are stored inline in the checkpoint, they're in their
+        serialized form. This method deserializes them back to their original types.
+        """
+        if not channel_values:
+            return {}
 
-        storage_safe_thread_id = to_storage_safe_id(thread_id)
-        storage_safe_checkpoint_ns = to_storage_safe_str(checkpoint_ns)
+        # Apply recursive deserialization to handle nested structures and LangChain objects
+        return self._recursive_deserialize(channel_values)
 
-        # Ensure all versions are converted to strings to avoid TypeError with Tag filters
-        str_versions = {k: str(v) for k, v in versions.items()}
-
-        return [
-            (
-                BaseRedisSaver._make_redis_checkpoint_blob_key(
-                    storage_safe_thread_id,
-                    storage_safe_checkpoint_ns,
-                    k,
-                    str_versions[k],  # Use the string version
-                ),
-                {
-                    "thread_id": storage_safe_thread_id,
-                    "checkpoint_ns": storage_safe_checkpoint_ns,
-                    "channel": k,
-                    "version": str_versions[k],  # Use the string version
-                    "type": (
-                        self._get_type_and_blob(values[k])[0]
-                        if k in values
-                        else "empty"
-                    ),
-                    "blob": (
-                        self._get_type_and_blob(values[k])[1] if k in values else None
-                    ),
-                },
-            )
-            for k in str_versions.keys()
-        ]
+    def _recursive_deserialize(self, obj: Any) -> Any:
+        """Recursively deserialize LangChain objects and nested structures."""
+        if isinstance(obj, dict):
+            # Check if this is a LangChain serialized object
+            if obj.get("lc") in (1, 2) and obj.get("type") == "constructor":
+                # Use the serde's reviver to reconstruct the object
+                if hasattr(self.serde, "_reviver"):
+                    return self.serde._reviver(obj)
+                elif hasattr(self.serde, "_revive_if_needed"):
+                    return self.serde._revive_if_needed(obj)
+                else:
+                    # Fallback: return as-is if serde doesn't have reviver
+                    return obj
+            # Recursively process nested dicts
+            return {k: self._recursive_deserialize(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            # Recursively process lists
+            return [self._recursive_deserialize(item) for item in obj]
+        else:
+            # Return primitives as-is
+            return obj
 
     def _dump_writes(
         self,
@@ -459,7 +458,7 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
             type_, blob = self.serde.dumps_typed(value)
             write_obj = {
                 "thread_id": to_storage_safe_id(thread_id),
-                "checkpoint_ns": checkpoint_ns,  # Don't use sentinel for tag fields in RediSearch
+                "checkpoint_ns": to_storage_safe_str(checkpoint_ns),
                 "checkpoint_id": to_storage_safe_id(checkpoint_id),
                 "task_id": task_id,
                 "task_path": task_path,
@@ -476,12 +475,14 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
             created_keys = []
 
             for write_obj in writes_objects:
+                idx_value = write_obj["idx"]
+                assert isinstance(idx_value, int)
                 key = self._make_redis_checkpoint_writes_key(
                     thread_id,
                     checkpoint_ns,
                     checkpoint_id,
                     task_id,
-                    write_obj["idx"],
+                    idx_value,
                 )
 
                 # First check if key exists
@@ -512,18 +513,98 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
                     created_keys[0], created_keys[1:] if len(created_keys) > 1 else None
                 )
 
+            # Update checkpoint to indicate it has writes
+            if writes_objects:
+                checkpoint_key = self._make_redis_checkpoint_key(
+                    to_storage_safe_id(thread_id),
+                    to_storage_safe_str(checkpoint_ns),
+                    to_storage_safe_id(checkpoint_id),
+                )
+                # Check if the checkpoint exists before updating
+                if self._redis.exists(checkpoint_key):
+                    # JSON.SET can add new fields at non-root paths for existing documents
+                    # Use JSONPath $ to update at root level
+                    self._redis.json().set(checkpoint_key, "$.has_writes", True)
+
     def _load_pending_writes(
         self, thread_id: str, checkpoint_ns: str, checkpoint_id: str
     ) -> List[PendingWrite]:
         if checkpoint_id is None:
             return []  # Early return if no checkpoint_id
 
+        # Most checkpoints don't have writes, return empty list quickly
+        # Quick check: see if write registry exists and has any keys
+        write_registry_key = self._key_registry.make_write_keys_zset_key(
+            thread_id, checkpoint_ns, checkpoint_id
+        )
+        registry_exists = self._redis.exists(write_registry_key)
+
+        if not registry_exists:
+            # No writes registry means no writes
+            return []
+
         # Use search index instead of keys() to avoid CrossSlot errors
-        # Note: For checkpoint_ns, we use the raw value for tag searches
-        # because RediSearch may not handle sentinel values correctly in tag fields
+        # Note: All tag fields use sentinel values for consistency
         writes_query = FilterQuery(
             filter_expression=(Tag("thread_id") == to_storage_safe_id(thread_id))
-            & (Tag("checkpoint_ns") == checkpoint_ns)
+            & (Tag("checkpoint_ns") == to_storage_safe_str(checkpoint_ns))
+            & (Tag("checkpoint_id") == to_storage_safe_id(checkpoint_id)),
+            return_fields=["task_id", "idx", "channel", "type", "$.blob"],
+            num_results=1000,  # Adjust as needed
+        )
+
+        writes_results = self.checkpoint_writes_index.search(writes_query)
+
+        # Sort results by idx to maintain order
+        sorted_writes = sorted(writes_results.docs, key=lambda x: getattr(x, "idx", 0))
+
+        # Build the writes dictionary
+        writes_dict: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        for doc in sorted_writes:
+            task_id = str(getattr(doc, "task_id", ""))
+            idx = str(getattr(doc, "idx", 0))
+            blob_data = getattr(doc, "$.blob", "")
+            # Ensure blob is bytes for deserialization
+            if isinstance(blob_data, str):
+                blob_data = blob_data.encode("utf-8")
+            writes_dict[(task_id, idx)] = {
+                "task_id": task_id,
+                "idx": idx,
+                "channel": str(getattr(doc, "channel", "")),
+                "type": str(getattr(doc, "type", "")),
+                "blob": blob_data,
+            }
+
+        pending_writes = BaseRedisSaver._load_writes(self.serde, writes_dict)
+        return pending_writes
+
+    def _load_pending_writes_with_registry_check(
+        self,
+        thread_id: str,
+        checkpoint_ns: str,
+        checkpoint_id: str,
+        checkpoint_has_writes: bool,
+        registry_has_writes: bool,
+    ) -> List[PendingWrite]:
+        """Load pending writes with pre-computed registry check to avoid duplicate Redis calls."""
+        if checkpoint_id is None:
+            return []  # Early return if no checkpoint_id
+
+        # Pre-computed registry check instead of making another Redis call
+        if not registry_has_writes:
+            # No writes in registry means no writes to load
+            return []
+
+        # Also check checkpoint-level has_writes flag for additional optimization
+        if not checkpoint_has_writes:
+            return []
+
+        # Fallback to original FT.SEARCH logic since registry indicates writes exist
+        # Use search index instead of keys() to avoid CrossSlot errors
+        # Note: All tag fields use sentinel values for consistency
+        writes_query = FilterQuery(
+            filter_expression=(Tag("thread_id") == to_storage_safe_id(thread_id))
+            & (Tag("checkpoint_ns") == to_storage_safe_str(checkpoint_ns))
             & (Tag("checkpoint_id") == to_storage_safe_id(checkpoint_id)),
             return_fields=["task_id", "idx", "channel", "type", "$.blob"],
             num_results=1000,  # Adjust as needed

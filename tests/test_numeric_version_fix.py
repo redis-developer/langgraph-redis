@@ -1,8 +1,6 @@
 """
-Test for the fix to issue #40 - Fixing numeric version handling with Tag type.
+Test for the fix to issue #40 - Fixing numeric version handling with inline storage.
 """
-
-from contextlib import contextmanager
 
 import pytest
 from langgraph.checkpoint.base import empty_checkpoint
@@ -21,51 +19,15 @@ async def clear_test_redis(redis_url: str) -> None:
         client.close()
 
 
-@contextmanager
-def patched_redis_saver(redis_url):
-    """
-    Create a RedisSaver with a patched _dump_blobs method to fix the issue.
-    This demonstrates the fix approach.
-    """
-    original_dump_blobs = RedisSaver._dump_blobs
-
-    def patched_dump_blobs(self, thread_id, checkpoint_ns, values, versions):
-        """
-        Patched version of _dump_blobs that ensures version is a string.
-        """
-        # Convert version to string in versions dictionary
-        string_versions = {k: str(v) for k, v in versions.items()}
-
-        # Call the original method with string versions
-        return original_dump_blobs(
-            self, thread_id, checkpoint_ns, values, string_versions
-        )
-
-    # Apply the patch
-    RedisSaver._dump_blobs = patched_dump_blobs
-
-    try:
-        # Create the saver with patched method
-        saver = RedisSaver(redis_url)
-        saver.setup()
-        yield saver
-    finally:
-        # Restore the original method
-        RedisSaver._dump_blobs = original_dump_blobs
-        # Clean up
-        if saver._owns_its_client:
-            saver._redis.close()
-
-
 def test_numeric_version_fix(redis_url: str) -> None:
     """
-    Test that demonstrates the fix for issue #40.
+    Test that numeric versions are handled correctly with inline storage.
 
-    This shows how to handle numeric versions correctly by ensuring
-    they are converted to strings before being used with Tag.
+    With inline storage, channel values are stored directly in the checkpoint
+    document, so numeric versions should be automatically converted to strings
+    during serialization.
     """
-    # Use our patched version that converts numeric versions to strings
-    with patched_redis_saver(redis_url) as saver:
+    with RedisSaver.from_conn_string(redis_url) as saver:
         # Set up a basic config
         config = {
             "configurable": {
@@ -74,30 +36,59 @@ def test_numeric_version_fix(redis_url: str) -> None:
             }
         }
 
-        # Create a basic checkpoint
+        # Create a basic checkpoint with channel values
         checkpoint = empty_checkpoint()
+        checkpoint["channel_values"] = {"test_channel": "test_value"}
+        checkpoint["channel_versions"] = {
+            "test_channel": 1
+        }  # Numeric version in checkpoint
 
-        # Store the checkpoint with our patched method
+        # Store the checkpoint with numeric version
         saved_config = saver.put(
-            config, checkpoint, {}, {"test_channel": 1}
-        )  # Numeric version
+            config,
+            checkpoint,
+            {},
+            {"test_channel": 1},  # Numeric version in new_versions
+        )
 
         # Get the checkpoint ID from the saved config
-        thread_id = saved_config["configurable"]["thread_id"]
-        checkpoint_ns = saved_config["configurable"].get("checkpoint_ns", "")
+        checkpoint_id = saved_config["configurable"]["checkpoint_id"]
 
-        # Now query the data - this should work with the fix
-        query = f"@channel:{{test_channel}}"
+        # Retrieve the checkpoint
+        loaded_checkpoint = saver.get_tuple(saved_config)
 
-        # This should not raise an error now with our patch
-        results = saver.checkpoint_blobs_index.search(query)
+        # Verify the checkpoint was stored and retrieved correctly
+        assert loaded_checkpoint is not None
+        assert (
+            loaded_checkpoint.checkpoint["channel_values"]["test_channel"]
+            == "test_value"
+        )
+        assert (
+            loaded_checkpoint.checkpoint["channel_versions"]["test_channel"] == "1"
+        )  # Should be string
 
-        # Verify we can find the data
-        assert len(results.docs) > 0
+        # Verify inline storage - get the raw checkpoint data
+        # Use the actual key format that the saver uses
+        checkpoint_key = saver._make_redis_checkpoint_key_cached(
+            config["configurable"]["thread_id"],
+            config["configurable"]["checkpoint_ns"],
+            checkpoint_id,
+        )
+        raw_data = saver._redis.json().get(checkpoint_key)
 
-        # Load one document and verify the version is a string
-        doc = results.docs[0]
-        data = saver._redis.json().get(doc.id)
+        assert raw_data is not None
+        # Channel values should be stored inline in the checkpoint
+        assert "checkpoint" in raw_data
+        checkpoint_data = raw_data["checkpoint"]
+        if isinstance(checkpoint_data, str):
+            import json
 
-        # The key test: version should be a string even though we passed a numeric value
-        assert isinstance(data["version"], str)
+            checkpoint_data = json.loads(checkpoint_data)
+
+        # Verify channel_values are inline
+        assert "channel_values" in checkpoint_data
+        assert checkpoint_data["channel_values"]["test_channel"] == "test_value"
+
+        # Verify no separate blob keys exist
+        all_keys = saver._redis.keys("checkpoint_blob:*")
+        assert len(all_keys) == 0, "No blob keys should exist with inline storage"

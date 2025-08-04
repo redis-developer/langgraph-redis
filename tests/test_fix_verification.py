@@ -6,8 +6,6 @@ This test specifically tests the key parsing fix that was causing issues in:
 3. subgraph-persistence.ipynb
 """
 
-import pytest
-
 from langgraph.checkpoint.redis.base import (
     CHECKPOINT_WRITE_PREFIX,
     REDIS_KEY_SEPARATOR,

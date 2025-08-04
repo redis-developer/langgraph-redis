@@ -2,15 +2,11 @@
 
 from __future__ import annotations
 
-import json
 import time
-from datetime import datetime, timezone
-from typing import Any, Iterator, Optional
-from unittest.mock import Mock
+from typing import Iterator
 from uuid import uuid4
 
 import pytest
-from langchain_core.embeddings import Embeddings
 from langgraph.store.base import (
     GetOp,
     Item,
@@ -19,7 +15,6 @@ from langgraph.store.base import (
     PutOp,
     SearchOp,
 )
-from redis import Redis
 from redis.exceptions import ResponseError
 
 from langgraph.store.redis import RedisStore

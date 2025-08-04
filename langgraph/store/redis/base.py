@@ -52,7 +52,6 @@ REDIS_KEY_SEPARATOR = ":"
 STORE_PREFIX = "store"
 STORE_VECTOR_PREFIX = "store_vectors"
 
-
 # Schemas for Redis Search indices
 SCHEMAS = [
     {
@@ -173,25 +172,25 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
         """
         return 0
 
-    def start_ttl_sweeper(self, sweep_interval_minutes: Optional[int] = None) -> None:
+    def start_ttl_sweeper(self, _sweep_interval_minutes: Optional[int] = None) -> None:
         """Start TTL sweeper.
 
         This is a no-op with Redis native TTL, but kept for API compatibility.
         Redis automatically removes expired keys.
 
         Args:
-            sweep_interval_minutes: Ignored parameter, kept for API compatibility
+            _sweep_interval_minutes: Ignored parameter, kept for API compatibility
         """
         # No-op: Redis handles TTL expiration automatically
         pass
 
-    def stop_ttl_sweeper(self, timeout: Optional[float] = None) -> bool:
+    def stop_ttl_sweeper(self, _timeout: Optional[float] = None) -> bool:
         """Stop TTL sweeper.
 
         This is a no-op with Redis native TTL, but kept for API compatibility.
 
         Args:
-            timeout: Ignored parameter, kept for API compatibility
+            _timeout: Ignored parameter, kept for API compatibility
 
         Returns:
             bool: Always True as there's no sweeper to stop
@@ -233,7 +232,7 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
 
         # Configure vector index if needed
         if self.index_config:
-            # Get storage type from index config, default to "json" for backward compatibility
+            # Get storage type from index config, default to "json"
             # Cast to dict to safely access potential extra fields
             index_dict = dict(self.index_config)
             vector_storage_type = index_dict.get("vector_storage_type", "json")
@@ -380,7 +379,6 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
                 now = int(datetime.now(timezone.utc).timestamp() * 1_000_000)
 
                 # With native Redis TTL, we don't need to store TTL in document
-                # but store it for backward compatibility and metadata purposes
                 ttl_minutes = None
                 expires_at = None
                 if hasattr(op, "ttl") and op.ttl is not None:

@@ -1,19 +1,16 @@
 """Tests for AsyncRedisStore."""
 
 import asyncio
-import json
 import time
 from typing import AsyncIterator
 from uuid import uuid4
 
 import pytest
-from langchain_core.embeddings import Embeddings
 from langgraph.store.base import (
     GetOp,
     Item,
     ListNamespacesOp,
     PutOp,
-    SearchItem,
     SearchOp,
 )
 

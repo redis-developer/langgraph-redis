@@ -279,7 +279,6 @@ def test_from_conn_string_errors(redis_url: str) -> None:
 
 def test_shallow_client_info_setting(redis_url: str, monkeypatch) -> None:
     """Test that ShallowRedisSaver sets client info correctly."""
-    from redis.exceptions import ResponseError
 
     from langgraph.checkpoint.redis.version import __full_lib_name__
 
@@ -417,15 +416,18 @@ def test_key_generation_inconsistency(redis_url: str) -> None:
     assert "__empty__" in shallow_writes_pattern
 
 
-def test_incomplete_blob_cleanup(redis_url: str) -> None:
-    """Test for Complete cleanup of blobs in ShallowRedisSaver.
+def test_shallow_saver_inline_storage(redis_url: str) -> None:
+    """Test that ShallowRedisSaver stores channel values inline.
 
-    This test verifies that old blob versions are properly cleaned up
-    when putting new checkpoints, now that key generation is consistent.
+    This test verifies that the shallow saver stores channel values
+    inline within the checkpoint document rather than as separate blob keys.
     """
     import uuid
 
-    from langgraph.checkpoint.redis.base import CHECKPOINT_BLOB_PREFIX
+    from langgraph.checkpoint.redis.base import (
+        CHECKPOINT_BLOB_PREFIX,
+        CHECKPOINT_PREFIX,
+    )
 
     with _saver(redis_url) as saver:
         # Create test data
@@ -477,8 +479,21 @@ def test_incomplete_blob_cleanup(redis_url: str) -> None:
                 k for k in test_keys if k.startswith(CHECKPOINT_BLOB_PREFIX)
             ]
 
-            # Should have 2 blob keys
-            assert len(blob_keys_after_first) == 2
+            # Should have exactly one checkpoint key and no blob keys
+            checkpoint_keys = [k for k in test_keys if k.startswith(CHECKPOINT_PREFIX)]
+            assert (
+                len(checkpoint_keys) == 1
+            ), f"Expected 1 checkpoint key, got {len(checkpoint_keys)}"
+            assert (
+                len(blob_keys_after_first) == 0
+            ), f"Expected 0 blob keys, got {len(blob_keys_after_first)}"
+
+            # Verify channel values are stored inline
+            checkpoint_data = redis_client.json().get(checkpoint_keys[0])
+            assert "checkpoint" in checkpoint_data
+            assert "channel_values" in checkpoint_data["checkpoint"]
+            assert "test_channel" in checkpoint_data["checkpoint"]["channel_values"]
+            assert "another_channel" in checkpoint_data["checkpoint"]["channel_values"]
 
             # Create second checkpoint with different channel versions
             checkpoint2 = {
@@ -508,18 +523,23 @@ def test_incomplete_blob_cleanup(redis_url: str) -> None:
                 k for k in test_keys if k.startswith(CHECKPOINT_BLOB_PREFIX)
             ]
 
-            # This demonstrates the bug: we should only have 2 blob keys (latest versions)
-            # but we have 4 because cleanup didn't work due to key generation inconsistency
-            print(f"Blob keys after first put: {len(blob_keys_after_first)}")
-            print(f"Blob keys after second put: {len(blob_keys_after_second)}")
-            print("Blob keys after second put:")
-            for key in sorted(blob_keys_after_second):
-                print(f"  {key}")
-
-            # This should pass when the bug is fixed - we should only have latest blob versions
+            # Still should have exactly one checkpoint key (overwritten) and no blob keys
+            checkpoint_keys_after_second = [
+                k for k in test_keys if k.startswith(CHECKPOINT_PREFIX)
+            ]
             assert (
-                len(blob_keys_after_second) == 2
-            ), f"Bug: old blob versions not cleaned up due to key generation mismatch. Expected 2, got {len(blob_keys_after_second)}"
+                len(checkpoint_keys_after_second) == 1
+            ), f"Expected 1 checkpoint key, got {len(checkpoint_keys_after_second)}"
+            assert (
+                len(blob_keys_after_second) == 0
+            ), f"Expected 0 blob keys, got {len(blob_keys_after_second)}"
+
+            # Verify the checkpoint contains the new data
+            checkpoint_data = redis_client.json().get(checkpoint_keys_after_second[0])
+            assert checkpoint_data["checkpoint_id"] == checkpoint_id2
+            assert "test_value_new" in str(
+                checkpoint_data["checkpoint"]["channel_values"]["test_channel"]
+            )
 
         finally:
             redis_client.close()

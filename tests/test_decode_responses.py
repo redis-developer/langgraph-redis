@@ -1,10 +1,5 @@
 """Tests for Redis key decoding functionality."""
 
-import os
-import time
-import uuid
-from typing import Any, Dict, Optional
-
 import pytest
 from redis import Redis
 

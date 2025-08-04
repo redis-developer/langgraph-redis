@@ -22,9 +22,19 @@ ENV PATH="/home/jupyter/venv/bin:$PATH"
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir "httpx>=0.24.0,<1.0.0" && \
     pip install --no-cache-dir "langgraph>=0.3.0" && \
-    pip install --no-cache-dir "langgraph-checkpoint-redis>=0.0.4" && \
     pip install --no-cache-dir jupyter "redis>=5.2.1" "redisvl>=0.5.1" langchain-openai langchain-anthropic python-ulid
-# Note: Notebook-specific dependencies will be installed in the notebook cells as needed
+
+# Create a startup script that checks if local library is mounted
+RUN echo '#!/bin/bash\n\
+if [ -d "/home/jupyter/workspace/langgraph-checkpoint-redis" ]; then\n\
+    echo "Installing local langgraph-checkpoint-redis library..."\n\
+    pip install -e /home/jupyter/workspace/langgraph-checkpoint-redis\n\
+else\n\
+    echo "Installing langgraph-checkpoint-redis from PyPI..."\n\
+    pip install "langgraph-checkpoint-redis>=0.0.4"\n\
+fi\n\
+exec jupyter notebook --ip=0.0.0.0 --port=8888 --no-browser --ServerApp.token="" --ServerApp.password="" --ServerApp.allow_root=True --NotebookApp.disable_check_xsrf=True --FileContentsManager.checkpoints_kwargs="{\"root_dir\":\"/tmp/checkpoints\"}"' > /home/jupyter/start-jupyter.sh && \
+    chmod +x /home/jupyter/start-jupyter.sh
 
 # Set the working directory to the examples folder
 WORKDIR /home/jupyter/workspace/examples
@@ -32,5 +42,5 @@ WORKDIR /home/jupyter/workspace/examples
 # Expose Jupyter port
 EXPOSE 8888
 
-# Start Jupyter Notebook with checkpoints disabled
-CMD ["jupyter", "notebook", "--ip=0.0.0.0", "--port=8888", "--no-browser", "--ServerApp.token=''", "--ServerApp.password=''", "--ServerApp.allow_root=True", "--NotebookApp.disable_check_xsrf=True", "--FileContentsManager.checkpoints_kwargs={'root_dir':'/tmp/checkpoints'}"]
+# Start Jupyter using the startup script
+CMD ["/home/jupyter/start-jupyter.sh"]
