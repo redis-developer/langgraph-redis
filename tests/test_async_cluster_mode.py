@@ -30,10 +30,13 @@ def redis_container():
 # Basic Mock for non-cluster async client
 class AsyncMockRedis(AsyncRedis):
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+        # Don't call super().__init__ to avoid real connection setup
         self.pipeline_calls = []
         self.expire_calls = []
         self.delete_calls = []
+        # Mock connection pool to prevent connection attempts
+        self.connection_pool = AsyncMock()
+        self.connection_pool.get_connection = AsyncMock()
         # Add other attributes/methods to track if needed
 
     def pipeline(self, transaction=True):
@@ -63,6 +66,10 @@ class AsyncMockRedis(AsyncRedis):
     async def ttl(self, key):
         return 3600  # Default TTL
 
+    # Mock set method to prevent connection attempts
+    async def set(self, key, value):
+        return True
+
     def json(self):
         mock_json = AsyncMock()
         mock_json.get = AsyncMock(
@@ -77,6 +84,15 @@ class AsyncMockRedis(AsyncRedis):
         if command.lower() == "info":
             raise ResponseError("ERR This instance has cluster support disabled")
         raise ResponseError(f"Unknown cluster command: {command}")
+
+    # Mock set method to prevent connection attempts
+    async def set(self, key, value):
+        return True
+
+    @classmethod
+    def from_url(cls, url, **kwargs):
+        """Mock from_url to return our mock instance."""
+        return cls()
 
 
 # Mock for cluster async client
@@ -144,6 +160,10 @@ class AsyncMockRedisCluster(
     async def ttl(self, key):
         return 3600  # Default TTL
 
+    # Mock set method to prevent connection attempts
+    async def set(self, key, value):
+        return True
+
     def json(self):
         mock_json = AsyncMock()
         mock_json.get = AsyncMock(
@@ -176,7 +196,7 @@ async def mock_async_redis_cluster_client(redis_url):
 @pytest.fixture
 async def mock_async_redis_client(redis_url):
     # This provides a mock non-cluster client
-    return AsyncMockRedis.from_url(redis_url)  # Standard way to get an async client
+    return AsyncMockRedis()  # Use our mock directly without from_url
 
 
 @pytest.mark.asyncio
@@ -299,16 +319,16 @@ async def test_async_checkpoint_saver_aput_ttl_behavior(async_checkpoint_saver):
     # Call aput which should trigger TTL operations
     await async_checkpoint_saver.aput(config, checkpoint, metadata, new_versions)
 
+    # Both cluster and non-cluster modes now call expire directly for the latest pointer
+    # The checkpoints_index.load() handles TTL internally for the checkpoint itself
+    assert len(client.expire_calls) >= 1  # At least one TTL call for the latest pointer
+    # Check that expire was called with correct TTL (5 minutes = 300 seconds)
+    ttl_calls = [call for call in client.expire_calls if call.get("ttl") == 300]
+    assert len(ttl_calls) >= 1
+
     if async_checkpoint_saver.cluster_mode:
-        # In cluster mode, TTL operations should be called directly
-        assert len(client.expire_calls) >= 1  # At least one TTL call for the checkpoint
-        # Check that expire was called with correct TTL (5 minutes = 300 seconds)
-        ttl_calls = [call for call in client.expire_calls if call.get("ttl") == 300]
-        assert len(ttl_calls) >= 1
-    else:
-        # In non-cluster mode, pipeline should be used for TTL operations
-        assert len(client.pipeline_calls) > 0
-        # Should have pipeline calls for the main operations and potentially TTL operations
+        # In cluster mode, there's an additional expire call for the checkpoint key
+        assert len(ttl_calls) >= 2  # One for latest pointer, one for checkpoint
 
 
 @pytest.mark.asyncio

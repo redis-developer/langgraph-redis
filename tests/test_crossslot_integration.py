@@ -1,10 +1,6 @@
 """Integration tests for CrossSlot error fix in checkpoint operations."""
 
-import pytest
-from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import (
-    Checkpoint,
-    CheckpointMetadata,
     create_checkpoint,
     empty_checkpoint,
 )
@@ -83,13 +79,20 @@ def test_checkpoint_operations_no_crossslot_errors(redis_url: str) -> None:
     assert tuple_ttl is not None
 
     # Test 3: List checkpoints - this should work without CrossSlot errors
-    # List returns only the latest checkpoint by default
+    # List returns all checkpoints
     checkpoints = list(saver.list(config1))
     assert len(checkpoints) >= 1
 
-    # The latest checkpoint should have the pending writes from checkpoint1
-    latest_checkpoint = checkpoints[0]
-    assert len(latest_checkpoint.pending_writes) == 2
+    # Find the checkpoint that has the pending writes (saved_config1)
+    checkpoint_with_writes = None
+    saved_checkpoint_id = saved_config1["configurable"]["checkpoint_id"]
+    for checkpoint in checkpoints:
+        if checkpoint.checkpoint["id"] == saved_checkpoint_id:
+            checkpoint_with_writes = checkpoint
+            break
+
+    assert checkpoint_with_writes is not None
+    assert len(checkpoint_with_writes.pending_writes) == 2
 
     # The important part is that all these operations work without CrossSlot errors
     # In a Redis cluster, the old keys() based approach would have failed by now

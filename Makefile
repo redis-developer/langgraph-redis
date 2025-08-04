@@ -17,12 +17,24 @@ check-types:
 	poetry run check-mypy
 
 lint: format check-types
-	
+
 test:
 	poetry run test-verbose
 
 test-all:
 	poetry run test-verbose --run-api-tests
+
+test-coverage:
+	poetry run test-coverage
+
+coverage-report:
+	poetry run coverage-report
+
+coverage-html:
+	poetry run coverage-html
+
+find-dead-code:
+	poetry run find-dead-code
 
 check: lint test
 

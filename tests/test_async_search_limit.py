@@ -54,6 +54,24 @@ async def test_async_vector_search_with_larger_limit(redis_url) -> None:
     async with AsyncRedisStore(redis_url, index=index_config) as store:
         await store.setup()
 
+        # Verify indices exist, retry if needed (handles race with flushall)
+        retries = 3
+        for i in range(retries):
+            try:
+                # Try to access the index to verify it exists
+                await store._redis.ft(store.store_index.schema.index.name).info()
+                if hasattr(store, "vector_index") and store.vector_index:
+                    await store._redis.ft(store.vector_index.schema.index.name).info()
+                break
+            except Exception:
+                if i < retries - 1:
+                    import asyncio
+
+                    await asyncio.sleep(0.1)
+                    await store.setup()  # Re-setup if index was deleted
+                else:
+                    raise
+
         # Create 15 test documents
         for i in range(15):
             # Create documents with slightly different texts

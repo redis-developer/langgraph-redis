@@ -28,7 +28,8 @@ The project requires the following main Python dependencies:
 
 #### Redis 8.0+
 
-If you're using Redis 8.0 or higher, both RedisJSON and RediSearch modules are included by default as part of the core Redis distribution. No additional installation is required.
+If you're using Redis 8.0 or higher, both RedisJSON and RediSearch modules are included by default as part of the core
+Redis distribution. No additional installation is required.
 
 #### Redis < 8.0
 
@@ -52,7 +53,8 @@ pip install langgraph-checkpoint-redis
 ### Important Notes
 
 > [!IMPORTANT]
-> When using Redis checkpointers for the first time, make sure to call `.setup()` method on them to create required indices. See examples below.
+> When using Redis checkpointers for the first time, make sure to call `.setup()` method on them to create required
+> indices. See examples below.
 
 ### Standard Implementation
 
@@ -106,6 +108,7 @@ with RedisSaver.from_conn_string("redis://localhost:6379") as checkpointer:
 ```python
 from langgraph.checkpoint.redis.aio import AsyncRedisSaver
 
+
 async def main():
     write_config = {"configurable": {"thread_id": "1", "checkpoint_ns": ""}}
     read_config = {"configurable": {"thread_id": "1"}}
@@ -148,17 +151,21 @@ async def main():
         # List all checkpoints
         checkpoints = [c async for c in checkpointer.alist(read_config)]
 
+
 # Run the async main function
 import asyncio
+
 asyncio.run(main())
 ```
 
 ### Shallow Implementations
 
-Shallow Redis checkpoint savers store only the latest checkpoint in Redis. These implementations are useful when retaining a complete checkpoint history is unnecessary.
+Shallow Redis checkpoint savers store only the latest checkpoint in Redis. These implementations are useful when
+retaining a complete checkpoint history is unnecessary.
 
 ```python
 from langgraph.checkpoint.redis.shallow import ShallowRedisSaver
+
 # For async version: from langgraph.checkpoint.redis.ashallow import AsyncShallowRedisSaver
 
 write_config = {"configurable": {"thread_id": "1", "checkpoint_ns": ""}}
@@ -176,7 +183,7 @@ Both Redis checkpoint savers and stores support Time-To-Live (TTL) functionality
 ```python
 # Configure TTL for checkpoint savers
 ttl_config = {
-    "default_ttl": 60,     # Default TTL in minutes
+    "default_ttl": 60,  # Default TTL in minutes
     "refresh_on_read": True,  # Refresh TTL when checkpoint is read
 }
 
@@ -211,14 +218,14 @@ index_config = {
 
 # With TTL configuration
 ttl_config = {
-    "default_ttl": 60,     # Default TTL in minutes
+    "default_ttl": 60,  # Default TTL in minutes
     "refresh_on_read": True,  # Refresh TTL when store entries are read
 }
 
 with RedisStore.from_conn_string(
-    "redis://localhost:6379", 
-    index=index_config,
-    ttl=ttl_config
+        "redis://localhost:6379",
+        index=index_config,
+        ttl=ttl_config
 ) as store:
     store.setup()
     # Use the store with vector search and TTL capabilities...
@@ -229,19 +236,21 @@ with RedisStore.from_conn_string(
 ```python
 from langgraph.store.redis.aio import AsyncRedisStore
 
+
 async def main():
     # TTL also works with async implementations
     ttl_config = {
-        "default_ttl": 60,     # Default TTL in minutes
+        "default_ttl": 60,  # Default TTL in minutes
         "refresh_on_read": True,  # Refresh TTL when store entries are read
     }
-    
+
     async with AsyncRedisStore.from_conn_string(
-        "redis://localhost:6379", 
-        ttl=ttl_config
+            "redis://localhost:6379",
+            ttl=ttl_config
     ) as store:
         await store.setup()
         # Use the store asynchronously...
+
 
 asyncio.run(main())
 ```
@@ -347,6 +356,15 @@ The project includes several make commands for development:
   make format        # Format all files with Black and isort
   make lint          # Run formatting, type checking, and other linters
   make check-types   # Run mypy type checking
+  ```
+
+- **Code Quality**:
+
+  ```bash
+  make test-coverage    # Run tests with coverage reporting
+  make coverage-report  # Generate coverage report without running tests
+  make coverage-html    # Generate HTML coverage report (opens in htmlcov/)
+  make find-dead-code   # Find unused code with vulture
   ```
 
 - **Redis for Development/Testing**:

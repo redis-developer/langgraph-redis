@@ -10,7 +10,6 @@ import pytest
 from langgraph.graph import END, START, StateGraph
 
 from langgraph.checkpoint.redis import RedisSaver
-from langgraph.checkpoint.redis.aio import AsyncRedisSaver
 from langgraph.checkpoint.redis.base import (
     CHECKPOINT_WRITE_PREFIX,
     REDIS_KEY_SEPARATOR,

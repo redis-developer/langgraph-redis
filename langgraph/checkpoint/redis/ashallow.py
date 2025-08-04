@@ -6,7 +6,6 @@ import asyncio
 import json
 import os
 from contextlib import asynccontextmanager
-from functools import partial
 from types import TracebackType
 from typing import Any, AsyncIterator, Dict, List, Optional, Sequence, Tuple, Type, cast
 
@@ -18,14 +17,14 @@ from langgraph.checkpoint.base import (
     CheckpointMetadata,
     CheckpointTuple,
     PendingWrite,
+    get_checkpoint_id,
 )
 from langgraph.constants import TASKS
 from redis.asyncio import Redis as AsyncRedis
-from redis.asyncio.client import Pipeline
 from redisvl.index import AsyncSearchIndex
 from redisvl.query import FilterQuery
 from redisvl.query.filter import Num, Tag
-from redisvl.redis.connection import RedisConnectionFactory
+from ulid import ULID
 
 from langgraph.checkpoint.redis.base import (
     CHECKPOINT_BLOB_PREFIX,
@@ -35,7 +34,6 @@ from langgraph.checkpoint.redis.base import (
     BaseRedisSaver,
 )
 from langgraph.checkpoint.redis.util import (
-    safely_decode,
     to_storage_safe_id,
     to_storage_safe_str,
 )
@@ -112,6 +110,16 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         )
         self.loop = asyncio.get_running_loop()
 
+        # Instance-level cache for frequently used keys (limited size to prevent memory issues)
+        self._key_cache: Dict[str, str] = {}
+        self._key_cache_max_size = 1000  # Configurable limit
+        self._channel_cache: Dict[str, Any] = {}
+
+        # Cache commonly used prefixes
+        self._checkpoint_prefix = CHECKPOINT_PREFIX
+        self._checkpoint_write_prefix = CHECKPOINT_WRITE_PREFIX
+        self._separator = REDIS_KEY_SEPARATOR
+
     async def __aenter__(self) -> AsyncShallowRedisSaver:
         """Async context manager enter."""
         await self.asetup()
@@ -123,9 +131,9 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
 
     async def __aexit__(
         self,
-        exc_type: Optional[Type[BaseException]],
-        exc: Optional[BaseException],
-        tb: Optional[TracebackType],
+        _exc_type: Optional[Type[BaseException]],
+        _exc: Optional[BaseException],
+        _tb: Optional[TracebackType],
     ) -> None:
         if self._owns_its_client:
             await self._redis.aclose()
@@ -159,11 +167,24 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             yield saver
 
     async def asetup(self) -> None:
-        """Initialize Redis indexes asynchronously."""
-        # Create indexes in Redis asynchronously
+        """Initialize Redis indexes asynchronously (skip blob index for shallow implementation)."""
+        # Create only the indexes we actually use
         await self.checkpoints_index.create(overwrite=False)
-        await self.checkpoint_blobs_index.create(overwrite=False)
+        # Skip creating blob index since shallow doesn't use separate blobs
         await self.checkpoint_writes_index.create(overwrite=False)
+
+    async def setup(self) -> None:  # type: ignore[override]
+        """Set up the checkpoint saver asynchronously.
+
+        This method creates the necessary indices in Redis.
+        It MUST be called before using the checkpointer.
+
+        This async method follows the canonical pattern used by other
+        async checkpointers in the LangGraph ecosystem. The type ignore is necessary because
+        the base class defines a sync setup() method, but async checkpointers require
+        an async setup() method to properly handle coroutines.
+        """
+        await self.asetup()
 
     async def aput(
         self,
@@ -172,10 +193,9 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         metadata: CheckpointMetadata,
         new_versions: ChannelVersions,
     ) -> RunnableConfig:
-        """Store only the latest checkpoint asynchronously and clean up old blobs with transaction handling.
+        """Store checkpoint with INLINE channel values
 
-        This method uses Redis pipeline with transaction=True to ensure atomicity of checkpoint operations.
-        In case of interruption, all operations will be aborted, maintaining consistency.
+        Stores all channel values directly in main checkpoint JSON
 
         Args:
             config: The config to associate with the checkpoint
@@ -203,99 +223,92 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         }
 
         try:
-            # Create a pipeline with transaction=True for atomicity
-            pipeline = self._redis.pipeline(transaction=True)
+            # Extract timestamp from checkpoint_id (ULID)
+            checkpoint_ts = None
+            if checkpoint["id"]:
+                try:
+                    from ulid import ULID
 
-            # Store checkpoint data
+                    ulid_obj = ULID.from_str(checkpoint["id"])
+                    checkpoint_ts = ulid_obj.timestamp  # milliseconds since epoch
+                except Exception:
+                    # If not a valid ULID, use current time
+                    import time
+
+                    checkpoint_ts = time.time() * 1000
+
+            # Store channel values inline in the checkpoint
+            copy["channel_values"] = checkpoint.get("channel_values", {})
+
             checkpoint_data = {
                 "thread_id": thread_id,
                 "checkpoint_ns": checkpoint_ns,
                 "checkpoint_id": checkpoint["id"],
+                "checkpoint_ts": checkpoint_ts,
                 "checkpoint": self._dump_checkpoint(copy),
                 "metadata": self._dump_metadata(metadata),
+                # Note: has_writes tracking removed to support put_writes before checkpoint exists
             }
 
-            # store at top-level for filters in list()
+            # Store at top-level for filters in list()
             if all(key in metadata for key in ["source", "step"]):
                 checkpoint_data["source"] = metadata["source"]
                 checkpoint_data["step"] = metadata["step"]
 
-            # Note: Need to keep track of the current versions to keep
-            current_channel_versions = new_versions.copy()
-
-            # Prepare the checkpoint key
-            checkpoint_key = AsyncShallowRedisSaver._make_shallow_redis_checkpoint_key(
+            # SHALLOW MODE: Only one key needed - overwrite everything atomically
+            checkpoint_key = self._make_shallow_redis_checkpoint_key_cached(
                 thread_id, checkpoint_ns
             )
 
-            # Add checkpoint data to pipeline
+            # Create pipeline for all operations
+            pipeline = self._redis.pipeline(transaction=False)
+
+            # Get the previous checkpoint ID to potentially clean up its writes
+            pipeline.json().get(checkpoint_key)
+
+            # Set the new checkpoint data
             pipeline.json().set(checkpoint_key, "$", checkpoint_data)
 
-            # Before storing the new blobs, clean up old ones that won't be needed
-            # - Get a list of all blob keys for this thread_id and checkpoint_ns
-            # - Then delete the ones that aren't in new_versions
-
-            # Get all blob keys for this thread/namespace (this is done outside the pipeline)
-            blob_key_pattern = (
-                AsyncShallowRedisSaver._make_shallow_redis_checkpoint_blob_key_pattern(
-                    thread_id, checkpoint_ns
-                )
-            )
-            existing_blob_keys = await self._redis.keys(blob_key_pattern)
-
-            # Process each existing blob key to determine if it should be kept or deleted
-            if existing_blob_keys:
-                for blob_key in existing_blob_keys:
-                    # Use safely_decode to handle both string and bytes responses
-                    decoded_key = safely_decode(blob_key)
-                    key_parts = decoded_key.split(REDIS_KEY_SEPARATOR)
-                    # The key format is checkpoint_blob:thread_id:checkpoint_ns:channel:version
-                    if len(key_parts) >= 5:
-                        channel = key_parts[3]
-                        version = key_parts[4]
-
-                        # Only keep the blob if it's referenced by the current versions
-                        if (
-                            channel in current_channel_versions
-                            and current_channel_versions[channel] == version
-                        ):
-                            # This is a current version, keep it
-                            continue
-                        else:
-                            # This is an old version, delete it
-                            pipeline.delete(blob_key)
-
-            # Store the new blob values
-            blobs = self._dump_blobs(
-                thread_id,
-                checkpoint_ns,
-                copy.get("channel_values", {}),
-                new_versions,
-            )
-
-            if blobs:
-                # Add all blob data to pipeline
-                for key, data in blobs:
-                    pipeline.json().set(key, "$", data)
-
-            # Execute all operations atomically
-            await pipeline.execute()
-
-            # Apply TTL to checkpoint and blob keys if configured
+            # Apply TTL if configured
             if self.ttl_config and "default_ttl" in self.ttl_config:
-                # Prepare the list of keys to apply TTL
-                ttl_keys = [checkpoint_key]
-                if blobs:
-                    ttl_keys.extend([key for key, _ in blobs])
+                ttl_seconds = int(self.ttl_config.get("default_ttl") * 60)
+                pipeline.expire(checkpoint_key, ttl_seconds)
 
-                # Apply TTL to all keys
-                ttl_minutes = self.ttl_config.get("default_ttl")
-                ttl_seconds = int(ttl_minutes * 60)
+            # Execute pipeline to get prev data and set new data
+            results = await pipeline.execute()
+            prev_checkpoint_data = results[0]
 
-                ttl_pipeline = self._redis.pipeline()
-                for key in ttl_keys:
-                    ttl_pipeline.expire(key, ttl_seconds)
-                await ttl_pipeline.execute()
+            # Check if we need to clean up old writes
+            prev_checkpoint_id = None
+            if prev_checkpoint_data and isinstance(prev_checkpoint_data, dict):
+                prev_checkpoint_id = prev_checkpoint_data.get("checkpoint_id")
+
+            # If checkpoint changed, clean up old writes in a second pipeline
+            if prev_checkpoint_id and prev_checkpoint_id != checkpoint["id"]:
+                thread_zset_key = f"write_keys_zset:{thread_id}:{checkpoint_ns}:shallow"
+
+                # Create cleanup pipeline
+                cleanup_pipeline = self._redis.pipeline(transaction=False)
+
+                # Get all existing write keys
+                cleanup_pipeline.zrange(thread_zset_key, 0, -1)
+
+                # Delete the registry
+                cleanup_pipeline.delete(thread_zset_key)
+
+                # Execute to get keys and delete registry
+                cleanup_results = await cleanup_pipeline.execute()
+                existing_write_keys = cleanup_results[0]
+
+                # If there are keys to delete, do it in another pipeline
+                if existing_write_keys:
+                    delete_pipeline = self._redis.pipeline(transaction=False)
+                    for old_key in existing_write_keys:
+                        old_key_str = (
+                            old_key.decode() if isinstance(old_key, bytes) else old_key
+                        )
+                        delete_pipeline.delete(old_key_str)
+                    await delete_pipeline.execute()
 
             return next_config
 
@@ -314,16 +327,21 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         config: Optional[RunnableConfig],
         *,
         filter: Optional[Dict[str, Any]] = None,
-        before: Optional[RunnableConfig] = None,
+        before: Optional[RunnableConfig] = None,  # noqa: ARG002
         limit: Optional[int] = None,
     ) -> AsyncIterator[CheckpointTuple]:
         """List checkpoints from Redis asynchronously."""
         query_filter = []
 
         if config:
-            query_filter.append(Tag("thread_id") == config["configurable"]["thread_id"])
+            query_filter.append(
+                Tag("thread_id")
+                == to_storage_safe_id(config["configurable"]["thread_id"])
+            )
             if checkpoint_ns := config["configurable"].get("checkpoint_ns"):
-                query_filter.append(Tag("checkpoint_ns") == checkpoint_ns)
+                query_filter.append(
+                    Tag("checkpoint_ns") == to_storage_safe_str(checkpoint_ns)
+                )
 
         if filter:
             for key, value in filter.items():
@@ -331,6 +349,18 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
                     query_filter.append(Tag("source") == value)
                 elif key == "step":
                     query_filter.append(Num("step") == value)
+
+        if before:
+            before_checkpoint_id = get_checkpoint_id(before)
+            if before_checkpoint_id:
+                try:
+                    before_ulid = ULID.from_str(before_checkpoint_id)
+                    before_ts = before_ulid.timestamp
+                    # Use numeric range query: checkpoint_ts < before_ts
+                    query_filter.append(Num("checkpoint_ts") < before_ts)
+                except Exception:
+                    # If not a valid ULID, ignore the before filter
+                    pass
 
         combined_filter = query_filter[0] if query_filter else "*"
         for expr in query_filter[1:]:
@@ -383,89 +413,51 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         thread_id = config["configurable"]["thread_id"]
         checkpoint_ns = config["configurable"].get("checkpoint_ns", "")
 
-        checkpoint_filter_expression = (Tag("thread_id") == thread_id) & (
-            Tag("checkpoint_ns") == checkpoint_ns
+        # Use direct key access for shallow checkpoints
+        # Shallow checkpoints only store the latest checkpoint per thread/namespace
+        checkpoint_key = self._make_shallow_redis_checkpoint_key_cached(
+            thread_id, checkpoint_ns
         )
 
-        # Construct the query
-        checkpoints_query = FilterQuery(
-            filter_expression=checkpoint_filter_expression,
-            return_fields=[
-                "thread_id",
-                "checkpoint_ns",
-                "parent_checkpoint_id",
-                "$.checkpoint",
-                "$.metadata",
-            ],
-            num_results=1,
-        )
-
-        # Execute the query
-        results = await self.checkpoints_index.search(checkpoints_query)
-        if not results.docs:
+        # Single fetch gets everything inline - matching sync implementation
+        full_checkpoint_data = await self._redis.json().get(checkpoint_key)  # type: ignore[misc]
+        if not full_checkpoint_data or not isinstance(full_checkpoint_data, dict):
             return None
 
-        doc = results.docs[0]
-
-        # If refresh_on_read is enabled, refresh TTL for checkpoint key and related keys
+        # If refresh_on_read is enabled, refresh TTL for checkpoint key
         if self.ttl_config and self.ttl_config.get("refresh_on_read"):
-            thread_id = getattr(doc, "thread_id", "")
-            checkpoint_ns = getattr(doc, "checkpoint_ns", "")
+            # TTL refresh if enabled - always refresh for shallow implementation
+            # Since there's only one checkpoint per thread/namespace, the overhead is minimal
+            default_ttl_minutes = self.ttl_config.get("default_ttl", 60)
+            ttl_seconds = int(default_ttl_minutes * 60)
+            await self._redis.expire(checkpoint_key, ttl_seconds)
 
-            # Get the checkpoint key
-            checkpoint_key = AsyncShallowRedisSaver._make_shallow_redis_checkpoint_key(
-                thread_id, checkpoint_ns
-            )
+        # Parse the checkpoint data
+        checkpoint = full_checkpoint_data.get("checkpoint", {})
+        if isinstance(checkpoint, str):
+            checkpoint = json.loads(checkpoint)
 
-            # Get all blob keys related to this checkpoint
-            blob_key_pattern = (
-                AsyncShallowRedisSaver._make_shallow_redis_checkpoint_blob_key_pattern(
-                    thread_id, checkpoint_ns
-                )
-            )
-            blob_keys = await self._redis.keys(blob_key_pattern)
-            # Use safely_decode to handle both string and bytes responses
-            blob_keys = [safely_decode(key) for key in blob_keys]
+        # Extract channel values from the checkpoint (they're stored inline)
+        # NO NEED TO CALL aget_channel_values - we already have the data!
+        channel_values: Dict[str, Any] = checkpoint.get("channel_values", {})
+        # Deserialize them since they're stored in serialized form
+        channel_values = self._deserialize_channel_values(channel_values)
 
-            # Apply TTL
-            ttl_minutes = self.ttl_config.get("default_ttl")
-            if ttl_minutes is not None:
-                ttl_seconds = int(ttl_minutes * 60)
-                pipeline = self._redis.pipeline()
-                pipeline.expire(checkpoint_key, ttl_seconds)
-                for key in blob_keys:
-                    pipeline.expire(key, ttl_seconds)
-                await pipeline.execute()
-
-        checkpoint = json.loads(doc["$.checkpoint"])
-
-        # Fetch channel_values
-        channel_values = await self.aget_channel_values(
-            thread_id=doc["thread_id"],
-            checkpoint_ns=doc["checkpoint_ns"],
-            checkpoint_id=checkpoint["id"],
-        )
-
-        # Fetch pending_sends from parent checkpoint
-        pending_sends = await self._aload_pending_sends(
-            thread_id=thread_id,
-            checkpoint_ns=checkpoint_ns,
-        )
-
-        # Fetch and parse metadata
-        raw_metadata = getattr(doc, "$.metadata", "{}")
-        metadata_dict = (
-            json.loads(raw_metadata) if isinstance(raw_metadata, str) else raw_metadata
-        )
+        # Parse metadata
+        metadata = full_checkpoint_data.get("metadata", {})
+        if isinstance(metadata, str):
+            metadata = json.loads(metadata)
 
         # Ensure metadata matches CheckpointMetadata type
         sanitized_metadata = {
             k.replace("\u0000", ""): (
                 v.replace("\u0000", "") if isinstance(v, str) else v
             )
-            for k, v in metadata_dict.items()
+            for k, v in metadata.items()
         }
-        metadata = cast(CheckpointMetadata, sanitized_metadata)
+
+        # For shallow mode, pending_sends is always empty
+        pending_sends: list[tuple[str, bytes]] = []
 
         config_param: RunnableConfig = {
             "configurable": {
@@ -476,9 +468,9 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         }
 
         checkpoint_param = self._load_checkpoint(
-            doc["$.checkpoint"],
+            json.dumps(checkpoint),
             channel_values,
-            pending_sends,
+            pending_sends,  # No pending_sends in shallow mode
         )
 
         pending_writes = await self._aload_pending_writes(
@@ -488,7 +480,7 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         return CheckpointTuple(
             config=config_param,
             checkpoint=checkpoint_param,
-            metadata=metadata,
+            metadata=cast(CheckpointMetadata, sanitized_metadata),
             parent_config=None,
             pending_writes=pending_writes,
         )
@@ -522,8 +514,8 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         checkpoint_id = config["configurable"]["checkpoint_id"]
 
         try:
-            # Create a transaction pipeline for atomicity
-            pipeline = self._redis.pipeline(transaction=True)
+            # Create a pipeline without transaction to avoid lock contention
+            pipeline = self._redis.pipeline(transaction=False)
 
             # Transform writes into appropriate format
             writes_objects = []
@@ -542,53 +534,39 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
                 }
                 writes_objects.append(write_obj)
 
-            # First get all writes keys for this thread/namespace (outside the pipeline)
-            writes_key_pattern = AsyncShallowRedisSaver._make_shallow_redis_checkpoint_writes_key_pattern(
-                thread_id, checkpoint_ns
-            )
-            existing_writes_keys = await self._redis.keys(writes_key_pattern)
+            # Thread-level sorted set for write keys
+            thread_zset_key = f"write_keys_zset:{thread_id}:{checkpoint_ns}:shallow"
 
-            # Process each existing writes key to determine if it should be kept or deleted
-            if existing_writes_keys:
-                for write_key in existing_writes_keys:
-                    # Use safely_decode to handle both string and bytes responses
-                    decoded_key = safely_decode(write_key)
-                    key_parts = decoded_key.split(REDIS_KEY_SEPARATOR)
-                    # The key format is checkpoint_write:thread_id:checkpoint_ns:checkpoint_id:task_id:idx
-                    if len(key_parts) >= 5:
-                        key_checkpoint_id = key_parts[3]
-
-                        # If the write is for a different checkpoint_id, delete it
-                        if key_checkpoint_id != checkpoint_id:
-                            pipeline.delete(write_key)
-
-            # Add new writes to the pipeline
-            upsert_case = all(w[0] in WRITES_IDX_MAP for w in writes)
+            # Collect all write keys
+            write_keys = []
             for write_obj in writes_objects:
-                key = self._make_redis_checkpoint_writes_key(
+                key = self._make_redis_checkpoint_writes_key_cached(
                     thread_id,
                     checkpoint_ns,
                     checkpoint_id,
                     task_id,
                     write_obj["idx"],
                 )
+                write_keys.append(key)
 
-                if upsert_case:
-                    # For upsert case, we need to check if the key exists (outside the pipeline)
-                    exists = await self._redis.exists(key)
-                    if exists:
-                        # Update existing key
-                        pipeline.json().set(key, "$.channel", write_obj["channel"])
-                        pipeline.json().set(key, "$.type", write_obj["type"])
-                        pipeline.json().set(key, "$.blob", write_obj["blob"])
-                    else:
-                        # Create new key
-                        pipeline.json().set(key, "$", write_obj)
-                else:
-                    # For shallow implementation, always set the full object
-                    pipeline.json().set(key, "$", write_obj)
+            # No cleanup in put_writes - we do it in aput() when checkpoint changes
 
-            # Execute all operations atomically
+            # Add new writes to the pipeline - always overwrite for simplicity
+            for idx, write_obj in enumerate(writes_objects):
+                key = write_keys[idx]
+                # Always set the complete object - simpler and faster than checking existence
+                pipeline.json().set(key, "$", write_obj)
+
+            # Use thread-level sorted set
+            zadd_mapping = {key: idx for idx, key in enumerate(write_keys)}
+            pipeline.zadd(thread_zset_key, zadd_mapping)
+
+            # Apply TTL to registry key if configured
+            if self.ttl_config and "default_ttl" in self.ttl_config:
+                ttl_seconds = int(self.ttl_config.get("default_ttl") * 60)
+                pipeline.expire(thread_zset_key, ttl_seconds)
+
+            # Execute everything in one round trip
             await pipeline.execute()
 
         except asyncio.CancelledError:
@@ -602,50 +580,32 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             raise e
 
     async def aget_channel_values(
-        self, thread_id: str, checkpoint_ns: str, checkpoint_id: str
+        self,
+        thread_id: str,
+        checkpoint_ns: str,
+        checkpoint_id: str,
+        channel_versions: Optional[Dict[str, Any]] = None,
     ) -> dict[str, Any]:
-        """Retrieve channel_values dictionary with properly constructed message objects."""
-        checkpoint_query = FilterQuery(
-            filter_expression=(Tag("thread_id") == thread_id)
-            & (Tag("checkpoint_ns") == checkpoint_ns)
-            & (Tag("checkpoint_id") == checkpoint_id),
-            return_fields=["$.checkpoint.channel_versions"],
-            num_results=1,
+        """Retrieve channel_values dictionary from inline checkpoint data."""
+        # For shallow checkpoints, channel values are stored inline in the checkpoint
+        checkpoint_key = self._make_shallow_redis_checkpoint_key_cached(
+            thread_id, checkpoint_ns
         )
 
-        checkpoint_result = await self.checkpoints_index.search(checkpoint_query)
-        if not checkpoint_result.docs:
+        # Single JSON.GET operation to retrieve checkpoint with inline channel_values
+        checkpoint_data = await self._redis.json().get(checkpoint_key, "$.checkpoint")  # type: ignore[misc]
+
+        if not checkpoint_data:
             return {}
 
-        channel_versions = json.loads(
-            getattr(checkpoint_result.docs[0], "$.checkpoint.channel_versions", "{}")
+        # checkpoint_data[0] is already a deserialized dict
+        checkpoint = (
+            checkpoint_data[0] if isinstance(checkpoint_data, list) else checkpoint_data
         )
-        if not channel_versions:
-            return {}
+        channel_values = checkpoint.get("channel_values", {})
 
-        channel_values = {}
-        for channel, version in channel_versions.items():
-            blob_query = FilterQuery(
-                filter_expression=(Tag("thread_id") == thread_id)
-                & (Tag("checkpoint_ns") == checkpoint_ns)
-                & (Tag("channel") == channel)
-                & (Tag("version") == str(version)),
-                return_fields=["type", "$.blob"],
-                num_results=1,
-            )
-
-            blob_results = await self.checkpoint_blobs_index.search(blob_query)
-            if blob_results.docs:
-                blob_doc = blob_results.docs[0]
-                blob_type = blob_doc.type
-                blob_data = getattr(blob_doc, "$.blob", None)
-
-                if blob_data and blob_type != "empty":
-                    channel_values[channel] = self.serde.loads_typed(
-                        (blob_type, blob_data)
-                    )
-
-        return channel_values
+        # Deserialize channel values since they're stored in serialized form
+        return self._deserialize_channel_values(channel_values)
 
     async def _aload_pending_sends(
         self,
@@ -665,16 +625,16 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         # Query checkpoint_writes for parent checkpoint's TASKS channel
         parent_writes_query = FilterQuery(
             filter_expression=(Tag("thread_id") == thread_id)
-            & (Tag("checkpoint_ns") == checkpoint_ns)
+            & (Tag("checkpoint_ns") == to_storage_safe_str(checkpoint_ns))
             & (Tag("channel") == TASKS),
-            return_fields=["type", "blob", "task_path", "task_id", "idx"],
+            return_fields=["type", "$.blob", "task_path", "task_id", "idx"],
             num_results=100,
         )
         parent_writes_results = await self.checkpoint_writes_index.search(
             parent_writes_query
         )
 
-        # Sort results by task_path, task_id, idx (matching Postgres implementation)
+        # Sort results by task_path, task_id, idx
         sorted_writes = sorted(
             parent_writes_results.docs,
             key=lambda x: (
@@ -685,39 +645,67 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         )
 
         # Extract type and blob pairs
-        return [(doc.type, doc.blob) for doc in sorted_writes]
+        # Handle both direct attribute access and JSON path access
+        return [
+            (
+                getattr(doc, "type", ""),
+                getattr(doc, "$.blob", getattr(doc, "blob", b"")),
+            )
+            for doc in sorted_writes
+        ]
 
     async def _aload_pending_writes(
         self, thread_id: str, checkpoint_ns: str, checkpoint_id: str
     ) -> List[PendingWrite]:
+        """Load pending writes using thread-level sorted set registry."""
         if checkpoint_id is None:
-            return []  # Early return if no checkpoint_id
+            return []
 
-        writes_key = BaseRedisSaver._make_redis_checkpoint_writes_key(
-            thread_id, checkpoint_ns, checkpoint_id, "*", None
-        )
-        matching_keys = await self._redis.keys(pattern=writes_key)
-        # Use safely_decode to handle both string and bytes responses
-        decoded_keys = [safely_decode(key) for key in matching_keys]
-        parsed_keys = [
-            BaseRedisSaver._parse_redis_checkpoint_writes_key(key)
-            for key in decoded_keys
-        ]
-        pending_writes = BaseRedisSaver._load_writes(
-            self.serde,
-            {
-                (
-                    parsed_key["task_id"],
-                    parsed_key["idx"],
-                ): await self._redis.json().get(
-                    key
-                )  # type: ignore[misc]
-                for key, parsed_key in sorted(
-                    zip(matching_keys, parsed_keys), key=lambda x: x[1]["idx"]
-                )
-            },
-        )
-        return pending_writes
+        # Use thread-level sorted set
+        thread_zset_key = f"write_keys_zset:{thread_id}:{checkpoint_ns}:shallow"
+
+        try:
+            # Check if we have any writes in the thread sorted set
+            write_count = await self._redis.zcard(thread_zset_key)
+
+            if write_count == 0:
+                # No writes for this thread
+                return []
+
+            # Get all write keys from the thread sorted set
+            write_keys = await self._redis.zrange(thread_zset_key, 0, -1)
+
+            if write_keys:
+                # All keys in the set belong to current checkpoint
+                decoded_keys = [
+                    key.decode() if isinstance(key, bytes) else key
+                    for key in write_keys
+                ]
+
+                # Fetch all writes using pipeline
+                pipeline = self._redis.pipeline(transaction=False)
+                for key in decoded_keys:
+                    pipeline.json().get(key)
+
+                results = await pipeline.execute()
+
+                # Build the writes dictionary
+                writes_dict: Dict[Tuple[str, str], Dict[str, Any]] = {}
+
+                for write_data in results:
+                    if write_data:
+                        task_id = write_data.get("task_id", "")
+                        idx = write_data.get("idx", 0)
+                        writes_dict[(task_id, idx)] = write_data
+
+                # Use base class method to deserialize
+                return BaseRedisSaver._load_writes(self.serde, writes_dict)
+
+        except Exception:
+            pass
+
+        # Return empty list if registry not available
+        return []
 
     def configure_client(
         self,
@@ -728,7 +716,6 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         """Configure the Redis client."""
         self._owns_its_client = redis_client is None
 
-        # Use direct AsyncRedis.from_url to avoid the deprecated get_async_redis_connection
         if redis_client is None:
             if not redis_url:
                 redis_url = os.environ.get("REDIS_URL")
@@ -743,16 +730,13 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         self.checkpoints_index = AsyncSearchIndex.from_dict(
             self.SCHEMAS[0], redis_client=self._redis
         )
+        # Shallow implementation doesn't use blobs, but base class requires the attribute
         self.checkpoint_blobs_index = AsyncSearchIndex.from_dict(
             self.SCHEMAS[1], redis_client=self._redis
         )
         self.checkpoint_writes_index = AsyncSearchIndex.from_dict(
             self.SCHEMAS[2], redis_client=self._redis
         )
-
-    def setup(self) -> None:
-        """Initialize the checkpoint_index in Redis."""
-        asyncio.run_coroutine_threadsafe(self.asetup(), self.loop).result()
 
     def get_tuple(self, config: RunnableConfig) -> Optional[CheckpointTuple]:
         """Retrieve a checkpoint tuple from Redis synchronously."""
@@ -794,10 +778,81 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             self.aput_writes(config, writes, task_id), self.loop
         ).result()
 
+    def get_channel_values(
+        self,
+        thread_id: str,
+        checkpoint_ns: str,
+        checkpoint_id: str,
+        channel_versions: Optional[Dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        """Retrieve channel_values dictionary with properly constructed message objects (sync wrapper)."""
+        try:
+            if asyncio.get_running_loop() is self.loop:
+                raise asyncio.InvalidStateError(
+                    "Synchronous calls to AsyncShallowRedisSaver are only allowed from a "
+                    "different thread. From the main thread, use the async interface."
+                    "For example, use `await checkpointer.aget_channel_values(...)`."
+                )
+        except RuntimeError:
+            pass
+        return asyncio.run_coroutine_threadsafe(
+            self.aget_channel_values(
+                thread_id, checkpoint_ns, checkpoint_id, channel_versions
+            ),
+            self.loop,
+        ).result()
+
+    def _make_shallow_redis_checkpoint_key_cached(
+        self, thread_id: str, checkpoint_ns: str
+    ) -> str:
+        """Create a cached key for shallow checkpoints using only thread_id and checkpoint_ns."""
+        cache_key = f"shallow_checkpoint:{thread_id}:{checkpoint_ns}"
+        if cache_key not in self._key_cache:
+            self._key_cache[cache_key] = self._separator.join(
+                [self._checkpoint_prefix, thread_id, checkpoint_ns]
+            )
+        return self._key_cache[cache_key]
+
     @staticmethod
     def _make_shallow_redis_checkpoint_key(thread_id: str, checkpoint_ns: str) -> str:
         """Create a key for shallow checkpoints using only thread_id and checkpoint_ns."""
         return REDIS_KEY_SEPARATOR.join([CHECKPOINT_PREFIX, thread_id, checkpoint_ns])
+
+    def _make_redis_checkpoint_writes_key_cached(
+        self,
+        thread_id: str,
+        checkpoint_ns: str,
+        checkpoint_id: str,
+        task_id: str,
+        idx: Optional[int],
+    ) -> str:
+        """Create a cached key for checkpoint writes."""
+        cache_key = (
+            f"writes:{thread_id}:{checkpoint_ns}:{checkpoint_id}:{task_id}:{idx}"
+        )
+        if cache_key not in self._key_cache:
+            self._key_cache[cache_key] = (
+                BaseRedisSaver._make_redis_checkpoint_writes_key(
+                    thread_id, checkpoint_ns, checkpoint_id, task_id, idx
+                )
+            )
+        return self._key_cache[cache_key]
+
+    @staticmethod
+    def _make_shallow_redis_checkpoint_writes_key_pattern(
+        thread_id: str, checkpoint_ns: str
+    ) -> str:
+        """Create a pattern to match all writes keys for a thread and namespace."""
+        return (
+            REDIS_KEY_SEPARATOR.join(
+                [
+                    CHECKPOINT_WRITE_PREFIX,
+                    str(to_storage_safe_id(thread_id)),
+                    to_storage_safe_str(checkpoint_ns),
+                ]
+            )
+            + ":*"
+        )
 
     @staticmethod
     def _make_shallow_redis_checkpoint_blob_key_pattern(
@@ -815,18 +870,16 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             + ":*"
         )
 
-    @staticmethod
-    def _make_shallow_redis_checkpoint_writes_key_pattern(
-        thread_id: str, checkpoint_ns: str
+    def _make_shallow_redis_checkpoint_blob_key_cached(
+        self, thread_id: str, checkpoint_ns: str, channel: str, version: str
     ) -> str:
-        """Create a pattern to match all writes keys for a thread and namespace."""
-        return (
-            REDIS_KEY_SEPARATOR.join(
-                [
-                    CHECKPOINT_WRITE_PREFIX,
-                    str(to_storage_safe_id(thread_id)),
-                    to_storage_safe_str(checkpoint_ns),
-                ]
+        """Create a cached key for checkpoint blobs."""
+        cache_key = f"shallow_blob:{thread_id}:{checkpoint_ns}:{channel}:{version}"
+        if cache_key not in self._key_cache:
+            if len(self._key_cache) >= self._key_cache_max_size:
+                # Remove oldest entry when cache is full
+                self._key_cache.pop(next(iter(self._key_cache)))
+            self._key_cache[cache_key] = BaseRedisSaver._make_redis_checkpoint_blob_key(
+                thread_id, checkpoint_ns, channel, version
             )
-            + ":*"
-        )
+        return self._key_cache[cache_key]

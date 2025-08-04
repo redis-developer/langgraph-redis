@@ -3,7 +3,6 @@ Test for issue #40 - Error when comparing numeric version with Tag type.
 """
 
 import pytest
-from langgraph.checkpoint.base import empty_checkpoint
 from redis import Redis
 from redisvl.query.filter import Tag
 

@@ -5,10 +5,9 @@ with the semantic search functionality.
 """
 
 import unittest.mock as mock
-from typing import Any, Dict, List, Optional, Tuple, TypedDict
+from typing import Any, Dict, List, TypedDict
 
 import numpy as np
-import pytest
 
 from langgraph.checkpoint.redis.base import (
     CHECKPOINT_WRITE_PREFIX,

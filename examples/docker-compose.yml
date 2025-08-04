@@ -8,6 +8,7 @@ services:
       - "8888:8888"
     volumes:
       - ./:/home/jupyter/workspace/examples
+      - ../:/home/jupyter/workspace/langgraph-checkpoint-redis
     environment:
       - REDIS_URL=redis://redis:6379
       - USER_AGENT=LangGraphRedisJupyterNotebooks/0.0.4

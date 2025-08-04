@@ -4,7 +4,7 @@ import asyncio
 import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import Any, AsyncGenerator, Dict, List, Optional
+from typing import AsyncGenerator, Dict
 
 import pytest
 from langchain_core.runnables import RunnableConfig
@@ -123,6 +123,18 @@ class MockRedisSubsystem:
     def __init__(self, real_subsystem, parent_mock):
         self.real_subsystem = real_subsystem
         self.parent_mock = parent_mock
+
+    async def __aenter__(self):
+        """Support async context manager protocol."""
+        if hasattr(self.real_subsystem, "__aenter__"):
+            await self.real_subsystem.__aenter__()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Support async context manager protocol."""
+        if hasattr(self.real_subsystem, "__aexit__"):
+            return await self.real_subsystem.__aexit__(exc_type, exc_val, exc_tb)
+        return False
 
     def __getattr__(self, name):
         attr = getattr(self.real_subsystem, name)
@@ -331,8 +343,14 @@ async def test_aput_interruption_regular_saver(redis_url: str) -> None:
         interrupt_after_count=1,
     ) as saver:
         # Try to save checkpoint, expect interruption
-        with pytest.raises(InterruptionError):
+        # The InterruptionError is wrapped by RedisVL as RedisVLError
+        from redisvl.exceptions import RedisVLError
+
+        with pytest.raises(RedisVLError) as exc_info:
             await saver.aput(config, checkpoint, metadata, new_versions)
+
+        # Verify it was actually an interruption
+        assert "Simulated interruption during Pipeline.execute" in str(exc_info.value)
 
         # Verify that the checkpoint data is incomplete or inconsistent
         real_redis = Redis.from_url(redis_url)
@@ -365,6 +383,7 @@ async def test_aput_interruption_shallow_saver(redis_url: str) -> None:
         interrupt_after_count=1,
     ) as saver:
         # Try to save checkpoint, expect interruption
+        # Shallow saver uses direct pipeline operations, so InterruptionError isn't wrapped
         with pytest.raises(InterruptionError):
             await saver.aput(config, checkpoint, metadata, new_versions)
 
@@ -447,8 +466,14 @@ async def test_recovery_after_interruption(redis_url: str) -> None:
         interrupt_after_count=1,
     ) as saver:
         # Try to save checkpoint, expect interruption
-        with pytest.raises(InterruptionError):
+        # The InterruptionError is wrapped by RedisVL as RedisVLError
+        from redisvl.exceptions import RedisVLError
+
+        with pytest.raises(RedisVLError) as exc_info:
             await saver.aput(config, checkpoint, metadata, new_versions)
+
+        # Verify it was actually an interruption
+        assert "Simulated interruption during Pipeline.execute" in str(exc_info.value)
 
     # Step 2: Try to save again with a new saver (simulate process restart after interruption)
     async with AsyncRedisSaver.from_conn_string(redis_url) as new_saver:
@@ -468,11 +493,18 @@ async def test_recovery_after_interruption(redis_url: str) -> None:
 
 @pytest.mark.asyncio
 async def test_graph_simulation_with_interruption(redis_url: str) -> None:
-    """Test a more complete scenario simulating a graph execution with interruption."""
-    # Create a mock graph execution
-    thread_id = f"test-{uuid.uuid4()}"
+    """Test a realistic graph execution scenario with interruption during checkpoint updates.
 
-    # Config without checkpoint_id to simulate first run
+    This simulates a LangGraph workflow where:
+    1. An initial checkpoint is saved
+    2. The graph starts processing and tries to save an updated checkpoint
+    3. An interruption occurs during the update
+    4. The system recovers and completes the checkpoint save
+    """
+    # Create test thread ID
+    thread_id = f"test-graph-{uuid.uuid4()}"
+
+    # Step 1: Save initial checkpoint (graph start state)
     initial_config = {
         "configurable": {
             "thread_id": thread_id,
@@ -480,67 +512,347 @@ async def test_graph_simulation_with_interruption(redis_url: str) -> None:
         }
     }
 
-    # Create initial checkpoint
     initial_checkpoint = {
         "id": str(uuid.uuid4()),
         "ts": str(int(time.time())),
         "v": 1,
-        "channel_values": {"messages": []},
-        "channel_versions": {"messages": "initial"},
+        "channel_values": {"messages": [], "state": {"status": "initialized"}},
+        "channel_versions": {"messages": "0", "state": "0"},
         "versions_seen": {},
         "pending_sends": [],
     }
 
-    # First save the initial checkpoint
+    # Save initial checkpoint successfully
     async with AsyncRedisSaver.from_conn_string(redis_url) as saver:
-        next_config = await saver.aput(
+        first_config = await saver.aput(
             initial_config,
             initial_checkpoint,
-            {"source": "initial", "step": 0},
-            {"messages": "initial"},
+            {"source": "initialize", "step": 0},
+            initial_checkpoint["channel_versions"],
         )
 
-        # Verify initial checkpoint was saved
-        initial_result = await saver.aget(initial_config)
-        assert initial_result is not None
+        # Verify initial state
+        saved_initial = await saver.aget(initial_config)
+        assert saved_initial is not None
+        assert saved_initial["id"] == initial_checkpoint["id"]
+        assert saved_initial["channel_values"]["state"]["status"] == "initialized"
 
-        # Now prepare update with interruption
-        second_checkpoint = {
+    # Step 2: Simulate graph processing with interruption
+    # Create an updated checkpoint after user input
+    user_checkpoint = {
+        "id": str(uuid.uuid4()),
+        "ts": str(int(time.time())),
+        "v": 1,
+        "channel_values": {
+            "messages": [("human", "What's the weather in SF?")],
+            "state": {"status": "processing", "location": "San Francisco"},
+        },
+        "channel_versions": {"messages": "1", "state": "1"},
+        "versions_seen": initial_checkpoint["channel_versions"],
+        "pending_sends": [],
+    }
+
+    # Try to save with interruption
+    async with create_interruptible_saver(
+        redis_url,
+        AsyncRedisSaver,
+        interrupt_on="Pipeline.execute",
+        interrupt_after_count=1,
+    ) as interrupted_saver:
+        from redisvl.exceptions import RedisVLError
+
+        # Attempt to save checkpoint - should be interrupted
+        with pytest.raises(RedisVLError) as exc_info:
+            await interrupted_saver.aput(
+                first_config,
+                user_checkpoint,
+                {"source": "user_input", "step": 1},
+                user_checkpoint["channel_versions"],
+            )
+
+        assert "Simulated interruption" in str(exc_info.value)
+
+        # Reset the interruption counter so we can verify the state
+        # The mock interceptor counts pipeline operations cumulatively,
+        # and increments before checking, so we need to set to -10 to ensure
+        # the next few operations won't trigger interruption
+        if hasattr(interrupted_saver._redis, "operations_count"):
+            interrupted_saver._redis.operations_count["Pipeline.execute"] = -10
+
+        # Verify the checkpoint was NOT saved (still have initial state)
+        check_result = await interrupted_saver.aget(first_config)
+        assert check_result is not None
+        assert (
+            check_result["id"] == initial_checkpoint["id"]
+        )  # Still the initial checkpoint
+        assert check_result["channel_values"]["state"]["status"] == "initialized"
+
+    # Step 3: Simulate recovery after interruption
+    # In a real scenario, this would be after the process restarts
+    async with AsyncRedisSaver.from_conn_string(redis_url) as recovery_saver:
+        # Need to get the actual first config that includes checkpoint_id
+        # First, get the saved initial checkpoint to get its ID
+        initial_result = await recovery_saver.aget(initial_config)
+        first_config = {
+            "configurable": {
+                "thread_id": thread_id,
+                "checkpoint_ns": "",
+                "checkpoint_id": initial_result["id"],
+            }
+        }
+
+        # Retry saving the user checkpoint
+        second_config = await recovery_saver.aput(
+            first_config,
+            user_checkpoint,
+            {"source": "user_input", "step": 1},
+            user_checkpoint["channel_versions"],
+        )
+
+        # Verify the checkpoint was saved correctly this time
+        # Note: aget returns the latest checkpoint, not a specific one by ID
+        saved_user = await recovery_saver.aget(initial_config)
+        assert saved_user is not None
+        assert saved_user["id"] == user_checkpoint["id"]
+        assert saved_user["channel_values"]["state"]["status"] == "processing"
+        assert len(saved_user["channel_values"]["messages"]) == 1
+
+        # Step 4: Continue with AI response (complete workflow)
+        ai_checkpoint = {
             "id": str(uuid.uuid4()),
             "ts": str(int(time.time())),
             "v": 1,
-            "channel_values": {"messages": [("human", "What's the weather?")]},
-            "channel_versions": {"messages": "1"},
-            "versions_seen": {},
+            "channel_values": {
+                "messages": [
+                    ("human", "What's the weather in SF?"),
+                    ("ai", "I'll check the weather in San Francisco for you."),
+                    ("tool", "weather_api.get(location='San Francisco')"),
+                    ("ai", "The weather in San Francisco is currently 68°F and sunny."),
+                ],
+                "state": {
+                    "status": "completed",
+                    "location": "San Francisco",
+                    "weather": "68°F, sunny",
+                },
+            },
+            "channel_versions": {"messages": "2", "state": "2"},
+            "versions_seen": user_checkpoint["channel_versions"],
             "pending_sends": [],
         }
 
-        # Replace Redis client with mock that will interrupt
-        original_redis = saver._redis
-        mock_redis = MockRedis(original_redis, "Pipeline.execute")
-        mock_redis.interrupt_after_count["Pipeline.execute"] = 1
-        saver._redis = mock_redis
+        # Save final state
+        final_config = await recovery_saver.aput(
+            second_config,
+            ai_checkpoint,
+            {"source": "ai_response", "step": 2},
+            ai_checkpoint["channel_versions"],
+        )
 
-        # Try to update, expect interruption
-        with pytest.raises(InterruptionError):
-            await saver.aput(
-                next_config,
-                second_checkpoint,
-                {"source": "update", "step": 1},
-                {"messages": "1"},
+        # Verify complete workflow state
+        final_result = await recovery_saver.aget(initial_config)
+        assert final_result is not None
+        assert final_result["id"] == ai_checkpoint["id"]
+        assert final_result["channel_values"]["state"]["status"] == "completed"
+        assert len(final_result["channel_values"]["messages"]) == 4
+
+        # Test listing checkpoints - should have all 3 checkpoints
+        list_config = {
+            "configurable": {
+                "thread_id": thread_id,
+                "checkpoint_ns": "",
+            }
+        }
+        checkpoints = []
+        async for checkpoint_tuple in recovery_saver.alist(list_config):
+            checkpoints.append(checkpoint_tuple)
+
+        # Redis should store all checkpoints like Postgres/MongoDB
+        assert len(checkpoints) == 3
+
+        # Get checkpoint IDs for verification
+        checkpoint_ids = {cp.checkpoint["id"] for cp in checkpoints}
+        assert ai_checkpoint["id"] in checkpoint_ids
+        assert user_checkpoint["id"] in checkpoint_ids
+        assert initial_checkpoint["id"] in checkpoint_ids
+
+        # Find the final checkpoint
+        final_checkpoint = None
+        for cp in checkpoints:
+            if cp.checkpoint["id"] == ai_checkpoint["id"]:
+                final_checkpoint = cp
+                break
+
+        assert final_checkpoint is not None
+        assert (
+            final_checkpoint.checkpoint["channel_values"]["state"]["status"]
+            == "completed"
+        )
+        assert len(final_checkpoint.checkpoint["channel_values"]["messages"]) == 4
+        assert final_checkpoint.metadata["step"] == 2
+        assert final_checkpoint.metadata["source"] == "ai_response"
+
+
+@pytest.mark.asyncio
+async def test_graph_simulation_with_interruption_shallow(redis_url: str) -> None:
+    """Test a realistic graph execution scenario with interruption for shallow checkpointers.
+
+    Shallow checkpointers only keep the most recent checkpoint, so we test
+    that the latest state is preserved correctly after interruption and recovery.
+    """
+    # Create test thread ID
+    thread_id = f"test-graph-shallow-{uuid.uuid4()}"
+
+    # Step 1: Save initial checkpoint (graph start state)
+    initial_config = {
+        "configurable": {
+            "thread_id": thread_id,
+            "checkpoint_ns": "",
+        }
+    }
+
+    initial_checkpoint = {
+        "id": str(uuid.uuid4()),
+        "ts": str(int(time.time())),
+        "v": 1,
+        "channel_values": {"messages": [], "state": {"status": "initialized"}},
+        "channel_versions": {"messages": "0", "state": "0"},
+        "versions_seen": {},
+        "pending_sends": [],
+    }
+
+    # Save initial checkpoint successfully
+    async with AsyncShallowRedisSaver.from_conn_string(redis_url) as saver:
+        first_config = await saver.aput(
+            initial_config,
+            initial_checkpoint,
+            {"source": "initialize", "step": 0},
+            initial_checkpoint["channel_versions"],
+        )
+
+        # Verify initial state
+        saved_initial = await saver.aget(initial_config)
+        assert saved_initial is not None
+        assert saved_initial["id"] == initial_checkpoint["id"]
+        assert saved_initial["channel_values"]["state"]["status"] == "initialized"
+
+    # Step 2: Simulate graph processing with interruption
+    # Create an updated checkpoint after user input
+    user_checkpoint = {
+        "id": str(uuid.uuid4()),
+        "ts": str(int(time.time())),
+        "v": 1,
+        "channel_values": {
+            "messages": [("human", "What's the weather in SF?")],
+            "state": {"status": "processing", "location": "San Francisco"},
+        },
+        "channel_versions": {"messages": "1", "state": "1"},
+        "versions_seen": initial_checkpoint["channel_versions"],
+        "pending_sends": [],
+    }
+
+    # Try to save with interruption
+    async with create_interruptible_saver(
+        redis_url,
+        AsyncShallowRedisSaver,
+        interrupt_on="Pipeline.execute",
+        interrupt_after_count=1,
+    ) as interrupted_saver:
+        # Attempt to save checkpoint - should be interrupted
+        with pytest.raises(InterruptionError) as exc_info:
+            await interrupted_saver.aput(
+                first_config,
+                user_checkpoint,
+                {"source": "user_input", "step": 1},
+                user_checkpoint["channel_versions"],
             )
 
-        # Restore original Redis for verification
-        saver._redis = original_redis
+        assert "Simulated interruption" in str(exc_info.value)
 
-        # Check checkpoint state - with transaction handling, we expect to see the initial checkpoint
-        # since the transaction should have been rolled back
-        current = await saver.aget(next_config)
+        # Reset the interruption counter so we can verify the state
+        # The mock interceptor counts pipeline operations cumulatively,
+        # and increments before checking, so we need to set to -10 to ensure
+        # the next few operations won't trigger interruption
+        if hasattr(interrupted_saver._redis, "operations_count"):
+            interrupted_saver._redis.operations_count["Pipeline.execute"] = -10
 
-        # With transaction handling, we should still see the initial checkpoint
+        # Verify the checkpoint was NOT saved (still have initial state)
+        check_result = await interrupted_saver.aget(first_config)
+        assert check_result is not None
         assert (
-            current and current["id"] == initial_checkpoint["id"]
-        ), "Should still have initial checkpoint after transaction abort"
+            check_result["id"] == initial_checkpoint["id"]
+        )  # Still the initial checkpoint
+        assert check_result["channel_values"]["state"]["status"] == "initialized"
 
-        # Clean up
-        await original_redis.flushall()
+    # Step 3: Simulate recovery after interruption
+    # In a real scenario, this would be after the process restarts
+    async with AsyncShallowRedisSaver.from_conn_string(redis_url) as recovery_saver:
+        # Retry saving the user checkpoint
+        second_config = await recovery_saver.aput(
+            first_config,
+            user_checkpoint,
+            {"source": "user_input", "step": 1},
+            user_checkpoint["channel_versions"],
+        )
+
+        # Verify the checkpoint was saved correctly this time
+        # Note: aget returns the latest checkpoint, not a specific one by ID
+        saved_user = await recovery_saver.aget(initial_config)
+        assert saved_user is not None
+        assert saved_user["id"] == user_checkpoint["id"]
+        assert saved_user["channel_values"]["state"]["status"] == "processing"
+        assert len(saved_user["channel_values"]["messages"]) == 1
+
+        # Step 4: Continue with AI response (complete workflow)
+        ai_checkpoint = {
+            "id": str(uuid.uuid4()),
+            "ts": str(int(time.time())),
+            "v": 1,
+            "channel_values": {
+                "messages": [
+                    ("human", "What's the weather in SF?"),
+                    ("ai", "I'll check the weather in San Francisco for you."),
+                    ("tool", "weather_api.get(location='San Francisco')"),
+                    ("ai", "The weather in San Francisco is currently 68°F and sunny."),
+                ],
+                "state": {
+                    "status": "completed",
+                    "location": "San Francisco",
+                    "weather": "68°F, sunny",
+                },
+            },
+            "channel_versions": {"messages": "2", "state": "2"},
+            "versions_seen": user_checkpoint["channel_versions"],
+            "pending_sends": [],
+        }
+
+        # Save final state
+        final_config = await recovery_saver.aput(
+            second_config,
+            ai_checkpoint,
+            {"source": "ai_response", "step": 2},
+            ai_checkpoint["channel_versions"],
+        )
+
+        # Verify complete workflow state
+        final_result = await recovery_saver.aget(initial_config)
+        assert final_result is not None
+        assert final_result["id"] == ai_checkpoint["id"]
+        assert final_result["channel_values"]["state"]["status"] == "completed"
+        assert len(final_result["channel_values"]["messages"]) == 4
+
+        # Test listing checkpoints - shallow saver only keeps the latest
+        # Use config without checkpoint_id to list all checkpoints for the thread
+        list_config = {
+            "configurable": {
+                "thread_id": thread_id,
+                "checkpoint_ns": "",
+            }
+        }
+        checkpoints = []
+        async for checkpoint_tuple in recovery_saver.alist(list_config):
+            checkpoints.append(checkpoint_tuple)
+
+        assert len(checkpoints) == 1
+        # Should only have the latest checkpoint
+        assert checkpoints[0].checkpoint["id"] == ai_checkpoint["id"]
+        assert checkpoints[0].metadata["step"] == 2

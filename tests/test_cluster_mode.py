@@ -3,11 +3,9 @@
 import json
 from datetime import datetime, timezone
 from typing import Any
-from unittest import mock
 from unittest.mock import MagicMock
 
 import pytest
-from langgraph.checkpoint.base import Checkpoint, CheckpointMetadata
 from langgraph.store.base import GetOp, ListNamespacesOp, PutOp, SearchOp
 from redis import Redis
 from redis.cluster import RedisCluster as SyncRedisCluster

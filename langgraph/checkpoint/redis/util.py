@@ -11,7 +11,7 @@ including handling bytes vs string responses depending on how the Redis client i
 configured with decode_responses.
 """
 
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import Any
 
 EMPTY_STRING_SENTINEL = "__empty__"
 EMPTY_ID_SENTINEL = "00000000-0000-0000-0000-000000000000"

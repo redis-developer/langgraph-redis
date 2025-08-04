@@ -4,8 +4,6 @@ This test makes sure that the key parsing fix works with the semantic search
 notebook by simulating its exact workflow.
 """
 
-import unittest.mock as mock
-
 import pytest
 
 from langgraph.checkpoint.redis.base import (

@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "langgraph-checkpoint-redis"
-version = "0.0.8"
+version = "0.1.0"
 description = "Redis implementation of the LangGraph agent checkpoint saver and store."
 authors = ["Redis Inc. <applied.ai@redis.com>"]
 license = "MIT"
@@ -8,12 +8,12 @@ readme = "README.md"
 repository = "https://www.github.com/redis-developer/langgraph-redis"
 keywords = ["ai", "redis", "redis-client", "vector-database", "agents", "langgraph", "langchain"]
 classifiers = [
-  "Programming Language :: Python :: 3.9",
-  "Programming Language :: Python :: 3.10",
-  "Programming Language :: Python :: 3.11",
-  "Programming Language :: Python :: 3.12",
-  "Programming Language :: Python :: 3.13",
-  "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "License :: OSI Approved :: MIT License",
 ]
 packages = [{ include = "langgraph" }]
 
@@ -21,6 +21,9 @@ packages = [{ include = "langgraph" }]
 python = ">=3.9,<3.14"
 langgraph-checkpoint = ">=2.0.26"
 redisvl = ">=0.5.1,<1.0.0"
+redis = "^6.2.0"
+orjson = "^3.9.0"
+tomli = { version = "^2.0.1", python = "<3.11" }
 
 [tool.poetry.group.dev.dependencies]
 langgraph = ">=0.3.0,<0.5.0"
@@ -29,7 +32,7 @@ codespell = "^2.2.0"
 pytest = "^7.2.1"
 anyio = "^4.4.0"
 pytest-asyncio = "^0.21.1"
-pytest-xdist = {extras = ["psutil"], version = "^3.6.1"}
+pytest-xdist = { extras = ["psutil"], version = "^3.6.1" }
 pytest-mock = "^3.11.1"
 mypy = ">=1.11.0,<2"
 aioconsole = "^0.8.1"
@@ -37,6 +40,11 @@ langchain-openai = "^0.3.2"
 testcontainers = "^4.9.1"
 isort = "^6.0.0"
 cryptography = { version = ">=44.0.1", markers = "python_version > '3.9.1'" }
+coverage = "^7.6.0"
+pytest-cov = "^6.0.0"
+vulture = "^2.13"
+pympler = "^1.1"
+aiofiles = "^24.1.0"
 
 [tool.pytest.ini_options]
 # --strict-markers will raise errors on unknown marks.
@@ -57,6 +65,10 @@ check-lint = "scripts:check_lint"
 check-mypy = "scripts:check_mypy"
 test = "scripts:test"
 test-verbose = "scripts:test_verbose"
+test-coverage = "scripts:test_coverage"
+coverage-report = "scripts:coverage_report"
+coverage-html = "scripts:coverage_html"
+find-dead-code = "scripts:find_dead_code"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
@@ -90,3 +102,39 @@ warn_redundant_casts = true
 allow_redefinition = true
 ignore_missing_imports = true
 disable_error_code = "typeddict-item, return-value, union-attr, operator, assignment"
+
+[tool.coverage.run]
+source = ["langgraph"]
+omit = [
+    "*/tests/*",
+    "*/test_*",
+    "*/__pycache__/*",
+    "*/scripts.py",
+    "*/examples/*"
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if self.debug:",
+    "if settings.DEBUG",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if 0:",
+    "if __name__ == .__main__.:",
+    "class .*\\bProtocol\\):",
+    "@(abc\\.)?abstractmethod"
+]
+show_missing = true
+skip_covered = false
+skip_empty = true
+
+[tool.coverage.html]
+directory = "htmlcov"
+
+[tool.vulture]
+paths = ["langgraph"]
+exclude = ["*test*", "*example*"]
+min_confidence = 80
+sort_by_size = true
