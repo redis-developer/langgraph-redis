@@ -1155,7 +1155,7 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
         thread_id: str,
         checkpoint_ns: str,
         parent_checkpoint_id: str,
-    ) -> List[Tuple[str, bytes]]:
+    ) -> List[Tuple[str, Union[str, bytes]]]:
         """Load pending sends for a parent checkpoint.
 
         Args:
@@ -1437,7 +1437,7 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
         thread_id: str,
         checkpoint_ns: str,
         parent_checkpoint_id: str,
-    ) -> List[Tuple[str, bytes]]:
+    ) -> List[Tuple[str, Union[str, bytes]]]:
         """Load pending sends for a parent checkpoint with pre-computed registry check."""
         if not parent_checkpoint_id:
             return []

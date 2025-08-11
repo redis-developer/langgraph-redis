@@ -35,6 +35,147 @@ def _saver(redis_url: str):
         del saver
 
 
+def test_issue_83_command_resume_no_warning(redis_url: str) -> None:
+    """Test that Command(resume={...}) doesn't cause 'invalid packet type' warning (issue #83).
+
+    The user reported that Command(resume={'interrupt_id': {'some': 'result'}})
+    caused warning: "Ignoring invalid packet type <class 'dict'> in pending sends"
+    This test verifies our fix prevents that warning.
+    """
+    import warnings
+
+    from langgraph.constants import TASKS
+
+    with _saver(redis_url) as saver:
+        # Create interrupted checkpoint
+        interrupted_config = {
+            "configurable": {
+                "thread_id": "test-thread-83",
+                "checkpoint_ns": "",
+                "checkpoint_id": "interrupted-checkpoint",
+            }
+        }
+
+        interrupted_checkpoint = {
+            "v": 1,
+            "ts": "2024-01-01T00:00:00+00:00",
+            "id": "interrupted-checkpoint",
+            "channel_values": {"messages": ["before interrupt"]},
+            "channel_versions": {},
+            "versions_seen": {},
+            "pending_sends": [],
+        }
+
+        metadata = {"source": "loop", "step": 1, "writes": {}}
+
+        # Save the interrupted checkpoint
+        saver.put(interrupted_config, interrupted_checkpoint, metadata, {})
+
+        # Simulate Command(resume={'interrupt_id': {'some': 'result'}})
+        resume_data = {"interrupt_id": {"some": "result"}}
+        saver.put_writes(
+            interrupted_config,
+            [(TASKS, resume_data)],  # This puts a dict into TASKS
+            task_id="resume_task",
+        )
+
+        # Create resumed checkpoint with parent reference
+        resumed_config = {
+            "configurable": {
+                "thread_id": "test-thread-83",
+                "checkpoint_ns": "",
+                "checkpoint_id": "resumed-checkpoint",
+            }
+        }
+
+        resumed_checkpoint = {
+            "v": 1,
+            "ts": "2024-01-01T00:01:00+00:00",
+            "id": "resumed-checkpoint",
+            "channel_values": {"messages": ["after resume"]},
+            "channel_versions": {},
+            "versions_seen": {},
+            "pending_sends": [],
+        }
+
+        resumed_metadata = {
+            "source": "loop",
+            "step": 2,
+            "writes": {},
+            "parent_config": interrupted_config,
+        }
+
+        saver.put(resumed_config, resumed_checkpoint, resumed_metadata, {})
+
+        # Load resumed checkpoint - check for warning
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+
+            result = saver.get_tuple(resumed_config)
+
+            # Check if we get the warning about invalid packet type
+            dict_warnings = [
+                warning
+                for warning in w
+                if "Ignoring invalid packet type" in str(warning.message)
+                and "dict" in str(warning.message)
+            ]
+
+            # Our fix should prevent this warning
+            assert len(dict_warnings) == 0, f"Got warning: {dict_warnings}"
+
+        assert result is not None
+        assert result.checkpoint["id"] == "resumed-checkpoint"
+
+
+def test_issue_83_pending_sends_type_compatibility(redis_url: str) -> None:
+    """Test that pending_sends work with string blobs from Redis JSON (issue #83).
+
+    Issue #83 was caused by type mismatch where _load_pending_sends returned
+    List[Tuple[str, Union[str, bytes]]] but was annotated as List[Tuple[str, bytes]].
+    This test verifies the fix works correctly.
+    """
+    with _saver(redis_url) as saver:
+        checkpoint_dict = {
+            "v": 1,
+            "ts": "2024-01-01T00:00:00+00:00",
+            "id": "test-checkpoint",
+            "channel_versions": {},
+            "versions_seen": {},
+        }
+
+        channel_values = {}
+
+        # Test with string blobs (what Redis JSON returns)
+        pending_sends_with_strings = [
+            ("json", '{"test": "value"}'),  # String blob from Redis JSON
+        ]
+
+        # This should work without type errors
+        result = saver._load_checkpoint(
+            checkpoint_dict, channel_values, pending_sends_with_strings
+        )
+
+        assert "pending_sends" in result
+        assert len(result["pending_sends"]) == 1
+        assert result["pending_sends"][0] == {"test": "value"}
+
+        # Test JsonPlusRedisSerializer compatibility
+        test_data = {"some": "result", "user_input": "continue"}
+
+        # Serialize
+        type_str, blob = saver.serde.dumps_typed(test_data)
+        assert isinstance(type_str, str)
+        assert isinstance(blob, str)  # JsonPlusRedisSerializer returns strings
+
+        # Deserialize - should work with both string and bytes
+        result1 = saver.serde.loads_typed((type_str, blob))
+        result2 = saver.serde.loads_typed((type_str, blob.encode()))  # bytes version
+
+        assert result1 == test_data
+        assert result2 == test_data
+
+
 def test_load_blobs_method(redis_url: str) -> None:
     """Test _load_blobs method with various scenarios.
 

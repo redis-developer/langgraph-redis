@@ -541,7 +541,7 @@ class AsyncRedisSaver(
         if doc_parent_checkpoint_id:
             results = await asyncio.gather(*tasks)
             channel_values: Dict[str, Any] = results[0]
-            pending_sends: List[Tuple[str, bytes]] = results[1]
+            pending_sends: List[Tuple[str, Union[str, bytes]]] = results[1]
             pending_writes: List[PendingWrite] = results[2]
         else:
             # Only channel_values and pending_writes tasks
@@ -772,7 +772,7 @@ class AsyncRedisSaver(
             parent_checkpoint_id = doc_data["parent_checkpoint_id"]
 
             # Get pending_sends from batch results
-            pending_sends: List[Tuple[str, bytes]] = []
+            pending_sends: List[Tuple[str, Union[str, bytes]]] = []
             if parent_checkpoint_id:
                 batch_key = (thread_id, checkpoint_ns, parent_checkpoint_id)
                 pending_sends = pending_sends_map.get(batch_key, [])
@@ -1443,7 +1443,7 @@ class AsyncRedisSaver(
 
     async def _aload_pending_sends(
         self, thread_id: str, checkpoint_ns: str = "", parent_checkpoint_id: str = ""
-    ) -> List[Tuple[str, bytes]]:
+    ) -> List[Tuple[str, Union[str, bytes]]]:
         """Load pending sends for a parent checkpoint.
 
         Args:
@@ -1640,7 +1640,7 @@ class AsyncRedisSaver(
 
     async def _abatch_load_pending_sends(
         self, batch_keys: List[Tuple[str, str, str]]
-    ) -> Dict[Tuple[str, str, str], List[Tuple[str, bytes]]]:
+    ) -> Dict[Tuple[str, str, str], List[Tuple[str, Union[str, bytes]]]]:
         """Batch load pending sends for multiple parent checkpoints.
 
         Args:
