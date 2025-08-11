@@ -675,12 +675,11 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
 
         # Extract type and blob pairs
         # Handle both direct attribute access and JSON path access
+        # Filter out documents where blob is None (similar to RedisSaver in __init__.py)
         return [
-            (
-                getattr(doc, "type", ""),
-                getattr(doc, "$.blob", getattr(doc, "blob", b"")),
-            )
+            (getattr(doc, "type", ""), blob)
             for doc in sorted_writes
+            if (blob := getattr(doc, "$.blob", getattr(doc, "blob", None))) is not None
         ]
 
     def _make_shallow_redis_checkpoint_key_cached(

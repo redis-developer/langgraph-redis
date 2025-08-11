@@ -646,12 +646,11 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
 
         # Extract type and blob pairs
         # Handle both direct attribute access and JSON path access
+        # Filter out documents where blob is None (similar to AsyncRedisSaver in aio.py)
         return [
-            (
-                getattr(doc, "type", ""),
-                getattr(doc, "$.blob", getattr(doc, "blob", b"")),
-            )
+            (getattr(doc, "type", ""), blob)
             for doc in sorted_writes
+            if (blob := getattr(doc, "$.blob", getattr(doc, "blob", None))) is not None
         ]
 
     async def _aload_pending_writes(
