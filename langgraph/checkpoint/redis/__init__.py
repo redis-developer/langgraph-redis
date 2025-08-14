@@ -35,6 +35,11 @@ from langgraph.checkpoint.redis.base import (
     BaseRedisSaver,
 )
 from langgraph.checkpoint.redis.key_registry import SyncCheckpointKeyRegistry
+from langgraph.checkpoint.redis.message_exporter import (
+    LangChainRecipe,
+    MessageExporter,
+    MessageRecipe,
+)
 from langgraph.checkpoint.redis.shallow import ShallowRedisSaver
 from langgraph.checkpoint.redis.util import (
     EMPTY_ID_SENTINEL,
@@ -1652,4 +1657,7 @@ __all__ = [
     "BaseRedisSaver",
     "ShallowRedisSaver",
     "AsyncShallowRedisSaver",
+    "MessageExporter",
+    "LangChainRecipe",
+    "MessageRecipe",
 ]
