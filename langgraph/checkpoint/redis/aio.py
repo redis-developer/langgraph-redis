@@ -540,13 +540,13 @@ class AsyncRedisSaver(
         # Execute all tasks in parallel - pending_sends is optional
         if doc_parent_checkpoint_id:
             results = await asyncio.gather(*tasks)
-            channel_values: Dict[str, Any] = results[0]
+            channel_values: Dict[str, Any] = self._recursive_deserialize(results[0])
             pending_sends: List[Tuple[str, Union[str, bytes]]] = results[1]
             pending_writes: List[PendingWrite] = results[2]
         else:
             # Only channel_values and pending_writes tasks
             results = await asyncio.gather(*tasks)
-            channel_values = results[0]
+            channel_values = self._recursive_deserialize(results[0])
             pending_sends = []
             pending_writes = results[1]
 
