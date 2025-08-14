@@ -1,5 +1,6 @@
 import base64
 import binascii
+import logging
 import random
 from abc import abstractmethod
 from typing import Any, Dict, Generic, List, Optional, Sequence, Tuple, Union, cast
@@ -26,6 +27,8 @@ from langgraph.checkpoint.redis.util import (
 
 from .jsonplus_redis import JsonPlusRedisSerializer
 from .types import IndexType, RedisClientType
+
+logger = logging.getLogger(__name__)
 
 REDIS_KEY_SEPARATOR = ":"
 CHECKPOINT_PREFIX = "checkpoint"
@@ -305,25 +308,78 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
 
         When channel values are stored inline in the checkpoint, they're in their
         serialized form. This method deserializes them back to their original types.
+
+        This specifically handles LangChain message objects that may be stored in their
+        serialized format: {'lc': 1, 'type': 'constructor', 'id': [...], 'kwargs': {...}}
+        and ensures they are properly reconstructed as message objects.
         """
         if not channel_values:
             return {}
 
-        # Apply recursive deserialization to handle nested structures and LangChain objects
-        return self._recursive_deserialize(channel_values)
+        try:
+            # Apply recursive deserialization to handle nested structures and LangChain objects
+            return self._recursive_deserialize(channel_values)
+        except Exception as e:
+            logger.warning(
+                f"Error deserializing channel values, attempting recovery: {e}"
+            )
+            # Attempt to recover by processing each channel individually
+            recovered = {}
+            for key, value in channel_values.items():
+                try:
+                    recovered[key] = self._recursive_deserialize(value)
+                except Exception as inner_e:
+                    logger.error(
+                        f"Failed to deserialize channel '{key}': {inner_e}. "
+                        f"Value will be returned as-is."
+                    )
+                    recovered[key] = value
+            return recovered
 
     def _recursive_deserialize(self, obj: Any) -> Any:
-        """Recursively deserialize LangChain objects and nested structures."""
+        """Recursively deserialize LangChain objects and nested structures.
+
+        This method specifically handles the deserialization of LangChain message objects
+        that may be stored in their serialized format to prevent MESSAGE_COERCION_FAILURE.
+
+        Args:
+            obj: The object to deserialize, which may be a dict, list, or primitive.
+
+        Returns:
+            The deserialized object, with LangChain objects properly reconstructed.
+        """
         if isinstance(obj, dict):
             # Check if this is a LangChain serialized object
             if obj.get("lc") in (1, 2) and obj.get("type") == "constructor":
-                # Use the serde's reviver to reconstruct the object
-                if hasattr(self.serde, "_reviver"):
-                    return self.serde._reviver(obj)
-                elif hasattr(self.serde, "_revive_if_needed"):
-                    return self.serde._revive_if_needed(obj)
-                else:
-                    # Fallback: return as-is if serde doesn't have reviver
+                try:
+                    # Use the serde's reviver to reconstruct the object
+                    if hasattr(self.serde, "_reviver"):
+                        return self.serde._reviver(obj)
+                    elif hasattr(self.serde, "_revive_if_needed"):
+                        return self.serde._revive_if_needed(obj)
+                    else:
+                        # Log warning if serde doesn't have reviver
+                        logger.warning(
+                            "Serializer does not have a reviver method. "
+                            "LangChain object may not be properly deserialized. "
+                            f"Object ID: {obj.get('id')}"
+                        )
+                        return obj
+                except Exception as e:
+                    # Provide detailed error message for debugging
+                    obj_id = obj.get("id", "unknown")
+                    obj_type = (
+                        obj.get("id", ["unknown"])[-1]
+                        if isinstance(obj.get("id"), list)
+                        else "unknown"
+                    )
+                    logger.error(
+                        f"Failed to deserialize LangChain object of type '{obj_type}'. "
+                        f"This may cause MESSAGE_COERCION_FAILURE. Error: {e}. "
+                        f"Object structure: lc={obj.get('lc')}, type={obj.get('type')}, "
+                        f"id={obj_id}"
+                    )
+                    # Return the object as-is to prevent complete failure
                     return obj
             # Recursively process nested dicts
             return {k: self._recursive_deserialize(v) for k, v in obj.items()}
