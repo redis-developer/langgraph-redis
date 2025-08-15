@@ -295,6 +295,7 @@ class AsyncRedisSaver(
             main_key: The primary Redis key
             related_keys: Additional Redis keys that should expire at the same time
             ttl_minutes: Time-to-live in minutes, overrides default_ttl if provided
+                        Use -1 to remove TTL (make keys persistent)
 
         Returns:
             Result of the Redis operation
@@ -305,6 +306,32 @@ class AsyncRedisSaver(
                 ttl_minutes = self.ttl_config.get("default_ttl")
 
         if ttl_minutes is not None:
+            # Special case: -1 means remove TTL (make persistent)
+            if ttl_minutes == -1:
+                if self.cluster_mode:
+                    # For cluster mode, execute PERSIST operations individually
+                    await self._redis.persist(main_key)
+
+                    if related_keys:
+                        for key in related_keys:
+                            await self._redis.persist(key)
+
+                    return True
+                else:
+                    # For non-cluster mode, use pipeline for efficiency
+                    pipeline = self._redis.pipeline()
+
+                    # Remove TTL for main key
+                    pipeline.persist(main_key)
+
+                    # Remove TTL for related keys
+                    if related_keys:
+                        for key in related_keys:
+                            pipeline.persist(key)
+
+                    return await pipeline.execute()
+
+            # Regular TTL setting
             ttl_seconds = int(ttl_minutes * 60)
 
             if self.cluster_mode:
