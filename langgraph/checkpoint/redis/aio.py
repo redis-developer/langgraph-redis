@@ -709,7 +709,7 @@ class AsyncRedisSaver(
                     if isinstance(checkpoint_data, dict)
                     else orjson.loads(checkpoint_data)
                 )
-                channel_values = checkpoint_dict.get("channel_values", {})
+                channel_values = self._recursive_deserialize(checkpoint_dict.get("channel_values", {}))
             else:
                 # If checkpoint data is missing, the document is corrupted
                 # Set empty channel values rather than attempting a fallback
