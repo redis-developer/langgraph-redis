@@ -1,5 +1,17 @@
 # LangGraph Redis
 
+[![PyPI version](https://badge.fury.io/py/langgraph-checkpoint-redis.svg)](https://badge.fury.io/py/langgraph-checkpoint-redis)
+[![Python versions](https://img.shields.io/pypi/pyversions/langgraph-checkpoint-redis.svg)](https://pypi.org/project/langgraph-checkpoint-redis/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Tests](https://github.com/redis-developer/langgraph-redis/actions/workflows/test.yml/badge.svg)](https://github.com/redis-developer/langgraph-redis/actions/workflows/test.yml)
+[![Coverage](https://img.shields.io/endpoint?url=https://gist.github.com/bsbodden/4b5aae70fef2c9606648bce5d010e129/raw/langgraph-redis-coverage.json)](https://github.com/redis-developer/langgraph-redis/actions/workflows/coverage-gist.yml)
+[![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
+[![Imports: isort](https://img.shields.io/badge/%20imports-isort-%231674b1?style=flat&labelColor=ef8336)](https://pycqa.github.io/isort/)
+[![Checked with mypy](https://img.shields.io/badge/mypy-checked-blue)](http://mypy-lang.org/)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+[![Downloads](https://static.pepy.tech/badge/langgraph-checkpoint-redis)](https://pepy.tech/project/langgraph-checkpoint-redis)
+[![Redis](https://img.shields.io/badge/Redis-8.0%2B-DC382D?logo=redis&logoColor=white)](https://redis.io)
+
 This repository contains Redis implementations for LangGraph, providing both Checkpoint Savers and Stores functionality.
 
 ## Overview
@@ -80,11 +92,13 @@ saver.setup()
 #### Azure Cache for Redis Specific Settings
 
 For Azure Cache for Redis Enterprise tier:
+
 - **Port**: Use port `10000` for Enterprise tier with TLS, or `6379` for standard
 - **Modules**: Enterprise tier includes RediSearch and RedisJSON by default
 - **SSL/TLS**: Always enabled, minimum TLS 1.2 for Enterprise
 
 Example for Azure Cache for Redis Enterprise:
+
 ```python
 client = Redis(
     host="your-cache.redisenterprise.cache.azure.net",

@@ -1,0 +1,53 @@
+name: Update Coverage Badge
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Install Poetry
+      uses: snok/install-poetry@v1
+      with:
+        version: 1.8.3
+    
+    - name: Install dependencies
+      run: |
+        poetry install --all-extras
+    
+    - name: Start Redis Stack
+      run: |
+        docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest
+    
+    - name: Run tests with coverage
+      run: |
+        poetry run pytest --cov=langgraph --cov-report=term --cov-report=json
+        echo "COVERAGE=$(python -c "import json;print(json.load(open('coverage.json'))['totals']['percent_covered_display'])")" >> $GITHUB_ENV
+    
+    - name: Create Coverage Badge
+      uses: schneegans/dynamic-badges-action@v1.7.0
+      with:
+        auth: ${{ secrets.GIST_TOKEN }}
+        gistID: ${{ secrets.GIST_ID }}
+        filename: langgraph-redis-coverage.json
+        label: Coverage
+        message: ${{ env.COVERAGE }}%
+        color: ${{ 
+          env.COVERAGE < 70 && 'red' ||
+          env.COVERAGE < 80 && 'yellow' ||
+          'green' 
+        }}
+    
+    - name: Stop Redis
+      if: always()
+      run: docker stop redis-stack && docker rm redis-stack
