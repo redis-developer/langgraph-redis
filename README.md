@@ -249,7 +249,32 @@ with RedisSaver.from_conn_string("redis://localhost:6379", ttl=ttl_config) as ch
     # Use the checkpointer...
 ```
 
-This makes it easy to manage storage and ensure ephemeral data is automatically cleaned up.
+### Removing TTL (Pinning Threads)
+
+You can make specific checkpoints persistent by removing their TTL. This is useful for "pinning" important threads that should never expire:
+
+```python
+from langgraph.checkpoint.redis import RedisSaver
+
+# Create saver with default TTL
+saver = RedisSaver.from_conn_string("redis://localhost:6379", ttl={"default_ttl": 60})
+saver.setup()
+
+# Save a checkpoint
+config = {"configurable": {"thread_id": "important-thread", "checkpoint_ns": ""}}
+saved_config = saver.put(config, checkpoint, metadata, {})
+
+# Remove TTL from the checkpoint to make it persistent
+checkpoint_id = saved_config["configurable"]["checkpoint_id"]
+checkpoint_key = f"checkpoint:important-thread:__empty__:{checkpoint_id}"
+saver._apply_ttl_to_keys(checkpoint_key, ttl_minutes=-1)
+
+# The checkpoint is now persistent and won't expire
+```
+
+When no TTL configuration is provided, checkpoints are persistent by default (no expiration).
+
+This makes it easy to manage storage and ensure ephemeral data is automatically cleaned up while keeping important data persistent.
 
 ## Redis Stores
 
@@ -370,11 +395,13 @@ For Redis Stores with vector search:
 
 Both Redis checkpoint savers and stores leverage Redis's native key expiration:
 
-- **Native Redis TTL**: Uses Redis's built-in `EXPIRE` command
+- **Native Redis TTL**: Uses Redis's built-in `EXPIRE` command for setting TTL
+- **TTL Removal**: Uses Redis's `PERSIST` command to remove TTL (with `ttl_minutes=-1`)
 - **Automatic Cleanup**: Redis automatically removes expired keys
 - **Configurable Default TTL**: Set a default TTL for all keys in minutes
 - **TTL Refresh on Read**: Optionally refresh TTL when keys are accessed
 - **Applied to All Related Keys**: TTL is applied to all related keys (checkpoint, blobs, writes)
+- **Persistent by Default**: When no TTL is configured, keys are persistent (no expiration)
 
 ## Contributing
 
