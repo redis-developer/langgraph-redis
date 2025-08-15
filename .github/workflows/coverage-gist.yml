@@ -1,0 +1,61 @@
+name: Update Coverage Badge
+
+on:
+  push:
+    branches: [ main ]
+
+env:
+  POETRY_VERSION: "1.8.3"
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Check out repository
+      uses: actions/checkout@v3
+    
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+    
+    - name: Install Poetry
+      uses: snok/install-poetry@v1
+      with:
+        version: ${{ env.POETRY_VERSION }}
+    
+    - name: Install dependencies
+      run: |
+        pip wheel --no-cache-dir --use-pep517 ml-dtypes
+        poetry install --all-extras
+    
+    - name: Set Redis image name
+      run: |
+        echo "REDIS_IMAGE=redis/redis-stack-server:latest" >> $GITHUB_ENV
+    
+    - name: Run tests with coverage
+      run: |
+        poetry run pytest --cov=langgraph --cov-report=term --cov-report=json
+        COVERAGE=$(python -c "import json; print(int(json.load(open('coverage.json'))['totals']['percent_covered']))")
+        echo "COVERAGE=${COVERAGE}" >> $GITHUB_ENV
+        
+        # Set color based on coverage
+        if [ $COVERAGE -lt 70 ]; then
+          echo "COLOR=red" >> $GITHUB_ENV
+        elif [ $COVERAGE -lt 80 ]; then
+          echo "COLOR=yellow" >> $GITHUB_ENV
+        else
+          echo "COLOR=green" >> $GITHUB_ENV
+        fi
+    
+    - name: Create Coverage Badge
+      uses: schneegans/dynamic-badges-action@v1.7.0
+      with:
+        auth: ${{ secrets.GIST_TOKEN }}
+        gistID: ${{ secrets.GIST_ID }}
+        filename: langgraph-redis-coverage.json
+        label: Coverage
+        message: ${{ env.COVERAGE }}%
+        color: ${{ env.COLOR }}
