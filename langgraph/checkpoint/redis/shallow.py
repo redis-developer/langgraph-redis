@@ -155,7 +155,9 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         finally:
             if saver and saver._owns_its_client:
                 saver._redis.close()
-                saver._redis.connection_pool.disconnect()
+                # RedisCluster doesn't have connection_pool attribute
+                if getattr(saver._redis, "connection_pool", None):
+                    saver._redis.connection_pool.disconnect()
 
     def put(
         self,
