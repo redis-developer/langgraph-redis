@@ -1,8 +1,8 @@
 [tool.poetry]
 name = "langgraph-checkpoint-redis"
-version = "0.1.0"
+version = "0.1.1"
 description = "Redis implementation of the LangGraph agent checkpoint saver and store."
-authors = ["Redis Inc. <applied.ai@redis.com>"]
+authors = ["Redis Inc. <applied.ai@redis.com>", "Brian Sam-Bodden <bsb@redis.io>"]
 license = "MIT"
 readme = "README.md"
 repository = "https://www.github.com/redis-developer/langgraph-redis"
@@ -19,30 +19,30 @@ packages = [{ include = "langgraph" }]
 
 [tool.poetry.dependencies]
 python = ">=3.9,<3.14"
-langgraph-checkpoint = ">=2.0.26"
+langgraph-checkpoint = ">=2.0.21,<3.0.0"
 redisvl = ">=0.5.1,<1.0.0"
 redis = "^6.2.0"
 orjson = "^3.9.0"
 tomli = { version = "^2.0.1", python = "<3.11" }
 
 [tool.poetry.group.dev.dependencies]
-langgraph = ">=0.3.0,<0.5.0"
+langgraph = ">=0.3.0"
 black = "^25.1.0"
-codespell = "^2.2.0"
-pytest = "^7.2.1"
-anyio = "^4.4.0"
-pytest-asyncio = "^0.21.1"
-pytest-xdist = { extras = ["psutil"], version = "^3.6.1" }
-pytest-mock = "^3.11.1"
+codespell = "^2.4.1"
+pytest = "^8.4.1"
+anyio = "^4.10.0"
+pytest-asyncio = "^1.1.0"
+pytest-xdist = { extras = ["psutil"], version = "^3.8.0" }
+pytest-mock = "^3.14.1"
 mypy = ">=1.11.0,<2"
 aioconsole = "^0.8.1"
-langchain-openai = "^0.3.2"
-testcontainers = "^4.9.1"
-isort = "^6.0.0"
+langchain-openai = "^0.3.30"
+testcontainers = "^4.12.0"
+isort = "^6.0.1"
 cryptography = { version = ">=44.0.1", markers = "python_version > '3.9.1'" }
-coverage = "^7.6.0"
-pytest-cov = "^6.0.0"
-vulture = "^2.13"
+coverage = "^7.10.3"
+pytest-cov = "^6.2.1"
+vulture = "^2.14"
 pympler = "^1.1"
 aiofiles = "^24.1.0"
 
