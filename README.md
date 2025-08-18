@@ -248,20 +248,21 @@ with ShallowRedisSaver.from_conn_string("redis://localhost:6379") as checkpointe
 
 ## Redis Checkpoint TTL Support
 
-Both Redis checkpoint savers and stores support Time-To-Live (TTL) functionality for automatic key expiration:
+Both Redis checkpoint savers and stores support automatic expiration using Redis TTL:
 
 ```python
-# Configure TTL for checkpoint savers
+# Configure automatic expiration
 ttl_config = {
-    "default_ttl": 60,  # Default TTL in minutes
-    "refresh_on_read": True,  # Refresh TTL when checkpoint is read
+    "default_ttl": 60,  # Expire checkpoints after 60 minutes
+    "refresh_on_read": True,  # Reset expiration time when reading checkpoints
 }
 
-# Use with any checkpoint saver implementation
-with RedisSaver.from_conn_string("redis://localhost:6379", ttl=ttl_config) as checkpointer:
-    checkpointer.setup()
-    # Use the checkpointer...
+with RedisSaver.from_conn_string("redis://localhost:6379", ttl=ttl_config) as saver:
+    saver.setup()
+    # Checkpoints will expire after 60 minutes of inactivity
 ```
+
+When no TTL is configured, checkpoints are persistent (never expire automatically).
 
 ### Removing TTL (Pinning Threads)
 
