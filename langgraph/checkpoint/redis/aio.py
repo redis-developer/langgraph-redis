@@ -483,11 +483,12 @@ class AsyncRedisSaver(
                 )
                 current_ttl = await self._redis.ttl(checkpoint_key)
 
-            default_ttl_minutes = self.ttl_config.get("default_ttl", 60)
-            ttl_threshold = int(default_ttl_minutes * 60 * 0.6)  # 60% of original TTL
+            # Always refresh TTL when refresh_on_read is enabled
+            # This ensures all related keys maintain synchronized TTLs
 
-            # Only refresh if TTL is below threshold (or key doesn't exist)
-            if current_ttl == -2 or (current_ttl > 0 and current_ttl <= ttl_threshold):
+            # Only refresh if key exists and has TTL (skip keys with no expiry)
+            # TTL states: -2 = key doesn't exist, -1 = key exists but no TTL, 0 = expired, >0 = seconds remaining
+            if current_ttl > 0:
                 # Get all blob keys related to this checkpoint
                 from langgraph.checkpoint.redis.base import (
                     CHECKPOINT_BLOB_PREFIX,
