@@ -638,7 +638,12 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         channel_values = checkpoint.get("channel_values", {})
 
         # Deserialize channel values since they're stored in serialized form
-        return self._deserialize_channel_values(channel_values)
+        # Cast to dict[str, Any] as we know this is the correct type from checkpoint structure
+        from typing import cast
+
+        return self._deserialize_channel_values(
+            cast(dict[str, Any], channel_values) if channel_values else {}
+        )
 
     def _load_pending_sends(
         self,

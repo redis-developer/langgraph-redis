@@ -601,7 +601,7 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
                     idx_value,
                 )
                 write_keys.append(key)
-                pipeline.json().set(key, "$", write_obj)
+                pipeline.json().set(key, "$", cast(Any, write_obj))
                 created_keys.append(key)
 
             # Add TTL operations to the pipeline if configured
@@ -636,7 +636,7 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
                                 task_id,
                                 idx_value,
                             )
-                            fallback_pipeline.json().set(key, "$", write_obj)
+                            fallback_pipeline.json().set(key, "$", cast(Any, write_obj))
 
                         # Add TTL operations if configured
                         if (

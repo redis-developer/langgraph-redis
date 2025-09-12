@@ -21,7 +21,7 @@ packages = [{ include = "langgraph" }]
 python = ">=3.9,<3.14"
 langgraph-checkpoint = ">=2.0.21,<3.0.0"
 redisvl = ">=0.5.1,<1.0.0"
-redis = "^6.2.0"
+redis = ">=5.2.1,<7.0.0"
 orjson = "^3.9.0"
 tomli = { version = "^2.0.1", python = "<3.11" }
 
