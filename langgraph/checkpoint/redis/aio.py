@@ -1141,7 +1141,7 @@ class AsyncRedisSaver(
                     )
 
                     # Redis JSON.SET is an UPSERT by default
-                    await self._redis.json().set(key, "$", write_obj)  # type: ignore[misc]
+                    await self._redis.json().set(key, "$", cast(Any, write_obj))  # type: ignore[misc]
                     created_keys.append(key)
 
                 # Apply TTL to newly created keys
@@ -1197,7 +1197,7 @@ class AsyncRedisSaver(
                         write_obj["idx"],  # type: ignore[arg-type]
                     )
 
-                    pipeline.json().set(key, "$", write_obj)
+                    pipeline.json().set(key, "$", cast(Any, write_obj))
                     created_keys.append(key)
 
                 # Add TTL operations to the pipeline if configured
@@ -1264,7 +1264,9 @@ class AsyncRedisSaver(
                                     task_id,
                                     write_obj["idx"],  # type: ignore[arg-type]
                                 )
-                                fallback_pipeline.json().set(key, "$", write_obj)
+                                fallback_pipeline.json().set(
+                                    key, "$", cast(Any, write_obj)
+                                )
 
                             # Add TTL operations if configured
                             if (
