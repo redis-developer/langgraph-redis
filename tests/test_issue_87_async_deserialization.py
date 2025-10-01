@@ -478,16 +478,12 @@ async def test_async_mixed_content_types(redis_url: str):
 
 
 @pytest.mark.asyncio
-@pytest.mark.skip(
-    reason="alist() deserialization not addressed in PR #87 - needs separate fix"
-)
 async def test_async_alist_with_deserialization(redis_url: str):
     """Test that alist() also properly deserializes messages.
 
-    NOTE: This test is skipped because PR #87 only addresses aget_tuple()
-    deserialization. The alist() method also needs the same fix applied
-    to properly deserialize LangChain messages. This should be addressed
-    in a follow-up PR.
+    This test verifies that the alist() method properly deserializes
+    LangChain messages when listing checkpoints, matching the behavior
+    of aget_tuple().
     """
     async with AsyncRedisSaver.from_conn_string(redis_url) as saver:
         thread_id = str(uuid4())
