@@ -1,6 +1,6 @@
 """Message exporter for extracting conversation messages from checkpoints."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Protocol
 
 import orjson
@@ -162,5 +162,5 @@ class MessageExporter:
         return {
             "thread_id": thread_id,
             "messages": messages,
-            "export_timestamp": datetime.utcnow().isoformat(),
+            "export_timestamp": datetime.now(timezone.utc).isoformat(),
         }

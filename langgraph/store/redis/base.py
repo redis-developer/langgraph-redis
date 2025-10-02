@@ -205,13 +205,28 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
         index: Optional[IndexConfig] = None,
         ttl: Optional[TTLConfig] = None,  # Corrected type hint for ttl
         cluster_mode: Optional[bool] = None,
+        store_prefix: str = "store",
+        vector_prefix: str = "store_vectors",
     ) -> None:
-        """Initialize store with Redis connection and optional index config."""
+        """Initialize store with Redis connection and optional index config.
+
+        Args:
+            conn: Redis client connection
+            index: Optional index configuration for vector search
+            ttl: Optional TTL configuration
+            cluster_mode: Optional cluster mode setting (None = auto-detect)
+            store_prefix: Prefix for store keys (default: "store")
+            vector_prefix: Prefix for vector keys (default: "store_vectors")
+        """
         self.index_config = index
         self.ttl_config = ttl
         self._redis = conn
         # Store cluster_mode; None means auto-detect in RedisStore or AsyncRedisStore
         self.cluster_mode = cluster_mode
+
+        # Store custom prefixes
+        self.store_prefix = store_prefix
+        self.vector_prefix = vector_prefix
 
         if self.index_config:
             self.index_config = self.index_config.copy()
@@ -225,10 +240,25 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
                 (p, tokenize_path(p)) if p != "$" else (p, p) for p in fields
             ]
 
+        # Create custom schemas with instance prefixes
+        store_schema = {
+            "index": {
+                "name": self.store_prefix,
+                "prefix": self.store_prefix + REDIS_KEY_SEPARATOR,
+                "storage_type": "json",
+            },
+            "fields": [
+                {"name": "prefix", "type": "text"},
+                {"name": "key", "type": "tag"},
+                {"name": "created_at", "type": "numeric"},
+                {"name": "updated_at", "type": "numeric"},
+                {"name": "ttl_minutes", "type": "numeric"},
+                {"name": "expires_at", "type": "numeric"},
+            ],
+        }
+
         # Initialize search indices
-        self.store_index = SearchIndex.from_dict(
-            self.SCHEMAS[0], redis_client=self._redis
-        )
+        self.store_index = SearchIndex.from_dict(store_schema, redis_client=self._redis)
 
         # Configure vector index if needed
         if self.index_config:
@@ -237,9 +267,24 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
             index_dict = dict(self.index_config)
             vector_storage_type = index_dict.get("vector_storage_type", "json")
 
-            vector_schema: Dict[str, Any] = copy.deepcopy(self.SCHEMAS[1])
-            # Update storage type in schema
-            vector_schema["index"]["storage_type"] = vector_storage_type
+            # Create custom vector schema with instance prefix
+            vector_schema: Dict[str, Any] = {
+                "index": {
+                    "name": self.vector_prefix,
+                    "prefix": self.vector_prefix + REDIS_KEY_SEPARATOR,
+                    "storage_type": vector_storage_type,
+                },
+                "fields": [
+                    {"name": "prefix", "type": "text"},
+                    {"name": "key", "type": "tag"},
+                    {"name": "field_name", "type": "tag"},
+                    {"name": "embedding", "type": "vector"},
+                    {"name": "created_at", "type": "numeric"},
+                    {"name": "updated_at", "type": "numeric"},
+                    {"name": "ttl_minutes", "type": "numeric"},
+                    {"name": "expires_at", "type": "numeric"},
+                ],
+            }
 
             vector_fields = vector_schema.get("fields", [])
             vector_field = None
@@ -274,8 +319,8 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
                 vector_schema, redis_client=self._redis
             )
 
-        # Set client information in Redis
-        self.set_client_info()
+        # Note: set_client_info() should be called by concrete implementations
+        # after initialization to avoid async/sync conflicts
 
     def set_client_info(self) -> None:
         """Set client info for Redis monitoring."""
