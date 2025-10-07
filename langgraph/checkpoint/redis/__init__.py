@@ -84,8 +84,8 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
         self._key_cache: Dict[str, str] = {}
         self._key_cache_max_size = 1000  # Configurable limit
 
-        # Initialize key registry
-        self._key_registry = SyncCheckpointKeyRegistry(self._redis)
+        # Key registry will be initialized in setup()
+        self._key_registry: Optional[SyncCheckpointKeyRegistry] = None
 
     def configure_client(
         self,

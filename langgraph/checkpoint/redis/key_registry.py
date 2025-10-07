@@ -11,6 +11,8 @@ from redis.asyncio import Redis as AsyncRedis
 from redis.asyncio.cluster import RedisCluster as AsyncRedisCluster
 from redis.cluster import RedisCluster
 
+from langgraph.checkpoint.redis.util import to_storage_safe_id, to_storage_safe_str
+
 WRITE_KEYS_ZSET_PREFIX = "write_keys_zset"
 REDIS_KEY_SEPARATOR = ":"
 
@@ -22,9 +24,28 @@ class CheckpointKeyRegistry:
     def make_write_keys_zset_key(
         thread_id: str, checkpoint_ns: str, checkpoint_id: str
     ) -> str:
-        """Create the key for the write keys sorted set for a specific checkpoint."""
+        """Create the key for the write keys sorted set for a specific checkpoint.
+
+        Args:
+            thread_id: Thread identifier
+            checkpoint_ns: Checkpoint namespace (will be converted to storage-safe format)
+            checkpoint_id: Checkpoint identifier (will be converted to storage-safe format)
+
+        Returns:
+            The Redis key for the write keys sorted set
+        """
+        # Convert empty strings to sentinel values for RediSearch compatibility
+        safe_thread_id = to_storage_safe_id(thread_id)
+        safe_checkpoint_ns = to_storage_safe_str(checkpoint_ns)
+        safe_checkpoint_id = to_storage_safe_id(checkpoint_id)
+
         return REDIS_KEY_SEPARATOR.join(
-            [WRITE_KEYS_ZSET_PREFIX, thread_id, checkpoint_ns, checkpoint_id]
+            [
+                WRITE_KEYS_ZSET_PREFIX,
+                safe_thread_id,
+                safe_checkpoint_ns,
+                safe_checkpoint_id,
+            ]
         )
 
 
