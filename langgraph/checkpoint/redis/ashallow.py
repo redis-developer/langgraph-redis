@@ -368,6 +368,7 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         for expr in query_filter[1:]:
             combined_filter &= expr
 
+        # Sort by checkpoint_id in descending order to get most recent checkpoints first
         query = FilterQuery(
             filter_expression=combined_filter,
             return_fields=[
@@ -380,6 +381,7 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
                 "ts",
             ],
             num_results=limit or 100,  # Set higher limit to retrieve more results
+            sort_by=("checkpoint_id", "DESC"),
         )
 
         results = await self.checkpoints_index.search(query)

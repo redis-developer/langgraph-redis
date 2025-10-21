@@ -321,6 +321,7 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
             combined_filter &= expr
 
         # Get checkpoint data
+        # Sort by checkpoint_id in descending order to get most recent checkpoints first
         query = FilterQuery(
             filter_expression=combined_filter,
             return_fields=[
@@ -330,6 +331,7 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
                 "$.metadata",
             ],
             num_results=limit or 10000,
+            sort_by=("checkpoint_id", "DESC"),
         )
 
         # Execute the query
