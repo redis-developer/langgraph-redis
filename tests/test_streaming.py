@@ -65,9 +65,10 @@ def test_streaming_values_with_redis_checkpointer(graph_with_redis_checkpointer)
     assert len(results) == 11  # 5 iterations x 2 nodes + initial state
 
     # Check state history from the checkpointer
+    # Note: states are now sorted DESC (newest first), so states[0] is the most recent
     states = list(graph_with_redis_checkpointer.get_state_history(thread_config))
     assert len(states) > 0
-    final_state = states[-1]
+    final_state = states[0]  # First item is now the most recent (DESC order)
     assert final_state.values["counter"] == 5
     assert len(final_state.values["values"]) == 5
 
@@ -97,9 +98,10 @@ def test_streaming_updates_with_redis_checkpointer(graph_with_redis_checkpointer
             assert "values" in update["values_node"]
 
     # Check state history from the checkpointer
+    # Note: states are now sorted DESC (newest first), so states[0] is the most recent
     states = list(graph_with_redis_checkpointer.get_state_history(thread_config))
     assert len(states) > 0
-    final_state = states[-1]
+    final_state = states[0]  # First item is now the most recent (DESC order)
     assert final_state.values["counter"] == 5
     assert len(final_state.values["values"]) == 5
 

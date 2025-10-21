@@ -693,6 +693,7 @@ class AsyncRedisSaver(
             combined_filter &= expr
 
         # Construct the Redis query
+        # Sort by checkpoint_id in descending order to get most recent checkpoints first
         query = FilterQuery(
             filter_expression=combined_filter,
             return_fields=[
@@ -705,6 +706,7 @@ class AsyncRedisSaver(
                 "has_writes",  # Include has_writes to optimize pending_writes loading
             ],
             num_results=limit or 10000,
+            sort_by=("checkpoint_id", "DESC"),
         )
 
         # Execute the query asynchronously
