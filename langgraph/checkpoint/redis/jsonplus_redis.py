@@ -41,6 +41,15 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
     def dumps(self, obj: Any) -> bytes:
         """Use orjson for simple objects, fallback to parent for complex objects."""
         try:
+            # Check if this is an Interrupt object that needs special handling
+            from langgraph.types import Interrupt
+            if isinstance(obj, Interrupt):
+                # Serialize Interrupt as a constructor format for proper deserialization
+                return super().dumps(obj)
+        except ImportError:
+            pass
+        
+        try:
             # Fast path: Use orjson for JSON-serializable objects
             return orjson.dumps(obj)
         except TypeError:
@@ -66,6 +75,10 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
         reconstructed. Without this, messages would remain as dictionaries with
         'lc', 'type', and 'constructor' fields, causing errors when the application
         expects actual message objects with 'role' and 'content' attributes.
+        
+        This also handles Interrupt objects that may be stored as plain dictionaries
+        with 'value' and 'id' keys, reconstructing them as proper Interrupt instances
+        to prevent AttributeError when accessing the 'id' attribute.
 
         Args:
             obj: The object to potentially revive, which may be a dict, list, or primitive.
@@ -80,6 +93,24 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
                 # This converts {'lc': 1, 'type': 'constructor', ...} back to
                 # the actual LangChain object (e.g., HumanMessage, AIMessage)
                 return self._reviver(obj)
+            
+            # Check if this looks like an Interrupt object stored as a plain dict
+            # Interrupt objects have 'value' and 'id' keys, and possibly nothing else
+            # We need to be careful not to accidentally convert other dicts
+            if (
+                "value" in obj
+                and "id" in obj
+                and len(obj) == 2
+                and isinstance(obj.get("id"), str)
+            ):
+                # Try to reconstruct as an Interrupt object
+                try:
+                    from langgraph.types import Interrupt
+                    return Interrupt(value=obj["value"], id=obj["id"])
+                except (ImportError, TypeError, ValueError):
+                    # If we can't import or construct Interrupt, fall through
+                    pass
+            
             # Recursively process nested dicts
             return {k: self._revive_if_needed(v) for k, v in obj.items()}
         elif isinstance(obj, list):
