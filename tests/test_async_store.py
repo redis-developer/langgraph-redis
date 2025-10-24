@@ -6,13 +6,7 @@ from typing import AsyncIterator
 from uuid import uuid4
 
 import pytest
-from langgraph.store.base import (
-    GetOp,
-    Item,
-    ListNamespacesOp,
-    PutOp,
-    SearchOp,
-)
+from langgraph.store.base import GetOp, Item, ListNamespacesOp, PutOp, SearchOp
 
 from langgraph.store.redis import AsyncRedisStore
 from tests.embed_test_utils import CharacterEmbeddings
