@@ -1,9 +1,6 @@
 """Integration tests for CrossSlot error fix in checkpoint operations."""
 
-from langgraph.checkpoint.base import (
-    create_checkpoint,
-    empty_checkpoint,
-)
+from langgraph.checkpoint.base import create_checkpoint, empty_checkpoint
 
 from langgraph.checkpoint.redis import RedisSaver
 
