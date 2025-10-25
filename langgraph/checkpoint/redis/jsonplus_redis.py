@@ -39,13 +39,20 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
     ]
 
     def dumps(self, obj: Any) -> bytes:
-        """Use orjson for simple objects, fallback to parent for complex objects."""
+        """Use orjson for simple objects, fallback to msgpack for complex objects."""
         try:
             # Fast path: Use orjson for JSON-serializable objects
             return orjson.dumps(obj)
         except TypeError:
-            # Complex objects (Send, etc.) need parent's msgpack serialization
-            return super().dumps(obj)
+            # Complex objects (Send, etc.) need parent's serialization
+            # Parent's dumps_typed returns (type, data) where data is already encoded
+            type_, data = super().dumps_typed(obj)
+            # Data from dumps_typed is already in the correct format (string or bytes)
+            # For msgpack type, data is bytes; for json type, data is string
+            if isinstance(data, bytes):
+                return data
+            else:
+                return data.encode("utf-8")
 
     def loads(self, data: bytes) -> Any:
         """Use orjson for JSON parsing with reviver support, fallback to parent for msgpack data."""
@@ -54,9 +61,15 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
             parsed = orjson.loads(data)
             # Apply reviver for LangChain objects (lc format)
             return self._revive_if_needed(parsed)
-        except orjson.JSONDecodeError:
-            # Fallback: Parent handles msgpack and other formats
-            return super().loads(data)
+        except (orjson.JSONDecodeError, TypeError):
+            # Fallback: Parent handles msgpack and other formats via loads_typed
+            # Attempt to detect type and use loads_typed
+            try:
+                # Try loading as msgpack via parent's loads_typed
+                return super().loads_typed(("msgpack", data))
+            except Exception:
+                # If that fails, try loading as json string
+                return super().loads_typed(("json", data))
 
     def _revive_if_needed(self, obj: Any) -> Any:
         """Recursively apply reviver to handle LangChain serialized objects.
