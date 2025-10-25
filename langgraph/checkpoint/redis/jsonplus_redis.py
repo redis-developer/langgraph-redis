@@ -39,20 +39,10 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
     ]
 
     def dumps(self, obj: Any) -> bytes:
-        """Use orjson for simple objects, fallback to msgpack for complex objects."""
-        try:
-            # Fast path: Use orjson for JSON-serializable objects
-            return orjson.dumps(obj)
-        except TypeError:
-            # Complex objects (Send, etc.) need parent's serialization
-            # Parent's dumps_typed returns (type, data) where data is already encoded
-            type_, data = super().dumps_typed(obj)
-            # Data from dumps_typed is already in the correct format (string or bytes)
-            # For msgpack type, data is bytes; for json type, data is string
-            if isinstance(data, bytes):
-                return data
-            else:
-                return data.encode("utf-8")
+        """Use orjson for serialization with LangChain object support via default handler."""
+        # Use orjson with default handler for LangChain objects
+        # The _default method from parent class handles LangChain serialization
+        return orjson.dumps(obj, default=self._default)
 
     def loads(self, data: bytes) -> Any:
         """Use orjson for JSON parsing with reviver support, fallback to parent for msgpack data."""
@@ -106,6 +96,7 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
         if isinstance(obj, (bytes, bytearray)):
             return "base64", base64.b64encode(obj).decode("utf-8")
         else:
+            # All objects should be JSON-serializable (LangChain objects are pre-serialized)
             return "json", self.dumps(obj).decode("utf-8")
 
     def loads_typed(self, data: tuple[str, Union[str, bytes]]) -> Any:
