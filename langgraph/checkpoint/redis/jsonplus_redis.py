@@ -39,13 +39,10 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
     ]
 
     def dumps(self, obj: Any) -> bytes:
-        """Use orjson for simple objects, fallback to parent for complex objects."""
-        try:
-            # Fast path: Use orjson for JSON-serializable objects
-            return orjson.dumps(obj)
-        except TypeError:
-            # Complex objects (Send, etc.) need parent's msgpack serialization
-            return super().dumps(obj)
+        """Use orjson for serialization with LangChain object support via default handler."""
+        # Use orjson with default handler for LangChain objects
+        # The _default method from parent class handles LangChain serialization
+        return orjson.dumps(obj, default=self._default)
 
     def loads(self, data: bytes) -> Any:
         """Use orjson for JSON parsing with reviver support, fallback to parent for msgpack data."""
@@ -54,9 +51,15 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
             parsed = orjson.loads(data)
             # Apply reviver for LangChain objects (lc format)
             return self._revive_if_needed(parsed)
-        except orjson.JSONDecodeError:
-            # Fallback: Parent handles msgpack and other formats
-            return super().loads(data)
+        except (orjson.JSONDecodeError, TypeError):
+            # Fallback: Parent handles msgpack and other formats via loads_typed
+            # Attempt to detect type and use loads_typed
+            try:
+                # Try loading as msgpack via parent's loads_typed
+                return super().loads_typed(("msgpack", data))
+            except Exception:
+                # If that fails, try loading as json string
+                return super().loads_typed(("json", data))
 
     def _revive_if_needed(self, obj: Any) -> Any:
         """Recursively apply reviver to handle LangChain serialized objects.
@@ -93,6 +96,7 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
         if isinstance(obj, (bytes, bytearray)):
             return "base64", base64.b64encode(obj).decode("utf-8")
         else:
+            # All objects should be JSON-serializable (LangChain objects are pre-serialized)
             return "json", self.dumps(obj).decode("utf-8")
 
     def loads_typed(self, data: tuple[str, Union[str, bytes]]) -> Any:
