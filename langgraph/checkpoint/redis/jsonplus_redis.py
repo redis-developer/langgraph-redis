@@ -39,7 +39,7 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
     ]
 
     def dumps(self, obj: Any) -> bytes:
-        """"Use orjson for serialization with LangChain object support via default handler."""
+        """Use orjson for serialization with LangChain object support via default handler."""
         # Use orjson with default handler for LangChain objects
         # The _default method from parent class handles LangChain serialization
         return orjson.dumps(obj, default=self._default)
