@@ -8,10 +8,7 @@ from typing import AsyncGenerator, Dict
 
 import pytest
 from langchain_core.runnables import RunnableConfig
-from langgraph.checkpoint.base import (
-    Checkpoint,
-    CheckpointMetadata,
-)
+from langgraph.checkpoint.base import Checkpoint, CheckpointMetadata
 from redis.asyncio import Redis
 
 from langgraph.checkpoint.redis.aio import AsyncRedisSaver
