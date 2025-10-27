@@ -40,16 +40,6 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
 
     def dumps(self, obj: Any) -> bytes:
         """Use orjson for simple objects, fallback to parent for complex objects."""
-        try:
-            # Check if this is an Interrupt object that needs special handling
-            from langgraph.types import Interrupt
-
-            if isinstance(obj, Interrupt):
-                # Serialize Interrupt as a constructor format for proper deserialization
-                return super().dumps(obj)
-        except ImportError:
-            pass
-
         # Use orjson with default handler for LangChain objects
         # The _default method from parent class handles LangChain serialization
         return orjson.dumps(obj, default=self._default)
