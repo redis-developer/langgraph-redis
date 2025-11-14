@@ -15,22 +15,16 @@ def test_human_message_serialization():
     serializer = JsonPlusRedisSerializer()
     msg = HumanMessage(content="What is the weather?", id="msg-1")
 
-    try:
-        # This would raise TypeError before the fix
-        serialized = serializer.dumps(msg)
-        print(f"  ✓ Serialized to {len(serialized)} bytes")
+    # This would raise TypeError before the fix
+    serialized = serializer.dumps(msg)
+    print(f"  ✓ Serialized to {len(serialized)} bytes")
 
-        # Deserialize
-        deserialized = serializer.loads(serialized)
-        assert isinstance(deserialized, HumanMessage)
-        assert deserialized.content == "What is the weather?"
-        assert deserialized.id == "msg-1"
-        print(f"  ✓ Deserialized correctly: {deserialized.content}")
-
-        return True
-    except TypeError as e:
-        print(f"  ✗ FAILED: {e}")
-        return False
+    # Deserialize
+    deserialized = serializer.loads(serialized)
+    assert isinstance(deserialized, HumanMessage)
+    assert deserialized.content == "What is the weather?"
+    assert deserialized.id == "msg-1"
+    print(f"  ✓ Deserialized correctly: {deserialized.content}")
 
 
 def test_all_message_types():
@@ -45,16 +39,10 @@ def test_all_message_types():
     ]
 
     for msg in messages:
-        try:
-            serialized = serializer.dumps(msg)
-            deserialized = serializer.loads(serialized)
-            assert type(deserialized) == type(msg)
-            print(f"  ✓ {type(msg).__name__} works")
-        except Exception as e:
-            print(f"  ✗ {type(msg).__name__} FAILED: {e}")
-            return False
-
-    return True
+        serialized = serializer.dumps(msg)
+        deserialized = serializer.loads(serialized)
+        assert type(deserialized) == type(msg)
+        print(f"  ✓ {type(msg).__name__} works")
 
 
 def test_message_list():
@@ -68,19 +56,13 @@ def test_message_list():
         HumanMessage(content="Question 2"),
     ]
 
-    try:
-        serialized = serializer.dumps(messages)
-        deserialized = serializer.loads(serialized)
+    serialized = serializer.dumps(messages)
+    deserialized = serializer.loads(serialized)
 
-        assert isinstance(deserialized, list)
-        assert len(deserialized) == 3
-        assert all(isinstance(m, (HumanMessage, AIMessage)) for m in deserialized)
-        print(f"  ✓ List of {len(deserialized)} messages works")
-
-        return True
-    except Exception as e:
-        print(f"  ✗ FAILED: {e}")
-        return False
+    assert isinstance(deserialized, list)
+    assert len(deserialized) == 3
+    assert all(isinstance(m, (HumanMessage, AIMessage)) for m in deserialized)
+    print(f"  ✓ List of {len(deserialized)} messages works")
 
 
 def test_nested_structure():
@@ -96,20 +78,14 @@ def test_nested_structure():
         "step": 1,
     }
 
-    try:
-        serialized = serializer.dumps(state)
-        deserialized = serializer.loads(serialized)
+    serialized = serializer.dumps(state)
+    deserialized = serializer.loads(serialized)
 
-        assert "messages" in deserialized
-        assert len(deserialized["messages"]) == 2
-        assert isinstance(deserialized["messages"][0], HumanMessage)
-        assert isinstance(deserialized["messages"][1], AIMessage)
-        print(f"  ✓ Nested structure works")
-
-        return True
-    except Exception as e:
-        print(f"  ✗ FAILED: {e}")
-        return False
+    assert "messages" in deserialized
+    assert len(deserialized["messages"]) == 2
+    assert isinstance(deserialized["messages"][0], HumanMessage)
+    assert isinstance(deserialized["messages"][1], AIMessage)
+    print(f"  ✓ Nested structure works")
 
 
 def test_dumps_typed():
@@ -119,21 +95,15 @@ def test_dumps_typed():
     serializer = JsonPlusRedisSerializer()
     msg = HumanMessage(content="Test", id="test-123")
 
-    try:
-        type_str, blob = serializer.dumps_typed(msg)
-        assert type_str == "json"
-        assert isinstance(blob, str)
-        print(f"  ✓ dumps_typed returns: type='{type_str}', blob={len(blob)} chars")
+    type_str, blob = serializer.dumps_typed(msg)
+    assert type_str == "json"
+    assert isinstance(blob, str)
+    print(f"  ✓ dumps_typed returns: type='{type_str}', blob={len(blob)} chars")
 
-        deserialized = serializer.loads_typed((type_str, blob))
-        assert isinstance(deserialized, HumanMessage)
-        assert deserialized.content == "Test"
-        print(f"  ✓ loads_typed works correctly")
-
-        return True
-    except Exception as e:
-        print(f"  ✗ FAILED: {e}")
-        return False
+    deserialized = serializer.loads_typed((type_str, blob))
+    assert isinstance(deserialized, HumanMessage)
+    assert deserialized.content == "Test"
+    print(f"  ✓ loads_typed works correctly")
 
 
 def test_backwards_compatibility():
@@ -149,16 +119,10 @@ def test_backwards_compatibility():
     ]
 
     for name, obj in test_cases:
-        try:
-            serialized = serializer.dumps(obj)
-            deserialized = serializer.loads(serialized)
-            assert deserialized == obj
-            print(f"  ✓ {name} works")
-        except Exception as e:
-            print(f"  ✗ {name} FAILED: {e}")
-            return False
-
-    return True
+        serialized = serializer.dumps(obj)
+        deserialized = serializer.loads(serialized)
+        assert deserialized == obj
+        print(f"  ✓ {name} works")
 
 
 def main():
@@ -176,19 +140,25 @@ def main():
         test_backwards_compatibility,
     ]
 
-    results = []
+    passed = 0
+    failed = 0
     for test in tests:
-        results.append(test())
+        try:
+            test()
+            passed += 1
+        except Exception as e:
+            print(f"  ✗ {test.__name__} FAILED: {e}")
+            failed += 1
 
     print("\n" + "=" * 70)
-    print(f"Results: {sum(results)}/{len(results)} tests passed")
+    print(f"Results: {passed}/{len(tests)} tests passed")
     print("=" * 70)
 
-    if all(results):
+    if failed == 0:
         print("\n✅ ALL TESTS PASSED - Fix is working correctly!")
         return 0
     else:
-        print("\n❌ SOME TESTS FAILED - Fix may not be working")
+        print(f"\n❌ {failed} TESTS FAILED - Fix may not be working")
         return 1
 
 
