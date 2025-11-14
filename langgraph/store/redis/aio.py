@@ -365,7 +365,7 @@ class AsyncRedisStore(
     ) -> None:
         """Async context manager exit."""
         # Cancel the background task created by AsyncBatchedBaseStore
-        if hasattr(self, "_task") and not self._task.done():
+        if hasattr(self, "_task") and self._task is not None and not self._task.done():
             self._task.cancel()
             try:
                 await self._task
