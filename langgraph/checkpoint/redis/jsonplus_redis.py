@@ -62,7 +62,7 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
                 return super().loads_typed(("json", data))
 
     def _revive_if_needed(self, obj: Any) -> Any:
-        """Recursively apply reviver to handle LangChain serialized objects.
+        """Recursively apply reviver to handle LangChain and LangGraph serialized objects.
 
         This method is crucial for preventing MESSAGE_COERCION_FAILURE by ensuring
         that LangChain message objects stored in their serialized format are properly
@@ -70,11 +70,14 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
         'lc', 'type', and 'constructor' fields, causing errors when the application
         expects actual message objects with 'role' and 'content' attributes.
 
+        It also handles LangGraph Interrupt objects which serialize to {"value": ..., "resumable": ..., "ns": ..., "when": ...}
+        and must be reconstructed to prevent AttributeError when accessing Interrupt attributes.
+
         Args:
             obj: The object to potentially revive, which may be a dict, list, or primitive.
 
         Returns:
-            The revived object with LangChain objects properly reconstructed.
+            The revived object with LangChain/LangGraph objects properly reconstructed.
         """
         if isinstance(obj, dict):
             # Check if this is a LangChain serialized object
@@ -83,6 +86,33 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
                 # This converts {'lc': 1, 'type': 'constructor', ...} back to
                 # the actual LangChain object (e.g., HumanMessage, AIMessage)
                 return self._reviver(obj)
+
+            # Check if this is a serialized Interrupt object
+            # Interrupt objects serialize to {"value": ..., "resumable": ..., "ns": ..., "when": ...}
+            # This must be done before recursively processing to avoid losing the structure
+            if (
+                "value" in obj
+                and "resumable" in obj
+                and "when" in obj
+                and len(obj) == 4
+                and isinstance(obj.get("resumable"), bool)
+            ):
+                # Try to reconstruct as an Interrupt object
+                try:
+                    from langgraph.types import Interrupt
+
+                    return Interrupt(
+                        value=self._revive_if_needed(obj["value"]),
+                        resumable=obj["resumable"],
+                        ns=obj["ns"],
+                        when=obj["when"],
+                    )
+                except (ImportError, TypeError, ValueError) as e:
+                    # If we can't import or construct Interrupt, log and fall through
+                    logger.debug(
+                        "Failed to deserialize Interrupt object: %s", e, exc_info=True
+                    )
+
             # Recursively process nested dicts
             return {k: self._revive_if_needed(v) for k, v in obj.items()}
         elif isinstance(obj, list):
