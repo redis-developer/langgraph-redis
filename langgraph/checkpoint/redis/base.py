@@ -453,7 +453,9 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         Returns:
             Original metadata dictionary.
         """
-        return self.serde.loads(self.serde.dumps(metadata))
+        # Roundtrip through serializer to ensure proper type handling
+        type_str, data_bytes = self.serde.dumps_typed(metadata)
+        return self.serde.loads_typed((type_str, data_bytes))
 
     def _dump_metadata(self, metadata: CheckpointMetadata) -> str:
         """Convert metadata to a Redis-compatible dictionary.
@@ -464,9 +466,9 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         Returns:
             Dictionary representation of metadata for Redis storage.
         """
-        serialized_metadata = self.serde.dumps(metadata)
+        type_str, serialized_bytes = self.serde.dumps_typed(metadata)
         # NOTE: we're using JSON serializer (not msgpack), so we need to remove null characters before writing
-        return serialized_metadata.decode().replace("\\u0000", "")
+        return serialized_bytes.decode().replace("\\u0000", "")
 
     def get_next_version(  # type: ignore[override]
         self, current: Optional[str], channel: ChannelProtocol[Any, Any, Any]
