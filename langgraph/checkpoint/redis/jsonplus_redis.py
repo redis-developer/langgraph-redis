@@ -33,6 +33,10 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
         This handles LangChain objects by delegating to the parent's
         _encode_constructor_args method which creates the LC format.
         """
+        # Bytes/bytearray in nested structures require msgpack - signal to fallback
+        if isinstance(obj, (bytes, bytearray)):
+            raise TypeError("bytes/bytearray in nested structure - use msgpack")
+
         # Try to encode using parent's constructor args encoder
         # This creates the {"lc": 2, "type": "constructor", ...} format
         try:
@@ -57,6 +61,8 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
     def dumps_typed(self, obj: Any) -> tuple[str, bytes]:
         """Serialize using orjson for JSON.
 
+        Falls back to msgpack for structures containing bytes/bytearray.
+
         Returns:
             tuple[str, bytes]: Type identifier and serialized bytes
         """
@@ -67,9 +73,13 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
         elif obj is None:
             return "null", b""
         else:
-            # Use orjson for JSON serialization with custom default handler
-            json_bytes = orjson.dumps(obj, default=self._default_handler)
-            return "json", json_bytes
+            try:
+                # Try orjson first with custom default handler
+                json_bytes = orjson.dumps(obj, default=self._default_handler)
+                return "json", json_bytes
+            except (TypeError, orjson.JSONEncodeError):
+                # Fall back to parent's msgpack serialization for bytes in nested structures
+                return super().dumps_typed(obj)
 
     def loads_typed(self, data: tuple[str, bytes]) -> Any:
         """Deserialize with custom revival for LangChain/LangGraph objects.

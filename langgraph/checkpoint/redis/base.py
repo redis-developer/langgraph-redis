@@ -310,8 +310,21 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         """Convert checkpoint to Redis format."""
         type_, data = self.serde.dumps_typed(checkpoint)
 
-        # Since we're keeping JSON format, decode string data
-        checkpoint_data = cast(dict, orjson.loads(data))
+        # Decode the serialized data - handle both JSON and msgpack
+        if type_ == "json":
+            checkpoint_data = cast(dict, orjson.loads(data))
+        else:
+            # For msgpack or other types, deserialize with loads_typed
+            checkpoint_data = cast(dict, self.serde.loads_typed((type_, data)))
+
+            # When using msgpack, bytes are preserved - but Redis JSON.SET can't handle them
+            # Encode bytes in channel_values with type marker for JSON storage
+            if "channel_values" in checkpoint_data:
+                for key, value in checkpoint_data["channel_values"].items():
+                    if isinstance(value, bytes):
+                        checkpoint_data["channel_values"][key] = {
+                            "__bytes__": self._encode_blob(value)
+                        }
 
         # Ensure channel_versions are always strings to fix issue #40
         if "channel_versions" in checkpoint_data:
@@ -379,6 +392,11 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
             The deserialized object, with LangChain objects properly reconstructed.
         """
         if isinstance(obj, dict):
+            # Check if this is a bytes marker from msgpack storage
+            if "__bytes__" in obj and len(obj) == 1:
+                # Decode base64-encoded bytes
+                return self._decode_blob(obj["__bytes__"])
+
             # Check if this is a LangChain serialized object
             if obj.get("lc") in (1, 2) and obj.get("type") == "constructor":
                 try:

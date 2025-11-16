@@ -166,14 +166,13 @@ def test_issue_83_pending_sends_type_compatibility(redis_url: str) -> None:
         # Serialize
         type_str, blob = saver.serde.dumps_typed(test_data)
         assert isinstance(type_str, str)
-        assert isinstance(blob, str)  # JsonPlusRedisSerializer returns strings
+        # Checkpoint 3.0: dumps_typed now returns bytes
+        assert isinstance(blob, bytes)
 
-        # Deserialize - should work with both string and bytes
+        # Deserialize with bytes (checkpoint 3.0 format)
         result1 = saver.serde.loads_typed((type_str, blob))
-        result2 = saver.serde.loads_typed((type_str, blob.encode()))  # bytes version
 
         assert result1 == test_data
-        assert result2 == test_data
 
 
 def test_load_blobs_method(redis_url: str) -> None:
@@ -508,7 +507,8 @@ def test_langchain_message_serialization(redis_url: str) -> None:
     # Serialize
     type_, data = serializer.dumps_typed(human_msg)
     assert type_ == "json"
-    assert isinstance(data, str)
+    # Checkpoint 3.0: dumps_typed now returns bytes
+    assert isinstance(data, bytes)
 
     # Deserialize
     deserialized = serializer.loads_typed((type_, data))
