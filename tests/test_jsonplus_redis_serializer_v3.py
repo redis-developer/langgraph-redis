@@ -6,8 +6,9 @@ checkpoint 3.0 API which changed the dumps_typed/loads_typed signatures.
 """
 
 from langchain_core.messages import AIMessage, HumanMessage
-from langgraph.checkpoint.redis.jsonplus_redis import JsonPlusRedisSerializer
 from langgraph.types import Interrupt
+
+from langgraph.checkpoint.redis.jsonplus_redis import JsonPlusRedisSerializer
 
 
 def test_dumps_typed_returns_bytes_not_string() -> None:

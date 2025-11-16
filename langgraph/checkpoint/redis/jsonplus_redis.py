@@ -51,8 +51,7 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
             # For other objects, encode with constructor args
             # Pass the class and the instance's __dict__ as kwargs
             return self._encode_constructor_args(
-                type(obj),
-                kwargs=obj.__dict__ if hasattr(obj, "__dict__") else {}
+                type(obj), kwargs=obj.__dict__ if hasattr(obj, "__dict__") else {}
             )
         except Exception:
             # For types we can't handle, raise TypeError
