@@ -16,15 +16,20 @@ from langgraph.checkpoint.redis.jsonplus_redis import JsonPlusRedisSerializer
 
 # Helper functions for backward compatibility with tests
 def dumps_helper(serializer: JsonPlusRedisSerializer, obj):
-    """Helper to simulate old dumps() method using dumps_typed()."""
-    type_str, data_bytes = serializer.dumps_typed(obj)
-    return data_bytes
+    """Helper to simulate old dumps() method using dumps_typed().
+
+    Returns the full (type_str, data_bytes) tuple to preserve type information.
+    """
+    return serializer.dumps_typed(obj)
 
 
-def loads_helper(serializer: JsonPlusRedisSerializer, data_bytes):
-    """Helper to simulate old loads() method using loads_typed()."""
-    # Assume JSON type for these tests
-    return serializer.loads_typed(("json", data_bytes))
+def loads_helper(serializer: JsonPlusRedisSerializer, typed_data):
+    """Helper to simulate old loads() method using loads_typed().
+
+    Args:
+        typed_data: Full (type_str, data_bytes) tuple from dumps_helper
+    """
+    return serializer.loads_typed(typed_data)
 
 
 def test_serializer_uses_default_handler_for_messages():
@@ -153,7 +158,8 @@ def test_dumps_typed_with_messages():
     type_str, blob = serializer.dumps_typed(msg)
 
     assert type_str == "json"
-    assert isinstance(blob, str)
+    # Checkpoint 3.0: dumps_typed now returns bytes, not str
+    assert isinstance(blob, bytes)
 
     # Deserialize
     deserialized = serializer.loads_typed((type_str, blob))
