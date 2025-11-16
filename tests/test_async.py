@@ -518,6 +518,7 @@ async def test_search_writes_async(redis_url: str) -> None:
 
         # Blobs are now base64-encoded in Redis (checkpoint 3.0)
         import base64
+
         assert base64.b64decode(doc1["blob"]).decode() == '"value1"'
         assert base64.b64decode(doc2["blob"]).decode() == '"value2"'
         assert base64.b64decode(doc3["blob"]).decode() == '"value3"'

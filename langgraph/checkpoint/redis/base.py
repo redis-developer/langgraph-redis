@@ -571,7 +571,9 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
                 "idx": WRITES_IDX_MAP.get(channel, idx),
                 "channel": channel,
                 "type": type_,
-                "blob": self._encode_blob(blob),  # Encode bytes to base64 string for Redis
+                "blob": self._encode_blob(
+                    blob
+                ),  # Encode bytes to base64 string for Redis
             }
             writes_objects.append(write_obj)
 
@@ -750,7 +752,9 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
             (
                 task_id,
                 data["channel"],
-                serde.loads_typed((data["type"], BaseRedisSaver._decode_blob_static(data["blob"]))),
+                serde.loads_typed(
+                    (data["type"], BaseRedisSaver._decode_blob_static(data["blob"]))
+                ),
             )
             for (task_id, _), data in task_id_to_data.items()
         ]
