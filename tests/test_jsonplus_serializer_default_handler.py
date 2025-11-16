@@ -14,6 +14,19 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langgraph.checkpoint.redis.jsonplus_redis import JsonPlusRedisSerializer
 
 
+# Helper functions for backward compatibility with tests
+def dumps_helper(serializer: JsonPlusRedisSerializer, obj):
+    """Helper to simulate old dumps() method using dumps_typed()."""
+    type_str, data_bytes = serializer.dumps_typed(obj)
+    return data_bytes
+
+
+def loads_helper(serializer: JsonPlusRedisSerializer, data_bytes):
+    """Helper to simulate old loads() method using loads_typed()."""
+    # Assume JSON type for these tests
+    return serializer.loads_typed(("json", data_bytes))
+
+
 def test_serializer_uses_default_handler_for_messages():
     """Test that dumps() uses the default handler for LangChain message objects.
 
@@ -28,11 +41,11 @@ def test_serializer_uses_default_handler_for_messages():
     human_msg = HumanMessage(content="What is the weather?", id="msg-1")
 
     # This should NOT raise TypeError
-    serialized_bytes = serializer.dumps(human_msg)
+    serialized_bytes = dumps_helper(serializer, human_msg)
     assert isinstance(serialized_bytes, bytes)
 
     # Deserialize and verify
-    deserialized = serializer.loads(serialized_bytes)
+    deserialized = loads_helper(serializer, serialized_bytes)
     assert isinstance(deserialized, HumanMessage)
     assert deserialized.content == "What is the weather?"
     assert deserialized.id == "msg-1"
@@ -54,11 +67,11 @@ def test_serializer_handles_all_message_types():
 
     for msg in messages:
         # Serialize
-        serialized = serializer.dumps(msg)
+        serialized = dumps_helper(serializer, msg)
         assert isinstance(serialized, bytes)
 
         # Deserialize
-        deserialized = serializer.loads(serialized)
+        deserialized = loads_helper(serializer, serialized)
 
         # Verify type is preserved
         assert type(deserialized) == type(msg)
@@ -80,11 +93,11 @@ def test_serializer_handles_message_lists():
     ]
 
     # Serialize the list
-    serialized = serializer.dumps(messages)
+    serialized = dumps_helper(serializer, messages)
     assert isinstance(serialized, bytes)
 
     # Deserialize
-    deserialized = serializer.loads(serialized)
+    deserialized = loads_helper(serializer, serialized)
 
     # Verify structure
     assert isinstance(deserialized, list)
@@ -113,11 +126,11 @@ def test_serializer_handles_nested_structures_with_messages():
     }
 
     # Serialize
-    serialized = serializer.dumps(state)
+    serialized = dumps_helper(serializer, state)
     assert isinstance(serialized, bytes)
 
     # Deserialize
-    deserialized = serializer.loads(serialized)
+    deserialized = loads_helper(serializer, serialized)
 
     # Verify structure
     assert "messages" in deserialized
@@ -169,8 +182,8 @@ def test_serializer_backwards_compatible():
     ]
 
     for obj in test_cases:
-        serialized = serializer.dumps(obj)
-        deserialized = serializer.loads(serialized)
+        serialized = dumps_helper(serializer, obj)
+        deserialized = loads_helper(serializer, serialized)
         assert deserialized == obj
 
 
@@ -194,8 +207,8 @@ def test_serializer_with_langchain_serialized_format():
     }
 
     # Serialize and deserialize
-    serialized = serializer.dumps(message_dict)
-    deserialized = serializer.loads(serialized)
+    serialized = dumps_helper(serializer, message_dict)
+    deserialized = loads_helper(serializer, serialized)
 
     # Should be revived as a HumanMessage
     assert isinstance(deserialized, HumanMessage)

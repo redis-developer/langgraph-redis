@@ -702,7 +702,7 @@ def test_message_dict_format_handling(redis_url: str) -> None:
     json_str = json.dumps(message_dict)
 
     # This should properly deserialize to a HumanMessage
-    deserialized = serializer.loads(json_str.encode())
+    deserialized = serializer.loads_typed(("json", json_str.encode()))
 
     # Should be a HumanMessage object, not a dict
     from langchain_core.messages import HumanMessage
