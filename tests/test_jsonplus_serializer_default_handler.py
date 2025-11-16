@@ -46,11 +46,12 @@ def test_serializer_uses_default_handler_for_messages():
     human_msg = HumanMessage(content="What is the weather?", id="msg-1")
 
     # This should NOT raise TypeError
-    serialized_bytes = dumps_helper(serializer, human_msg)
+    typed_data = dumps_helper(serializer, human_msg)
+    type_str, serialized_bytes = typed_data
     assert isinstance(serialized_bytes, bytes)
 
     # Deserialize and verify
-    deserialized = loads_helper(serializer, serialized_bytes)
+    deserialized = loads_helper(serializer, typed_data)
     assert isinstance(deserialized, HumanMessage)
     assert deserialized.content == "What is the weather?"
     assert deserialized.id == "msg-1"
@@ -72,11 +73,12 @@ def test_serializer_handles_all_message_types():
 
     for msg in messages:
         # Serialize
-        serialized = dumps_helper(serializer, msg)
+        typed_data = dumps_helper(serializer, msg)
+        type_str, serialized = typed_data
         assert isinstance(serialized, bytes)
 
         # Deserialize
-        deserialized = loads_helper(serializer, serialized)
+        deserialized = loads_helper(serializer, typed_data)
 
         # Verify type is preserved
         assert type(deserialized) == type(msg)
@@ -98,11 +100,12 @@ def test_serializer_handles_message_lists():
     ]
 
     # Serialize the list
-    serialized = dumps_helper(serializer, messages)
+    typed_data = dumps_helper(serializer, messages)
+    type_str, serialized = typed_data
     assert isinstance(serialized, bytes)
 
     # Deserialize
-    deserialized = loads_helper(serializer, serialized)
+    deserialized = loads_helper(serializer, typed_data)
 
     # Verify structure
     assert isinstance(deserialized, list)
@@ -131,11 +134,12 @@ def test_serializer_handles_nested_structures_with_messages():
     }
 
     # Serialize
-    serialized = dumps_helper(serializer, state)
+    typed_data = dumps_helper(serializer, state)
+    type_str, serialized = typed_data
     assert isinstance(serialized, bytes)
 
     # Deserialize
-    deserialized = loads_helper(serializer, serialized)
+    deserialized = loads_helper(serializer, typed_data)
 
     # Verify structure
     assert "messages" in deserialized
