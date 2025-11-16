@@ -1438,7 +1438,8 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
                 pass
 
         # FALLBACK: Use FT.SEARCH if registry not available or failed
-        return self._load_pending_writes(thread_id, checkpoint_ns, checkpoint_id)
+        # Call the base class implementation to avoid recursion
+        return super()._load_pending_writes(thread_id, checkpoint_ns, checkpoint_id)
 
     def _load_pending_sends_with_registry_check(
         self,
