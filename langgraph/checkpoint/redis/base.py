@@ -732,11 +732,24 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
             (
                 task_id,
                 data["channel"],
-                serde.loads_typed((data["type"], data["blob"])),
+                serde.loads_typed((data["type"], BaseRedisSaver._decode_blob_static(data["blob"]))),
             )
             for (task_id, _), data in task_id_to_data.items()
         ]
         return writes
+
+    @staticmethod
+    def _decode_blob_static(blob: bytes | str) -> bytes:
+        """Decode blob data from Redis storage (static method)."""
+        try:
+            # If it's already bytes, try to decode as base64
+            if isinstance(blob, bytes):
+                return base64.b64decode(blob)
+            # If it's a string, encode to bytes first then decode
+            return base64.b64decode(blob.encode("utf-8"))
+        except (binascii.Error, TypeError, ValueError):
+            # Handle both malformed base64 data and incorrect input types
+            return blob.encode("utf-8") if isinstance(blob, str) else blob
 
     @staticmethod
     def _parse_redis_checkpoint_writes_key(redis_key: str) -> dict:
