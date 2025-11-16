@@ -1,6 +1,5 @@
-import base64
 import logging
-from typing import Any, Union
+from typing import Any
 
 import orjson
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
@@ -9,26 +8,16 @@ logger = logging.getLogger(__name__)
 
 
 class JsonPlusRedisSerializer(JsonPlusSerializer):
-    """Redis-optimized serializer using orjson for faster JSON processing.
+    """Redis-optimized serializer using orjson for JSON processing.
 
-    This serializer handles the conversion of LangChain objects (including messages)
-    to and from their serialized format. It specifically addresses the MESSAGE_COERCION_FAILURE
-    issue by ensuring that LangChain message objects stored in their serialized format
-    (with 'lc', 'type', 'constructor' fields) are properly reconstructed as message objects
-    rather than being left as raw dictionaries.
+    Redis requires JSON-serializable data (not msgpack), so this serializer:
+    1. Uses orjson for fast JSON serialization
+    2. Handles LangChain objects by encoding them in the LC constructor format
+    3. Handles Interrupt objects with custom serialization/deserialization
+    4. Applies parent's _reviver for security-checked object reconstruction
 
-    The serialized format for LangChain objects looks like:
-    {
-        'lc': 1,  # LangChain version marker
-        'type': 'constructor',
-        'id': ['langchain', 'schema', 'messages', 'HumanMessage'],
-        'kwargs': {'content': '...', 'type': 'human', 'id': '...'}
-    }
-
-    This serializer ensures such objects are properly deserialized back to their
-    original message object form (e.g., HumanMessage, AIMessage) to prevent
-    downstream errors when the application expects message objects with specific
-    attributes and methods.
+    In checkpoint 3.0, the serializer API uses only dumps_typed/loads_typed
+    with tuple[str, bytes] signatures (changed from tuple[str, str] in 2.x).
     """
 
     SENTINEL_FIELDS = [
@@ -38,28 +27,77 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
         "parent_checkpoint_id",
     ]
 
-    def dumps(self, obj: Any) -> bytes:
-        """Use orjson for serialization with LangChain object support via default handler."""
-        # Use orjson with default handler for LangChain objects
-        # The _default method from parent class handles LangChain serialization
-        return orjson.dumps(obj, default=self._default)
+    def _default_handler(self, obj: Any) -> Any:
+        """Custom JSON encoder for objects that orjson can't serialize.
 
-    def loads(self, data: bytes) -> Any:
-        """Use orjson for JSON parsing with reviver support, fallback to parent for msgpack data."""
+        This handles LangChain objects by delegating to the parent's
+        _encode_constructor_args method which creates the LC format.
+        """
+        # Try to encode using parent's constructor args encoder
+        # This creates the {"lc": 2, "type": "constructor", ...} format
         try:
-            # Fast path: Use orjson for JSON data
-            parsed = orjson.loads(data)
-            # Apply reviver for LangChain objects (lc format)
+            # _encode_constructor_args needs the CLASS, not the instance
+            # For LangChain objects with to_json(), use that data for kwargs
+            if hasattr(obj, "to_json"):
+                json_dict = obj.to_json()
+                if isinstance(json_dict, dict) and "lc" in json_dict:
+                    # Already in LC format, return as-is
+                    return json_dict
+
+            # For other objects, encode with constructor args
+            # Pass the class and the instance's __dict__ as kwargs
+            return self._encode_constructor_args(
+                type(obj),
+                kwargs=obj.__dict__ if hasattr(obj, "__dict__") else {}
+            )
+        except Exception:
+            # For types we can't handle, raise TypeError
+            raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+
+    def dumps_typed(self, obj: Any) -> tuple[str, bytes]:
+        """Serialize using orjson for JSON.
+
+        Returns:
+            tuple[str, bytes]: Type identifier and serialized bytes
+        """
+        if isinstance(obj, bytes):
+            return "bytes", obj
+        elif isinstance(obj, bytearray):
+            return "bytearray", bytes(obj)
+        elif obj is None:
+            return "null", b""
+        else:
+            # Use orjson for JSON serialization with custom default handler
+            json_bytes = orjson.dumps(obj, default=self._default_handler)
+            return "json", json_bytes
+
+    def loads_typed(self, data: tuple[str, bytes]) -> Any:
+        """Deserialize with custom revival for LangChain/LangGraph objects.
+
+        Args:
+            data: Tuple of (type_str, data_bytes)
+
+        Returns:
+            Deserialized object with proper revival of LangChain/LangGraph types
+        """
+        type_, data_bytes = data
+
+        if type_ == "null":
+            return None
+        elif type_ == "bytes":
+            return data_bytes
+        elif type_ == "bytearray":
+            return bytearray(data_bytes)
+        elif type_ == "json":
+            # Use orjson for parsing, then apply our custom revival
+            parsed = orjson.loads(data_bytes)
             return self._revive_if_needed(parsed)
-        except (orjson.JSONDecodeError, TypeError):
-            # Fallback: Parent handles msgpack and other formats via loads_typed
-            # Attempt to detect type and use loads_typed
-            try:
-                # Try loading as msgpack via parent's loads_typed
-                return super().loads_typed(("msgpack", data))
-            except Exception:
-                # If that fails, try loading as json string
-                return super().loads_typed(("json", data))
+        elif type_ == "msgpack":
+            # Handle backward compatibility with old checkpoints that used msgpack
+            return super().loads_typed(data)
+        else:
+            # Unknown type, try parent
+            return super().loads_typed(data)
 
     def _revive_if_needed(self, obj: Any) -> Any:
         """Recursively apply reviver to handle LangChain and LangGraph serialized objects.
@@ -121,21 +159,3 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
         else:
             # Return primitives as-is
             return obj
-
-    def dumps_typed(self, obj: Any) -> tuple[str, str]:  # type: ignore[override]
-        if isinstance(obj, (bytes, bytearray)):
-            return "base64", base64.b64encode(obj).decode("utf-8")
-        else:
-            # All objects should be JSON-serializable (LangChain objects are pre-serialized)
-            return "json", self.dumps(obj).decode("utf-8")
-
-    def loads_typed(self, data: tuple[str, Union[str, bytes]]) -> Any:
-        type_, data_ = data
-        if type_ == "base64":
-            decoded = base64.b64decode(
-                data_ if isinstance(data_, bytes) else data_.encode()
-            )
-            return decoded
-        elif type_ == "json":
-            data_bytes = data_ if isinstance(data_, bytes) else data_.encode()
-            return self.loads(data_bytes)
