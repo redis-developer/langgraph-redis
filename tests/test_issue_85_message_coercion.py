@@ -212,7 +212,7 @@ def test_message_dict_format_causes_error():
 
         # Convert to JSON and back (simulating storage/retrieval)
         json_str = json.dumps(problematic_message_dict)
-        deserialized = serializer.loads(json_str.encode())
+        deserialized = serializer.loads_typed(("json", json_str.encode()))
 
         # Should be a proper HumanMessage, not the dict
         assert isinstance(

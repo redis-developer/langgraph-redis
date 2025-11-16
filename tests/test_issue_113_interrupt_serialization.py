@@ -57,10 +57,10 @@ def test_interrupt_serialization_roundtrip(redis_url: str) -> None:
     original_interrupt = Interrupt(value={"test": "data"}, resumable=True)
 
     # Serialize it
-    serialized = serializer.dumps(original_interrupt)
+    type_str, serialized = serializer.dumps_typed(original_interrupt)
 
     # Deserialize it
-    deserialized = serializer.loads(serialized)
+    deserialized = serializer.loads_typed((type_str, serialized))
 
     # This should be an Interrupt object, not a dict
     assert isinstance(deserialized, Interrupt), (
@@ -91,10 +91,10 @@ def test_interrupt_in_pending_sends(redis_url: str) -> None:
     ]
 
     # Serialize the pending_sends
-    serialized = serializer.dumps(pending_sends)
+    type_str, serialized = serializer.dumps_typed(pending_sends)
 
     # Deserialize
-    deserialized = serializer.loads(serialized)
+    deserialized = serializer.loads_typed((type_str, serialized))
 
     # Check the structure
     assert isinstance(deserialized, list)
