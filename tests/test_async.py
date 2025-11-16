@@ -516,9 +516,11 @@ async def test_search_writes_async(redis_url: str) -> None:
         doc2 = json.loads(results.docs[1].json)
         doc3 = json.loads(results.docs[2].json)
 
-        assert doc1["blob"] == '"value1"'
-        assert doc2["blob"] == '"value2"'
-        assert doc3["blob"] == '"value3"'
+        # Blobs are now base64-encoded in Redis (checkpoint 3.0)
+        import base64
+        assert base64.b64decode(doc1["blob"]).decode() == '"value1"'
+        assert base64.b64decode(doc2["blob"]).decode() == '"value2"'
+        assert base64.b64decode(doc3["blob"]).decode() == '"value3"'
 
 
 @pytest.mark.asyncio
