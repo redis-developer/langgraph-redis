@@ -534,7 +534,7 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
                     "idx": WRITES_IDX_MAP.get(channel, idx),
                     "channel": channel,
                     "type": type_,
-                    "blob": blob,
+                    "blob": self._encode_blob(blob),  # Encode bytes to base64 string for Redis
                 }
                 writes_objects.append(write_obj)
 
