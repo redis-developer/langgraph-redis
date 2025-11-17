@@ -90,12 +90,10 @@ async def test_aset_client_info_success():
     # Mock async client_setinfo
     saver._redis.client_setinfo = AsyncMock()
 
-    with patch("langgraph.checkpoint.redis.version.__redisvl_version__", "1.2.3"):
+    with patch("langgraph.checkpoint.redis.version.__full_lib_name__", "test-lib-v1.0"):
         await saver.aset_client_info()
 
-    saver._redis.client_setinfo.assert_called_once_with(
-        "LIB-NAME", "redis-py(redisvl_v1.2.3)"
-    )
+    saver._redis.client_setinfo.assert_called_once_with("LIB-NAME", "test-lib-v1.0")
 
 
 @pytest.mark.asyncio
@@ -112,7 +110,7 @@ async def test_aset_client_info_fallback_to_echo():
 
     saver._redis.echo = mock_echo
 
-    with patch("langgraph.checkpoint.redis.version.__redisvl_version__", "1.2.3"):
+    with patch("langgraph.checkpoint.redis.version.__full_lib_name__", "test-lib-v1.0"):
         await saver.aset_client_info()
 
     saver._redis.client_setinfo.assert_called_once()

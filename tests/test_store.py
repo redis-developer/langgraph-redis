@@ -530,10 +530,7 @@ def test_redis_store_client_info(redis_url: str, monkeypatch) -> None:
     """Test that RedisStore sets client info correctly."""
     from redis import Redis as NativeRedis
 
-    from langgraph.checkpoint.redis.version import __redisvl_version__
-
-    # Expected client info format
-    expected_client_info = f"redis-py(redisvl_v{__redisvl_version__})"
+    from langgraph.checkpoint.redis.version import __full_lib_name__
 
     # Create a direct Redis client to bypass RedisVL validation
     client = NativeRedis.from_url(redis_url)
@@ -546,7 +543,7 @@ def test_redis_store_client_info(redis_url: str, monkeypatch) -> None:
         def mock_client_setinfo(self, key, value):
             nonlocal client_info_called
             # We only track calls with our full lib name
-            if key == "LIB-NAME" and value == expected_client_info:
+            if key == "LIB-NAME" and value == __full_lib_name__:
                 client_info_called = True
             return original_client_setinfo(self, key, value)
 
@@ -568,10 +565,7 @@ def test_redis_store_client_info_fallback(redis_url: str, monkeypatch) -> None:
     """Test that RedisStore falls back to echo when client_setinfo is not available."""
     from redis import Redis as NativeRedis
 
-    from langgraph.checkpoint.redis.version import __redisvl_version__
-
-    # Expected client info format
-    expected_client_info = f"redis-py(redisvl_v{__redisvl_version__})"
+    from langgraph.checkpoint.redis.version import __full_lib_name__
 
     # Create a direct Redis client to bypass RedisVL validation
     client = NativeRedis.from_url(redis_url)
@@ -588,7 +582,7 @@ def test_redis_store_client_info_fallback(redis_url: str, monkeypatch) -> None:
         def mock_echo(self, message):
             nonlocal echo_called
             # We only want to track our library's echo calls
-            if message == expected_client_info:
+            if message == __full_lib_name__:
                 echo_called = True
             return original_echo(self, message)
 

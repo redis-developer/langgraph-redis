@@ -262,10 +262,7 @@ async def test_from_conn_string_errors(redis_url: str) -> None:
 @pytest.mark.asyncio
 async def test_async_shallow_client_info_setting(redis_url: str, monkeypatch) -> None:
     """Test that client_setinfo is called with correct library information in AsyncShallowRedisSaver."""
-    from langgraph.checkpoint.redis.version import __redisvl_version__
-
-    # Expected client info format
-    expected_client_info = f"redis-py(redisvl_v{__redisvl_version__})"
+    from langgraph.checkpoint.redis.version import __full_lib_name__
 
     # Track if client_setinfo was called with the right parameters
     client_info_called = False
@@ -276,9 +273,8 @@ async def test_async_shallow_client_info_setting(redis_url: str, monkeypatch) ->
     # Create a mock function for client_setinfo
     async def mock_client_setinfo(self, key, value):
         nonlocal client_info_called
-        # Note: RedisVL might call this with its own lib name first
-        # We only track calls with our full lib name
-        if key == "LIB-NAME" and value == expected_client_info:
+        # Track calls with our full lib name
+        if key == "LIB-NAME" and value == __full_lib_name__:
             client_info_called = True
         # Call original method to ensure normal function
         return await original_client_setinfo(self, key, value)
@@ -300,10 +296,7 @@ async def test_async_shallow_client_info_fallback(redis_url: str, monkeypatch) -
     from redis.asyncio import Redis
     from redis.exceptions import ResponseError
 
-    from langgraph.checkpoint.redis.version import __redisvl_version__
-
-    # Expected client info format
-    expected_client_info = f"redis-py(redisvl_v{__redisvl_version__})"
+    from langgraph.checkpoint.redis.version import __full_lib_name__
 
     # Create a Redis client directly first - this bypasses RedisVL validation
     client = Redis.from_url(redis_url)
@@ -321,7 +314,7 @@ async def test_async_shallow_client_info_fallback(redis_url: str, monkeypatch) -
     async def mock_echo(self, message):
         nonlocal echo_called, echo_messages
         echo_messages.append(message)
-        if message == expected_client_info:
+        if message == __full_lib_name__:
             echo_called = True
         return (
             await original_echo(self, message)
