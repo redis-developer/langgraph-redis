@@ -53,8 +53,8 @@ def test_interrupt_serialization_roundtrip(redis_url: str) -> None:
 
     serializer = JsonPlusRedisSerializer()
 
-    # Create an Interrupt object
-    original_interrupt = Interrupt(value={"test": "data"}, resumable=True)
+    # Create an Interrupt object (LangGraph 1.0 API: only value and id)
+    original_interrupt = Interrupt(value={"test": "data"}, id="test-interrupt-id")
 
     # Serialize it
     type_str, serialized = serializer.dumps_typed(original_interrupt)
@@ -68,7 +68,7 @@ def test_interrupt_serialization_roundtrip(redis_url: str) -> None:
         f"This causes AttributeError when LangGraph tries to access attributes"
     )
     assert deserialized.value == {"test": "data"}
-    assert deserialized.resumable is True
+    assert deserialized.id == "test-interrupt-id"
 
 
 def test_interrupt_in_pending_sends(redis_url: str) -> None:
@@ -86,7 +86,7 @@ def test_interrupt_in_pending_sends(redis_url: str) -> None:
     # In the real scenario, pending_sends contains tuples of (channel, value)
     # where value might be an Interrupt object
     pending_sends = [
-        ("__interrupt__", [Interrupt(value={"test": "data"}, resumable=False)]),
+        ("__interrupt__", [Interrupt(value={"test": "data"}, id="pending-interrupt")]),
         ("messages", ["some message"]),
     ]
 
@@ -112,7 +112,7 @@ def test_interrupt_in_pending_sends(redis_url: str) -> None:
         f"This is the root cause of 'dict' object has no attribute error"
     )
     assert value[0].value == {"test": "data"}
-    assert value[0].resumable is False
+    assert value[0].id == "pending-interrupt"
 
 
 def test_interrupt_resume_workflow(redis_url: str) -> None:
