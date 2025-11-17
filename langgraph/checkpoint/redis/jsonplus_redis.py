@@ -1,3 +1,4 @@
+import dataclasses
 import logging
 from typing import Any
 
@@ -72,6 +73,8 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
 
         This prevents false positives where user data with {value, id} fields
         could be incorrectly deserialized as Interrupt objects.
+
+        Also handles dataclass instances to preserve type information during serialization.
         """
         from langgraph.types import Interrupt
 
@@ -82,6 +85,24 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
                 "value": self._preprocess_interrupts(obj.value),
                 "id": obj.id,
             }
+        elif isinstance(obj, set):
+            # Handle sets by converting to list for JSON serialization
+            # Will be reconstructed back to set on deserialization
+            return {
+                "lc": 2,
+                "type": "constructor",
+                "id": ["builtins", "set"],
+                "kwargs": {"__set_items__": [self._preprocess_interrupts(item) for item in obj]},
+            }
+        elif dataclasses.is_dataclass(obj) and not isinstance(obj, type):
+            # Handle dataclass instances (like langmem's RunningSummary)
+            # Convert to LangChain constructor format to preserve type information
+            # Recursively process the dataclass fields
+            processed_dict = {
+                k: self._preprocess_interrupts(v)
+                for k, v in dataclasses.asdict(obj).items()
+            }
+            return self._encode_constructor_args(type(obj), kwargs=processed_dict)
         elif isinstance(obj, dict):
             return {k: self._preprocess_interrupts(v) for k, v in obj.items()}
         elif isinstance(obj, (list, tuple)):
@@ -144,6 +165,51 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
             # Unknown type, try parent
             return super().loads_typed(data)
 
+    def _reconstruct_from_constructor(self, obj: dict[str, Any]) -> Any:
+        """Reconstruct an object from LangChain constructor format.
+
+        This handles objects that were serialized using _encode_constructor_args
+        but are not LangChain objects (e.g., dataclasses, regular classes, sets).
+
+        Args:
+            obj: Dict with 'lc', 'type', 'id', and 'kwargs' keys
+
+        Returns:
+            Reconstructed object instance
+
+        Raises:
+            Exception: If object cannot be reconstructed
+        """
+        # Get the class from the id field
+        id_parts = obj.get("id", [])
+        if not id_parts or len(id_parts) < 2:
+            raise ValueError(f"Invalid constructor format: {obj}")
+
+        # Import the module and get the class
+        module_path = ".".join(id_parts[:-1])
+        class_name = id_parts[-1]
+
+        try:
+            import importlib
+
+            module = importlib.import_module(module_path)
+            cls = getattr(module, class_name)
+        except (ImportError, AttributeError) as e:
+            raise ValueError(
+                f"Cannot import {class_name} from {module_path}: {e}"
+            ) from e
+
+        # Get the kwargs and recursively revive nested objects
+        kwargs = obj.get("kwargs", {})
+        revived_kwargs = {k: self._revive_if_needed(v) for k, v in kwargs.items()}
+
+        # Special handling for sets
+        if cls is set and "__set_items__" in revived_kwargs:
+            return set(revived_kwargs["__set_items__"])
+
+        # Reconstruct the object
+        return cls(**revived_kwargs)
+
     def _revive_if_needed(self, obj: Any) -> Any:
         """Recursively apply reviver to handle LangChain and LangGraph serialized objects.
 
@@ -156,6 +222,9 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
         It also handles LangGraph Interrupt objects which serialize to {"value": ..., "resumable": ..., "ns": ..., "when": ...}
         and must be reconstructed to prevent AttributeError when accessing Interrupt attributes.
 
+        Additionally, it handles dataclass objects (like langmem's RunningSummary) that are serialized
+        using the LangChain constructor format but need special reconstruction logic.
+
         Args:
             obj: The object to potentially revive, which may be a dict, list, or primitive.
 
@@ -165,10 +234,23 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
         if isinstance(obj, dict):
             # Check if this is a LangChain serialized object
             if obj.get("lc") in (1, 2) and obj.get("type") == "constructor":
-                # Use parent's reviver method to reconstruct the object
+                # First try to use parent's reviver method to reconstruct LangChain objects
                 # This converts {'lc': 1, 'type': 'constructor', ...} back to
                 # the actual LangChain object (e.g., HumanMessage, AIMessage)
-                return self._reviver(obj)
+                revived = self._reviver(obj)
+
+                # If reviver returns a dict unchanged, it means it couldn't reconstruct it
+                # This happens with dataclasses or other non-LangChain objects
+                if isinstance(revived, dict) and revived.get("lc") in (1, 2):
+                    # Try to reconstruct it manually
+                    try:
+                        return self._reconstruct_from_constructor(obj)
+                    except Exception:
+                        # If reconstruction fails, fall through to recursive dict processing
+                        pass
+                else:
+                    # Reviver successfully reconstructed the object
+                    return revived
 
             # Check if this is a serialized Interrupt object with type marker
             # LangGraph 1.0+: Interrupt objects serialize to {"__interrupt__": True, "value": ..., "id": ...}
