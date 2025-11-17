@@ -24,14 +24,16 @@ This library is currently at version 0.1.0. As the library evolves, the followin
 The library uses structured Redis key patterns:
 
 **Standard RedisSaver (full history):**
-```
+
+```txt
 checkpoint:{thread_id}:{checkpoint_ns}:{checkpoint_id}
 checkpoint_blob:{thread_id}:{checkpoint_ns}:{channel}:{version}
 checkpoint_write:{thread_id}:{checkpoint_ns}:{checkpoint_id}:{task_id}:{idx}
 ```
 
 **ShallowRedisSaver (latest only):**
-```
+
+```txt
 checkpoint:{thread_id}:{checkpoint_ns}  # Single checkpoint per thread/namespace
 ```
 
@@ -88,10 +90,12 @@ saver = RedisSaver(
 ## Redis Module Requirements
 
 ### Redis 8.0+
+
 - Includes RedisJSON and RediSearch modules by default
 - Recommended for production use
 
 ### Redis < 8.0
+
 - Requires Redis Stack or manual installation of:
   - RedisJSON module
   - RediSearch module
