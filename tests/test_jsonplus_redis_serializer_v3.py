@@ -113,7 +113,7 @@ def test_serialization_roundtrip_interrupt_objects() -> None:
     """Test serialization roundtrip for Interrupt objects (Issue #113)."""
     serializer = JsonPlusRedisSerializer()
 
-    interrupt = Interrupt(value={"test": "data"}, resumable=True)
+    interrupt = Interrupt(value={"test": "data"}, id="test-id")
 
     type_str, data_bytes = serializer.dumps_typed(interrupt)
 
@@ -128,7 +128,7 @@ def test_serialization_roundtrip_interrupt_objects() -> None:
         f"This is the Issue #113 regression!"
     )
     assert result.value == {"test": "data"}
-    assert result.resumable is True
+    assert result.id == "test-id"
 
 
 def test_serialization_roundtrip_nested_interrupts() -> None:
@@ -137,8 +137,8 @@ def test_serialization_roundtrip_nested_interrupts() -> None:
 
     # Interrupt containing another Interrupt in value
     nested = Interrupt(
-        value={"nested": Interrupt(value={"inner": "data"}, resumable=False)},
-        resumable=True,
+        value={"nested": Interrupt(value={"inner": "data"}, id="inner-id")},
+        id="outer-id",
     )
 
     type_str, data_bytes = serializer.dumps_typed(nested)
@@ -147,6 +147,7 @@ def test_serialization_roundtrip_nested_interrupts() -> None:
     assert isinstance(result, Interrupt)
     assert isinstance(result.value["nested"], Interrupt)
     assert result.value["nested"].value == {"inner": "data"}
+    assert result.value["nested"].id == "inner-id"
 
 
 def test_serialization_roundtrip_list_of_interrupts() -> None:
@@ -154,7 +155,7 @@ def test_serialization_roundtrip_list_of_interrupts() -> None:
     serializer = JsonPlusRedisSerializer()
 
     pending_sends = [
-        ("__interrupt__", [Interrupt(value={"test": "data"}, resumable=False)]),
+        ("__interrupt__", [Interrupt(value={"test": "data"}, id="list-interrupt")]),
         ("messages", ["some message"]),
     ]
 
@@ -172,7 +173,7 @@ def test_serialization_roundtrip_list_of_interrupts() -> None:
     # CRITICAL: Must be Interrupt object, not dict (Issue #113)
     assert isinstance(value[0], Interrupt)
     assert value[0].value == {"test": "data"}
-    assert value[0].resumable is False
+    assert value[0].id == "list-interrupt"
 
 
 def test_no_public_dumps_loads_methods() -> None:
