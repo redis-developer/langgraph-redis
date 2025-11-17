@@ -37,6 +37,16 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
         if isinstance(obj, (bytes, bytearray)):
             raise TypeError("bytes/bytearray in nested structure - use msgpack")
 
+        # Handle Interrupt objects with a type marker to avoid false positives
+        from langgraph.types import Interrupt
+
+        if isinstance(obj, Interrupt):
+            return {
+                "__interrupt__": True,
+                "value": obj.value,
+                "id": obj.id,
+            }
+
         # Try to encode using parent's constructor args encoder
         # This creates the {"lc": 2, "type": "constructor", ...} format
         try:
@@ -53,9 +63,33 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
             return self._encode_constructor_args(
                 type(obj), kwargs=obj.__dict__ if hasattr(obj, "__dict__") else {}
             )
-        except Exception:
+        except (AttributeError, KeyError, ValueError, TypeError):
             # For types we can't handle, raise TypeError
             raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+
+    def _preprocess_interrupts(self, obj: Any) -> Any:
+        """Recursively add type markers to Interrupt objects before serialization.
+
+        This prevents false positives where user data with {value, id} fields
+        could be incorrectly deserialized as Interrupt objects.
+        """
+        from langgraph.types import Interrupt
+
+        if isinstance(obj, Interrupt):
+            # Add type marker to distinguish from plain dicts
+            return {
+                "__interrupt__": True,
+                "value": self._preprocess_interrupts(obj.value),
+                "id": obj.id,
+            }
+        elif isinstance(obj, dict):
+            return {k: self._preprocess_interrupts(v) for k, v in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            processed = [self._preprocess_interrupts(item) for item in obj]
+            # Preserve tuple type
+            return tuple(processed) if isinstance(obj, tuple) else processed
+        else:
+            return obj
 
     def dumps_typed(self, obj: Any) -> tuple[str, bytes]:
         """Serialize using orjson for JSON.
@@ -73,8 +107,10 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
             return "null", b""
         else:
             try:
+                # Preprocess to add type markers to Interrupt objects
+                processed_obj = self._preprocess_interrupts(obj)
                 # Try orjson first with custom default handler
-                json_bytes = orjson.dumps(obj, default=self._default_handler)
+                json_bytes = orjson.dumps(processed_obj, default=self._default_handler)
                 return "json", json_bytes
             except (TypeError, orjson.JSONEncodeError):
                 # Fall back to parent's msgpack serialization for bytes in nested structures
@@ -134,14 +170,14 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
                 # the actual LangChain object (e.g., HumanMessage, AIMessage)
                 return self._reviver(obj)
 
-            # Check if this is a serialized Interrupt object
-            # LangGraph 1.0+: Interrupt objects serialize to {"value": ..., "id": ...}
+            # Check if this is a serialized Interrupt object with type marker
+            # LangGraph 1.0+: Interrupt objects serialize to {"__interrupt__": True, "value": ..., "id": ...}
             # This must be done before recursively processing to avoid losing the structure
             if (
-                "value" in obj
+                obj.get("__interrupt__") is True
+                and "value" in obj
                 and "id" in obj
-                and len(obj) == 2
-                and isinstance(obj.get("id"), str)
+                and len(obj) == 3
             ):
                 # Try to reconstruct as an Interrupt object
                 try:

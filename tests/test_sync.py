@@ -1,3 +1,4 @@
+import base64
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -268,8 +269,6 @@ def test_search_writes(redis_url: str) -> None:
         doc3 = json.loads(results.docs[2].json)
 
         # Blobs are now base64-encoded in Redis (checkpoint 3.0)
-        import base64
-
         assert base64.b64decode(doc1["blob"]).decode() == '"value1"'
         assert base64.b64decode(doc2["blob"]).decode() == '"value2"'
         assert base64.b64decode(doc3["blob"]).decode() == '"value3"'
