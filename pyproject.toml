@@ -44,6 +44,7 @@ pytest-cov = "^6.2.1"
 vulture = "^2.14"
 pympler = "^1.1"
 aiofiles = "^24.1.0"
+langmem = "^0.0.30"
 
 [tool.pytest.ini_options]
 # --strict-markers will raise errors on unknown marks.
