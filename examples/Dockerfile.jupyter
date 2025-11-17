@@ -22,7 +22,7 @@ ENV PATH="/home/jupyter/venv/bin:$PATH"
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir "httpx>=0.24.0,<1.0.0" && \
     pip install --no-cache-dir "langgraph>=0.3.0" && \
-    pip install --no-cache-dir jupyter "redis>=5.2.1" "redisvl>=0.5.1" langchain-openai langchain-anthropic python-ulid
+    pip install --no-cache-dir jupyter "redis>=5.2.1" "redisvl>=0.11.0" langchain-openai langchain-anthropic python-ulid
 
 # Create a startup script that checks if local library is mounted
 RUN echo '#!/bin/bash\n\

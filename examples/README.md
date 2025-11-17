@@ -21,7 +21,7 @@ To run these notebooks using Docker (recommended for consistent environment):
 Note:
 
 - The first time you run this, it may take a few minutes to build the Docker image.
-- When running with Docker Compose, the local library code from `../langgraph` is automatically mounted and installed,
+- When running with Docker Compose, the local library code from `../` (parent directory) is automatically mounted and installed,
   allowing you to test changes to the library immediately without rebuilding.
 - If running the Docker image standalone (without docker-compose), it will install the library from PyPI instead.
 
@@ -40,12 +40,12 @@ If you prefer to run these notebooks locally without Docker:
 
    ```bash
    pip install langgraph-checkpoint-redis
-   pip install langgraph>=0.3.0 
-   pip install jupyter redis>=5.2.1 redisvl>=0.5.1 
-   pip install langchain-openai langchain-anthropic 
+   pip install langgraph>=0.3.0
+   pip install jupyter redis>=5.2.1 redisvl>=0.11.0
+   pip install langchain-openai langchain-anthropic
    pip install python-ulid "httpx>=0.24.0,<1.0.0"
-   
-   # Some notebooks may require additional packages, which will be installed 
+
+   # Some notebooks may require additional packages, which will be installed
    # within the notebooks themselves when needed
    ```
 
