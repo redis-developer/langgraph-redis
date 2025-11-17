@@ -54,6 +54,11 @@ aiofiles = "^24.1.0"
 #                       section of the configuration file raise errors.
 addopts = "--strict-markers --strict-config --durations=5 -vv"
 asyncio_mode = "auto"
+filterwarnings = [
+    # Ignore testcontainers internal deprecation warnings (they haven't fixed their own code yet)
+    "ignore::DeprecationWarning:testcontainers.core.waiting_utils",
+    "ignore::DeprecationWarning:testcontainers.redis",
+]
 
 [tool.poetry.scripts]
 format = "scripts:format"
