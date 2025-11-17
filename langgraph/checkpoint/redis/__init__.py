@@ -94,10 +94,25 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
         connection_args: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Configure the Redis client."""
+        from redis.exceptions import ResponseError
+
+        from langgraph.checkpoint.redis.version import __full_lib_name__
+
         self._owns_its_client = redis_client is None
         self._redis = redis_client or RedisConnectionFactory.get_redis_connection(
             redis_url, **connection_args
         )
+
+        # Set client info for Redis monitoring
+        try:
+            self._redis.client_setinfo("LIB-NAME", __full_lib_name__)
+        except (ResponseError, AttributeError):
+            # Fall back to a simple echo if client_setinfo is not available
+            try:
+                self._redis.echo(__full_lib_name__)
+            except Exception:
+                # Silently fail if even echo doesn't work
+                pass
 
     def create_indexes(self) -> None:
         self.checkpoints_index = SearchIndex.from_dict(

@@ -92,6 +92,14 @@ class BaseMockRedis:
             raise ResponseError("ERR This instance has cluster support disabled")
         return {}
 
+    def client_setinfo(self, key, value):
+        """Mock client_setinfo for testing."""
+        return "OK"
+
+    def echo(self, message):
+        """Mock echo for testing."""
+        return message
+
 
 class MockRedis(BaseMockRedis, Redis):
     pass
