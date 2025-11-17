@@ -15,12 +15,12 @@ def test_human_message_serialization():
     serializer = JsonPlusRedisSerializer()
     msg = HumanMessage(content="What is the weather?", id="msg-1")
 
-    # This would raise TypeError before the fix
-    serialized = serializer.dumps(msg)
-    print(f"  ✓ Serialized to {len(serialized)} bytes")
+    # Checkpoint 3.0: Use dumps_typed instead of dumps
+    type_str, serialized = serializer.dumps_typed(msg)
+    print(f"  ✓ Serialized to {len(serialized)} bytes (type: {type_str})")
 
     # Deserialize
-    deserialized = serializer.loads(serialized)
+    deserialized = serializer.loads_typed((type_str, serialized))
     assert isinstance(deserialized, HumanMessage)
     assert deserialized.content == "What is the weather?"
     assert deserialized.id == "msg-1"
@@ -39,8 +39,8 @@ def test_all_message_types():
     ]
 
     for msg in messages:
-        serialized = serializer.dumps(msg)
-        deserialized = serializer.loads(serialized)
+        type_str, serialized = serializer.dumps_typed(msg)
+        deserialized = serializer.loads_typed((type_str, serialized))
         assert type(deserialized) == type(msg)
         print(f"  ✓ {type(msg).__name__} works")
 
@@ -56,8 +56,8 @@ def test_message_list():
         HumanMessage(content="Question 2"),
     ]
 
-    serialized = serializer.dumps(messages)
-    deserialized = serializer.loads(serialized)
+    type_str, serialized = serializer.dumps_typed(messages)
+    deserialized = serializer.loads_typed((type_str, serialized))
 
     assert isinstance(deserialized, list)
     assert len(deserialized) == 3
@@ -78,8 +78,8 @@ def test_nested_structure():
         "step": 1,
     }
 
-    serialized = serializer.dumps(state)
-    deserialized = serializer.loads(serialized)
+    type_str, serialized = serializer.dumps_typed(state)
+    deserialized = serializer.loads_typed((type_str, serialized))
 
     assert "messages" in deserialized
     assert len(deserialized["messages"]) == 2
@@ -97,8 +97,9 @@ def test_dumps_typed():
 
     type_str, blob = serializer.dumps_typed(msg)
     assert type_str == "json"
-    assert isinstance(blob, str)
-    print(f"  ✓ dumps_typed returns: type='{type_str}', blob={len(blob)} chars")
+    # Checkpoint 3.0: blob is now bytes, not str
+    assert isinstance(blob, bytes)
+    print(f"  ✓ dumps_typed returns: type='{type_str}', blob={len(blob)} bytes")
 
     deserialized = serializer.loads_typed((type_str, blob))
     assert isinstance(deserialized, HumanMessage)
@@ -119,8 +120,8 @@ def test_backwards_compatibility():
     ]
 
     for name, obj in test_cases:
-        serialized = serializer.dumps(obj)
-        deserialized = serializer.loads(serialized)
+        type_str, serialized = serializer.dumps_typed(obj)
+        deserialized = serializer.loads_typed((type_str, serialized))
         assert deserialized == obj
         print(f"  ✓ {name} works")
 
