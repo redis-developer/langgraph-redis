@@ -135,14 +135,13 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
                 return self._reviver(obj)
 
             # Check if this is a serialized Interrupt object
-            # Interrupt objects serialize to {"value": ..., "resumable": ..., "ns": ..., "when": ...}
+            # LangGraph 1.0+: Interrupt objects serialize to {"value": ..., "id": ...}
             # This must be done before recursively processing to avoid losing the structure
             if (
                 "value" in obj
-                and "resumable" in obj
-                and "when" in obj
-                and len(obj) == 4
-                and isinstance(obj.get("resumable"), bool)
+                and "id" in obj
+                and len(obj) == 2
+                and isinstance(obj.get("id"), str)
             ):
                 # Try to reconstruct as an Interrupt object
                 try:
@@ -150,9 +149,7 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
 
                     return Interrupt(
                         value=self._revive_if_needed(obj["value"]),
-                        resumable=obj["resumable"],
-                        ns=obj["ns"],
-                        when=obj["when"],
+                        id=obj["id"],
                     )
                 except (ImportError, TypeError, ValueError) as e:
                     # If we can't import or construct Interrupt, log and fall through
