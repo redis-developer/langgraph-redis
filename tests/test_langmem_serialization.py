@@ -1,6 +1,8 @@
 """Integration tests for langmem object serialization with JsonPlusRedisSerializer."""
+
 import pytest
 from langmem.short_term.summarization import RunningSummary
+
 from langgraph.checkpoint.redis.jsonplus_redis import JsonPlusRedisSerializer
 
 

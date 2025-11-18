@@ -17,6 +17,7 @@ USER jupyter
 # Set up virtual environment
 RUN python -m venv /home/jupyter/venv
 ENV PATH="/home/jupyter/venv/bin:$PATH"
+ENV PYTHONDONTWRITEBYTECODE=1
 
 # Install dependencies
 RUN pip install --no-cache-dir --upgrade pip && \
