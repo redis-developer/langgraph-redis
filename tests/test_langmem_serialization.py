@@ -1,9 +1,21 @@
 """Integration tests for langmem object serialization with JsonPlusRedisSerializer."""
 
+import sys
+
 import pytest
-from langmem.short_term.summarization import RunningSummary
 
 from langgraph.checkpoint.redis.jsonplus_redis import JsonPlusRedisSerializer
+
+# langmem requires Python 3.11+ (uses typing.NotRequired)
+# Try to import, skip all tests if it fails
+try:
+    from langmem.short_term.summarization import RunningSummary
+except (ImportError, AttributeError):
+    # Skip entire module if langmem can't be imported (Python < 3.11)
+    pytestmark = pytest.mark.skip(
+        reason="langmem requires Python 3.11+ (uses typing.NotRequired)"
+    )
+    RunningSummary = None  # type: ignore
 
 
 class TestLangmemSerialization:
