@@ -92,7 +92,9 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
                 "lc": 2,
                 "type": "constructor",
                 "id": ["builtins", "set"],
-                "kwargs": {"__set_items__": [self._preprocess_interrupts(item) for item in obj]},
+                "kwargs": {
+                    "__set_items__": [self._preprocess_interrupts(item) for item in obj]
+                },
             }
         elif dataclasses.is_dataclass(obj) and not isinstance(obj, type):
             # Handle dataclass instances (like langmem's RunningSummary)
