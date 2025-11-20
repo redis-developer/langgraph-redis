@@ -48,6 +48,16 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
                 "id": obj.id,
             }
 
+        # Handle Send objects with a type marker (issue #94)
+        from langgraph.types import Send
+
+        if isinstance(obj, Send):
+            return {
+                "__send__": True,
+                "node": obj.node,
+                "arg": obj.arg,
+            }
+
         # Try to encode using parent's constructor args encoder
         # This creates the {"lc": 2, "type": "constructor", ...} format
         try:
@@ -69,14 +79,14 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
             raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
 
     def _preprocess_interrupts(self, obj: Any) -> Any:
-        """Recursively add type markers to Interrupt objects before serialization.
+        """Recursively add type markers to Interrupt and Send objects before serialization.
 
         This prevents false positives where user data with {value, id} fields
         could be incorrectly deserialized as Interrupt objects.
 
         Also handles dataclass instances to preserve type information during serialization.
         """
-        from langgraph.types import Interrupt
+        from langgraph.types import Interrupt, Send
 
         if isinstance(obj, Interrupt):
             # Add type marker to distinguish from plain dicts
@@ -84,6 +94,13 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
                 "__interrupt__": True,
                 "value": self._preprocess_interrupts(obj.value),
                 "id": obj.id,
+            }
+        elif isinstance(obj, Send):
+            # Add type marker to distinguish from plain dicts (issue #94)
+            return {
+                "__send__": True,
+                "node": obj.node,
+                "arg": self._preprocess_interrupts(obj.arg),
             }
         elif isinstance(obj, set):
             # Handle sets by converting to list for JSON serialization
@@ -275,6 +292,28 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
                     # If we can't import or construct Interrupt, log and fall through
                     logger.debug(
                         "Failed to deserialize Interrupt object: %s", e, exc_info=True
+                    )
+
+            # Check if this is a serialized Send object with type marker (issue #94)
+            # Send objects serialize to {"__send__": True, "node": ..., "arg": ...}
+            if (
+                obj.get("__send__") is True
+                and "node" in obj
+                and "arg" in obj
+                and len(obj) == 3
+            ):
+                # Try to reconstruct as a Send object
+                try:
+                    from langgraph.types import Send
+
+                    return Send(
+                        node=obj["node"],
+                        arg=self._revive_if_needed(obj["arg"]),
+                    )
+                except (ImportError, TypeError, ValueError) as e:
+                    # If we can't import or construct Send, log and fall through
+                    logger.debug(
+                        "Failed to deserialize Send object: %s", e, exc_info=True
                     )
 
             # Recursively process nested dicts
