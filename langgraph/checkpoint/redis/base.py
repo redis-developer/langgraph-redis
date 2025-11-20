@@ -394,6 +394,25 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
                 # Decode base64-encoded bytes
                 return self._decode_blob(obj["__bytes__"])
 
+            # Check if this is a Send object marker (issue #94)
+            if (
+                obj.get("__send__") is True
+                and "node" in obj
+                and "arg" in obj
+                and len(obj) == 3
+            ):
+                try:
+                    from langgraph.types import Send
+
+                    return Send(
+                        node=obj["node"],
+                        arg=self._recursive_deserialize(obj["arg"]),
+                    )
+                except (ImportError, TypeError, ValueError) as e:
+                    logger.debug(
+                        "Failed to deserialize Send object: %s", e, exc_info=True
+                    )
+
             # Check if this is a LangChain serialized object
             if obj.get("lc") in (1, 2) and obj.get("type") == "constructor":
                 try:
