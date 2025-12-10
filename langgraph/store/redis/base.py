@@ -205,8 +205,8 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
         index: Optional[IndexConfig] = None,
         ttl: Optional[TTLConfig] = None,  # Corrected type hint for ttl
         cluster_mode: Optional[bool] = None,
-        store_prefix: str = "store",
-        vector_prefix: str = "store_vectors",
+        store_prefix: str = STORE_PREFIX,
+        vector_prefix: str = STORE_VECTOR_PREFIX,
     ) -> None:
         """Initialize store with Redis connection and optional index config.
 
