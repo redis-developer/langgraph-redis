@@ -696,14 +696,14 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
     def create_indexes(self) -> None:
         """Create indexes without connecting to Redis."""
         self.checkpoints_index = AsyncSearchIndex.from_dict(
-            self.SCHEMAS[0], redis_client=self._redis
+            self.checkpoints_schema, redis_client=self._redis
         )
         # Shallow implementation doesn't use blobs, but base class requires the attribute
         self.checkpoint_blobs_index = AsyncSearchIndex.from_dict(
-            self.SCHEMAS[1], redis_client=self._redis
+            self.blobs_schema, redis_client=self._redis
         )
         self.checkpoint_writes_index = AsyncSearchIndex.from_dict(
-            self.SCHEMAS[2], redis_client=self._redis
+            self.writes_schema, redis_client=self._redis
         )
 
     def get_tuple(self, config: RunnableConfig) -> Optional[CheckpointTuple]:

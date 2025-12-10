@@ -129,13 +129,13 @@ class AsyncRedisSaver(
     def create_indexes(self) -> None:
         """Create indexes without connecting to Redis."""
         self.checkpoints_index = AsyncSearchIndex.from_dict(
-            self.SCHEMAS[0], redis_client=self._redis
+            self.checkpoints_schema, redis_client=self._redis
         )
         self.checkpoint_blobs_index = AsyncSearchIndex.from_dict(
-            self.SCHEMAS[1], redis_client=self._redis
+            self.blobs_schema, redis_client=self._redis
         )
         self.checkpoint_writes_index = AsyncSearchIndex.from_dict(
-            self.SCHEMAS[2], redis_client=self._redis
+            self.writes_schema, redis_client=self._redis
         )
 
     def _make_redis_checkpoint_key_cached(

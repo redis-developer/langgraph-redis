@@ -35,57 +35,6 @@ CHECKPOINT_PREFIX = "checkpoint"
 CHECKPOINT_BLOB_PREFIX = "checkpoint_blob"
 CHECKPOINT_WRITE_PREFIX = "checkpoint_write"
 
-SCHEMAS = [
-    {
-        "index": {
-            "name": "checkpoints",
-            "prefix": CHECKPOINT_PREFIX + REDIS_KEY_SEPARATOR,
-            "storage_type": "json",
-        },
-        "fields": [
-            {"name": "thread_id", "type": "tag"},
-            {"name": "checkpoint_ns", "type": "tag"},
-            {"name": "checkpoint_id", "type": "tag"},
-            {"name": "parent_checkpoint_id", "type": "tag"},
-            {"name": "checkpoint_ts", "type": "numeric"},
-            {"name": "source", "type": "tag"},
-            {"name": "step", "type": "numeric"},
-            {"name": "has_writes", "type": "tag"},
-        ],
-    },
-    {
-        "index": {
-            "name": "checkpoints_blobs",
-            "prefix": CHECKPOINT_BLOB_PREFIX + REDIS_KEY_SEPARATOR,
-            "storage_type": "json",
-        },
-        "fields": [
-            {"name": "thread_id", "type": "tag"},
-            {"name": "checkpoint_ns", "type": "tag"},
-            {"name": "checkpoint_id", "type": "tag"},
-            {"name": "channel", "type": "tag"},
-            {"name": "version", "type": "tag"},
-            {"name": "type", "type": "tag"},
-        ],
-    },
-    {
-        "index": {
-            "name": "checkpoint_writes",
-            "prefix": CHECKPOINT_WRITE_PREFIX + REDIS_KEY_SEPARATOR,
-            "storage_type": "json",
-        },
-        "fields": [
-            {"name": "thread_id", "type": "tag"},
-            {"name": "checkpoint_ns", "type": "tag"},
-            {"name": "checkpoint_id", "type": "tag"},
-            {"name": "task_id", "type": "tag"},
-            {"name": "idx", "type": "numeric"},
-            {"name": "channel", "type": "tag"},
-            {"name": "type", "type": "tag"},
-        ],
-    },
-]
-
 
 class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexType]):
     """Base Redis implementation for checkpoint saving.
@@ -96,7 +45,6 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
     _redis: RedisClientType
     _owns_its_client: bool = False
     _key_registry: Optional[Any] = None
-    SCHEMAS = SCHEMAS
 
     checkpoints_index: IndexType
     checkpoint_blobs_index: IndexType
@@ -138,58 +86,6 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         self._checkpoint_blob_prefix = checkpoint_blob_prefix
         self._checkpoint_write_prefix = checkpoint_write_prefix
 
-        # Create instance-level schemas with custom prefixes
-        self.SCHEMAS = [
-            {
-                "index": {
-                    "name": self._checkpoint_prefix,
-                    "prefix": self._checkpoint_prefix + REDIS_KEY_SEPARATOR,
-                    "storage_type": "json",
-                },
-                "fields": [
-                    {"name": "thread_id", "type": "tag"},
-                    {"name": "checkpoint_ns", "type": "tag"},
-                    {"name": "checkpoint_id", "type": "tag"},
-                    {"name": "parent_checkpoint_id", "type": "tag"},
-                    {"name": "checkpoint_ts", "type": "numeric"},
-                    {"name": "source", "type": "tag"},
-                    {"name": "step", "type": "numeric"},
-                    {"name": "has_writes", "type": "tag"},
-                ],
-            },
-            {
-                "index": {
-                    "name": self._checkpoint_blob_prefix,
-                    "prefix": self._checkpoint_blob_prefix + REDIS_KEY_SEPARATOR,
-                    "storage_type": "json",
-                },
-                "fields": [
-                    {"name": "thread_id", "type": "tag"},
-                    {"name": "checkpoint_ns", "type": "tag"},
-                    {"name": "checkpoint_id", "type": "tag"},
-                    {"name": "channel", "type": "tag"},
-                    {"name": "version", "type": "tag"},
-                    {"name": "type", "type": "tag"},
-                ],
-            },
-            {
-                "index": {
-                    "name": self._checkpoint_write_prefix,
-                    "prefix": self._checkpoint_write_prefix + REDIS_KEY_SEPARATOR,
-                    "storage_type": "json",
-                },
-                "fields": [
-                    {"name": "thread_id", "type": "tag"},
-                    {"name": "checkpoint_ns", "type": "tag"},
-                    {"name": "checkpoint_id", "type": "tag"},
-                    {"name": "task_id", "type": "tag"},
-                    {"name": "idx", "type": "numeric"},
-                    {"name": "channel", "type": "tag"},
-                    {"name": "type", "type": "tag"},
-                ],
-            },
-        ]
-
         self.configure_client(
             redis_url=redis_url,
             redis_client=redis_client,
@@ -201,6 +97,66 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         self.checkpoint_blobs_index: IndexType
         self.checkpoint_writes_index: IndexType
         self.create_indexes()
+
+    @property
+    def checkpoints_schema(self) -> Dict[str, Any]:
+        """Schema for the checkpoints index."""
+        return {
+            "index": {
+                "name": "checkpoints",
+                "prefix": self._checkpoint_prefix + REDIS_KEY_SEPARATOR,
+                "storage_type": "json",
+            },
+            "fields": [
+                {"name": "thread_id", "type": "tag"},
+                {"name": "checkpoint_ns", "type": "tag"},
+                {"name": "checkpoint_id", "type": "tag"},
+                {"name": "parent_checkpoint_id", "type": "tag"},
+                {"name": "checkpoint_ts", "type": "numeric"},
+                {"name": "source", "type": "tag"},
+                {"name": "step", "type": "numeric"},
+                {"name": "has_writes", "type": "tag"},
+            ],
+        }
+
+    @property
+    def blobs_schema(self) -> Dict[str, Any]:
+        """Schema for the checkpoint blobs index."""
+        return {
+            "index": {
+                "name": "checkpoints_blobs",
+                "prefix": self._checkpoint_blob_prefix + REDIS_KEY_SEPARATOR,
+                "storage_type": "json",
+            },
+            "fields": [
+                {"name": "thread_id", "type": "tag"},
+                {"name": "checkpoint_ns", "type": "tag"},
+                {"name": "checkpoint_id", "type": "tag"},
+                {"name": "channel", "type": "tag"},
+                {"name": "version", "type": "tag"},
+                {"name": "type", "type": "tag"},
+            ],
+        }
+
+    @property
+    def writes_schema(self) -> Dict[str, Any]:
+        """Schema for the checkpoint writes index."""
+        return {
+            "index": {
+                "name": "checkpoint_writes",
+                "prefix": self._checkpoint_write_prefix + REDIS_KEY_SEPARATOR,
+                "storage_type": "json",
+            },
+            "fields": [
+                {"name": "thread_id", "type": "tag"},
+                {"name": "checkpoint_ns", "type": "tag"},
+                {"name": "checkpoint_id", "type": "tag"},
+                {"name": "task_id", "type": "tag"},
+                {"name": "idx", "type": "numeric"},
+                {"name": "channel", "type": "tag"},
+                {"name": "type", "type": "tag"},
+            ],
+        }
 
     @abstractmethod
     def create_indexes(self) -> None:

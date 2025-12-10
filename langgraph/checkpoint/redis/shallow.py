@@ -445,14 +445,14 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
 
     def create_indexes(self) -> None:
         self.checkpoints_index = SearchIndex.from_dict(
-            self.SCHEMAS[0], redis_client=self._redis
+            self.checkpoints_schema, redis_client=self._redis
         )
         # Shallow implementation doesn't use blobs, but base class requires the attribute
         self.checkpoint_blobs_index = SearchIndex.from_dict(
-            self.SCHEMAS[1], redis_client=self._redis
+            self.blobs_schema, redis_client=self._redis
         )
         self.checkpoint_writes_index = SearchIndex.from_dict(
-            self.SCHEMAS[2], redis_client=self._redis
+            self.writes_schema, redis_client=self._redis
         )
 
     def setup(self) -> None:
