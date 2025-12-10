@@ -109,6 +109,9 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         redis_client: Optional[RedisClientType] = None,
         connection_args: Optional[Dict[str, Any]] = None,
         ttl: Optional[Dict[str, Any]] = None,
+        checkpoint_prefix: str = CHECKPOINT_PREFIX,
+        checkpoint_blob_prefix: str = CHECKPOINT_BLOB_PREFIX,
+        checkpoint_write_prefix: str = CHECKPOINT_WRITE_PREFIX,
     ) -> None:
         """Initialize Redis-backed checkpoint saver.
 
@@ -119,6 +122,9 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
             ttl: Optional TTL configuration dict with optional keys:
                 - default_ttl: TTL in minutes for all checkpoint keys
                 - refresh_on_read: Whether to refresh TTL on reads
+            checkpoint_prefix: Prefix for checkpoint keys (default: "checkpoint")
+            checkpoint_blob_prefix: Prefix for checkpoint blob keys (default: "checkpoint_blob")
+            checkpoint_write_prefix: Prefix for checkpoint write keys (default: "checkpoint_write")
         """
         super().__init__(serde=JsonPlusRedisSerializer())
         if redis_url is None and redis_client is None:
@@ -126,6 +132,63 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
 
         # Store TTL configuration
         self.ttl_config = ttl
+
+        # Store custom prefixes
+        self._checkpoint_prefix = checkpoint_prefix
+        self._checkpoint_blob_prefix = checkpoint_blob_prefix
+        self._checkpoint_write_prefix = checkpoint_write_prefix
+
+        # Create instance-level schemas with custom prefixes
+        self.SCHEMAS = [
+            {
+                "index": {
+                    "name": self._checkpoint_prefix,
+                    "prefix": self._checkpoint_prefix + REDIS_KEY_SEPARATOR,
+                    "storage_type": "json",
+                },
+                "fields": [
+                    {"name": "thread_id", "type": "tag"},
+                    {"name": "checkpoint_ns", "type": "tag"},
+                    {"name": "checkpoint_id", "type": "tag"},
+                    {"name": "parent_checkpoint_id", "type": "tag"},
+                    {"name": "checkpoint_ts", "type": "numeric"},
+                    {"name": "source", "type": "tag"},
+                    {"name": "step", "type": "numeric"},
+                    {"name": "has_writes", "type": "tag"},
+                ],
+            },
+            {
+                "index": {
+                    "name": self._checkpoint_blob_prefix,
+                    "prefix": self._checkpoint_blob_prefix + REDIS_KEY_SEPARATOR,
+                    "storage_type": "json",
+                },
+                "fields": [
+                    {"name": "thread_id", "type": "tag"},
+                    {"name": "checkpoint_ns", "type": "tag"},
+                    {"name": "checkpoint_id", "type": "tag"},
+                    {"name": "channel", "type": "tag"},
+                    {"name": "version", "type": "tag"},
+                    {"name": "type", "type": "tag"},
+                ],
+            },
+            {
+                "index": {
+                    "name": self._checkpoint_write_prefix,
+                    "prefix": self._checkpoint_write_prefix + REDIS_KEY_SEPARATOR,
+                    "storage_type": "json",
+                },
+                "fields": [
+                    {"name": "thread_id", "type": "tag"},
+                    {"name": "checkpoint_ns", "type": "tag"},
+                    {"name": "checkpoint_id", "type": "tag"},
+                    {"name": "task_id", "type": "tag"},
+                    {"name": "idx", "type": "numeric"},
+                    {"name": "channel", "type": "tag"},
+                    {"name": "type", "type": "tag"},
+                ],
+            },
+        ]
 
         self.configure_client(
             redis_url=redis_url,
@@ -815,26 +878,24 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
             "idx": idx,
         }
 
-    @staticmethod
     def _make_redis_checkpoint_key(
-        thread_id: str, checkpoint_ns: str, checkpoint_id: str
+        self, thread_id: str, checkpoint_ns: str, checkpoint_id: str
     ) -> str:
         return REDIS_KEY_SEPARATOR.join(
             [
-                CHECKPOINT_PREFIX,
+                self._checkpoint_prefix,
                 str(to_storage_safe_id(thread_id)),
                 to_storage_safe_str(checkpoint_ns),
                 str(to_storage_safe_id(checkpoint_id)),
             ]
         )
 
-    @staticmethod
     def _make_redis_checkpoint_blob_key(
-        thread_id: str, checkpoint_ns: str, channel: str, version: str
+        self, thread_id: str, checkpoint_ns: str, channel: str, version: str
     ) -> str:
         return REDIS_KEY_SEPARATOR.join(
             [
-                CHECKPOINT_BLOB_PREFIX,
+                self._checkpoint_blob_prefix,
                 str(to_storage_safe_id(thread_id)),
                 to_storage_safe_str(checkpoint_ns),
                 channel,
@@ -842,8 +903,8 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
             ]
         )
 
-    @staticmethod
     def _make_redis_checkpoint_writes_key(
+        self,
         thread_id: str,
         checkpoint_ns: str,
         checkpoint_id: str,
@@ -857,7 +918,7 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         if idx is None:
             return REDIS_KEY_SEPARATOR.join(
                 [
-                    CHECKPOINT_WRITE_PREFIX,
+                    self._checkpoint_write_prefix,
                     storage_safe_thread_id,
                     storage_safe_checkpoint_ns,
                     storage_safe_checkpoint_id,
@@ -867,7 +928,7 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
 
         return REDIS_KEY_SEPARATOR.join(
             [
-                CHECKPOINT_WRITE_PREFIX,
+                self._checkpoint_write_prefix,
                 storage_safe_thread_id,
                 storage_safe_checkpoint_ns,
                 storage_safe_checkpoint_id,

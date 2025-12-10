@@ -203,7 +203,7 @@ def test_put_writes_json_structure(
         checkpoint_ns = saved_config["configurable"].get("checkpoint_ns", "")
         checkpoint_id = saved_config["configurable"]["checkpoint_id"]
 
-        write_key = BaseRedisSaver._make_redis_checkpoint_writes_key(
+        write_key = saver._make_redis_checkpoint_writes_key(
             thread_id,
             checkpoint_ns,
             checkpoint_id,

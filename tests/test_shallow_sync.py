@@ -9,6 +9,10 @@ from langgraph.checkpoint.base import (
     create_checkpoint,
     empty_checkpoint,
 )
+from langgraph.checkpoint.redis.base import (
+    CHECKPOINT_BLOB_PREFIX,
+    CHECKPOINT_WRITE_PREFIX,
+)
 from redis import Redis
 from redis.exceptions import ConnectionError as RedisConnectionError
 
@@ -355,65 +359,61 @@ def test_key_generation_inconsistency(redis_url: str) -> None:
     This test verifies that both the base class and shallow saver cleanup patterns
     use the same storage-safe transformations, ensuring cleanup works correctly.
     """
-    from langgraph.checkpoint.redis.base import (
-        CHECKPOINT_BLOB_PREFIX,
-        CHECKPOINT_WRITE_PREFIX,
-        BaseRedisSaver,
-    )
-
     thread_id = "test_thread"
     checkpoint_ns = ""  # Empty namespace - the problematic case
     channel = "test_channel"
     version = "1"
 
-    # Test blob key generation
-    base_blob_key = BaseRedisSaver._make_redis_checkpoint_blob_key(
-        thread_id, checkpoint_ns, channel, version
-    )
-    shallow_blob_pattern = (
-        ShallowRedisSaver._make_shallow_redis_checkpoint_blob_key_pattern(
-            thread_id, checkpoint_ns
+    # Create a saver instance to test key generation
+    with _saver(redis_url) as saver:
+        # Test blob key generation
+        base_blob_key = saver._make_redis_checkpoint_blob_key(
+            thread_id, checkpoint_ns, channel, version
         )
-    )
-
-    # The base key uses storage-safe transformations
-    expected_base_key = f"{CHECKPOINT_BLOB_PREFIX}:test_thread:__empty__:test_channel:1"
-    assert base_blob_key == expected_base_key
-
-    # The shallow pattern now uses storage-safe transformations (fixed!)
-    expected_pattern = f"{CHECKPOINT_BLOB_PREFIX}:test_thread:__empty__:*"
-    assert shallow_blob_pattern == expected_pattern
-
-    # Both base key and pattern now consistently use "__empty__" (fix confirmed!)
-    assert "__empty__" in base_blob_key
-    assert "__empty__" in shallow_blob_pattern
-
-    # Test writes key generation
-    checkpoint_id = "test_checkpoint"
-    task_id = "test_task"
-
-    base_writes_key = BaseRedisSaver._make_redis_checkpoint_writes_key(
-        thread_id, checkpoint_ns, checkpoint_id, task_id, 0
-    )
-    shallow_writes_pattern = (
-        ShallowRedisSaver._make_shallow_redis_checkpoint_writes_key_pattern(
-            thread_id, checkpoint_ns
+        shallow_blob_pattern = (
+            ShallowRedisSaver._make_shallow_redis_checkpoint_blob_key_pattern(
+                thread_id, checkpoint_ns
+            )
         )
-    )
 
-    # The base key uses storage-safe transformations
-    expected_base_key = (
-        f"{CHECKPOINT_WRITE_PREFIX}:test_thread:__empty__:test_checkpoint:test_task:0"
-    )
-    assert base_writes_key == expected_base_key
+        # The base key uses storage-safe transformations
+        expected_base_key = f"{CHECKPOINT_BLOB_PREFIX}:test_thread:__empty__:test_channel:1"
+        assert base_blob_key == expected_base_key
 
-    # The shallow pattern now uses storage-safe transformations (fixed!)
-    expected_pattern = f"{CHECKPOINT_WRITE_PREFIX}:test_thread:__empty__:*"
-    assert shallow_writes_pattern == expected_pattern
+        # The shallow pattern now uses storage-safe transformations (fixed!)
+        expected_pattern = f"{CHECKPOINT_BLOB_PREFIX}:test_thread:__empty__:*"
+        assert shallow_blob_pattern == expected_pattern
 
-    # Both base key and pattern now consistently use "__empty__" (fix confirmed!)
-    assert "__empty__" in base_writes_key
-    assert "__empty__" in shallow_writes_pattern
+        # Both base key and pattern now consistently use "__empty__" (fix confirmed!)
+        assert "__empty__" in base_blob_key
+        assert "__empty__" in shallow_blob_pattern
+
+        # Test writes key generation
+        checkpoint_id = "test_checkpoint"
+        task_id = "test_task"
+
+        base_writes_key = saver._make_redis_checkpoint_writes_key(
+            thread_id, checkpoint_ns, checkpoint_id, task_id, 0
+        )
+        shallow_writes_pattern = (
+            ShallowRedisSaver._make_shallow_redis_checkpoint_writes_key_pattern(
+                thread_id, checkpoint_ns
+            )
+        )
+
+        # The base key uses storage-safe transformations
+        expected_base_key = (
+            f"{CHECKPOINT_WRITE_PREFIX}:test_thread:__empty__:test_checkpoint:test_task:0"
+        )
+        assert base_writes_key == expected_base_key
+
+        # The shallow pattern now uses storage-safe transformations (fixed!)
+        expected_pattern = f"{CHECKPOINT_WRITE_PREFIX}:test_thread:__empty__:*"
+        assert shallow_writes_pattern == expected_pattern
+
+        # Both base key and pattern now consistently use "__empty__" (fix confirmed!)
+        assert "__empty__" in base_writes_key
+        assert "__empty__" in shallow_writes_pattern
 
 
 def test_shallow_saver_inline_storage(redis_url: str) -> None:

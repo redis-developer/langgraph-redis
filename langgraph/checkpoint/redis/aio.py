@@ -40,7 +40,13 @@ from redisvl.query import FilterQuery
 from redisvl.query.filter import Num, Tag
 from ulid import ULID
 
-from langgraph.checkpoint.redis.base import BaseRedisSaver
+from langgraph.checkpoint.redis.base import (
+    BaseRedisSaver,
+    CHECKPOINT_BLOB_PREFIX,
+    CHECKPOINT_PREFIX,
+    CHECKPOINT_WRITE_PREFIX,
+    REDIS_KEY_SEPARATOR,
+)
 from langgraph.checkpoint.redis.key_registry import (
     AsyncCheckpointKeyRegistry as AsyncKeyRegistry,
 )
@@ -81,12 +87,18 @@ class AsyncRedisSaver(
         redis_client: Optional[Union[AsyncRedis, AsyncRedisCluster]] = None,
         connection_args: Optional[Dict[str, Any]] = None,
         ttl: Optional[Dict[str, Any]] = None,
+        checkpoint_prefix: str = CHECKPOINT_PREFIX,
+        checkpoint_blob_prefix: str = CHECKPOINT_BLOB_PREFIX,
+        checkpoint_write_prefix: str = CHECKPOINT_WRITE_PREFIX,
     ) -> None:
         super().__init__(
             redis_url=redis_url,
             redis_client=redis_client,
             connection_args=connection_args,
             ttl=ttl,
+            checkpoint_prefix=checkpoint_prefix,
+            checkpoint_blob_prefix=checkpoint_blob_prefix,
+            checkpoint_write_prefix=checkpoint_write_prefix,
         )
         self.loop = asyncio.get_running_loop()
 
@@ -94,17 +106,6 @@ class AsyncRedisSaver(
         self._key_cache: Dict[str, str] = {}
         self._key_cache_max_size = 1000  # Configurable limit
 
-        # Pre-compute common prefixes for performance
-        from langgraph.checkpoint.redis.base import (
-            CHECKPOINT_BLOB_PREFIX,
-            CHECKPOINT_PREFIX,
-            CHECKPOINT_WRITE_PREFIX,
-            REDIS_KEY_SEPARATOR,
-        )
-
-        self._checkpoint_prefix = CHECKPOINT_PREFIX
-        self._checkpoint_blob_prefix = CHECKPOINT_BLOB_PREFIX
-        self._checkpoint_write_prefix = CHECKPOINT_WRITE_PREFIX
         self._separator = REDIS_KEY_SEPARATOR
 
     def configure_client(
@@ -375,7 +376,7 @@ class AsyncRedisSaver(
             storage_safe_checkpoint_id = to_storage_safe_id(checkpoint_id)
 
             # Construct direct key for checkpoint data
-            checkpoint_key = BaseRedisSaver._make_redis_checkpoint_key(
+            checkpoint_key = self._make_redis_checkpoint_key(
                 storage_safe_thread_id,
                 storage_safe_checkpoint_ns,
                 storage_safe_checkpoint_id,
@@ -476,7 +477,7 @@ class AsyncRedisSaver(
             # If we didn't get TTL from pipeline (i.e., came from else branch), fetch it now
             if "current_ttl" not in locals():
                 # Get the checkpoint key
-                checkpoint_key = BaseRedisSaver._make_redis_checkpoint_key(
+                checkpoint_key = self._make_redis_checkpoint_key(
                     to_storage_safe_id(doc_thread_id),
                     to_storage_safe_str(doc_checkpoint_ns),
                     to_storage_safe_id(doc_checkpoint_id),
@@ -1054,7 +1055,7 @@ class AsyncRedisSaver(
                     }
 
                     # Prepare checkpoint key
-                    checkpoint_key = BaseRedisSaver._make_redis_checkpoint_key(
+                    checkpoint_key = self._make_redis_checkpoint_key(
                         storage_safe_thread_id,
                         storage_safe_checkpoint_ns,
                         storage_safe_checkpoint_id,
@@ -1441,12 +1442,18 @@ class AsyncRedisSaver(
         redis_client: Optional[Union[AsyncRedis, AsyncRedisCluster]] = None,
         connection_args: Optional[Dict[str, Any]] = None,
         ttl: Optional[Dict[str, Any]] = None,
+        checkpoint_prefix: Optional[str] = None,
+        checkpoint_blob_prefix: Optional[str] = None,
+        checkpoint_write_prefix: Optional[str] = None,
     ) -> AsyncIterator[AsyncRedisSaver]:
         async with cls(
             redis_url=redis_url,
             redis_client=redis_client,
             connection_args=connection_args,
             ttl=ttl,
+            checkpoint_prefix=checkpoint_prefix,
+            checkpoint_blob_prefix=checkpoint_blob_prefix,
+            checkpoint_write_prefix=checkpoint_write_prefix,
         ) as saver:
             yield saver
 
@@ -1980,7 +1987,7 @@ class AsyncRedisSaver(
             checkpoint_namespaces.add(checkpoint_ns)
 
             # Delete checkpoint key
-            checkpoint_key = BaseRedisSaver._make_redis_checkpoint_key(
+            checkpoint_key = self._make_redis_checkpoint_key(
                 storage_safe_thread_id, checkpoint_ns, checkpoint_id
             )
             keys_to_delete.append(checkpoint_key)
@@ -2004,7 +2011,7 @@ class AsyncRedisSaver(
             channel = getattr(doc, "channel", "")
             version = getattr(doc, "version", "")
 
-            blob_key = BaseRedisSaver._make_redis_checkpoint_blob_key(
+            blob_key = self._make_redis_checkpoint_blob_key(
                 storage_safe_thread_id, checkpoint_ns, channel, version
             )
             keys_to_delete.append(blob_key)
@@ -2024,7 +2031,7 @@ class AsyncRedisSaver(
             task_id = getattr(doc, "task_id", "")
             idx = getattr(doc, "idx", 0)
 
-            write_key = BaseRedisSaver._make_redis_checkpoint_writes_key(
+            write_key = self._make_redis_checkpoint_writes_key(
                 storage_safe_thread_id, checkpoint_ns, checkpoint_id, task_id, idx
             )
             keys_to_delete.append(write_key)

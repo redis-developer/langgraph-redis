@@ -38,52 +38,6 @@ from langgraph.checkpoint.redis.util import (
     to_storage_safe_str,
 )
 
-SCHEMAS = [
-    {
-        "index": {
-            "name": "checkpoints",
-            "prefix": CHECKPOINT_PREFIX + REDIS_KEY_SEPARATOR,
-            "storage_type": "json",
-        },
-        "fields": [
-            {"name": "thread_id", "type": "tag"},
-            {"name": "checkpoint_ns", "type": "tag"},
-            {"name": "source", "type": "tag"},
-            {"name": "step", "type": "numeric"},
-        ],
-    },
-    {
-        "index": {
-            "name": "checkpoints_blobs",
-            "prefix": CHECKPOINT_BLOB_PREFIX + REDIS_KEY_SEPARATOR,
-            "storage_type": "json",
-        },
-        "fields": [
-            {"name": "thread_id", "type": "tag"},
-            {"name": "checkpoint_ns", "type": "tag"},
-            {"name": "channel", "type": "tag"},
-            {"name": "type", "type": "tag"},
-        ],
-    },
-    {
-        "index": {
-            "name": "checkpoint_writes",
-            "prefix": CHECKPOINT_WRITE_PREFIX + REDIS_KEY_SEPARATOR,
-            "storage_type": "json",
-        },
-        "fields": [
-            {"name": "thread_id", "type": "tag"},
-            {"name": "checkpoint_ns", "type": "tag"},
-            {"name": "checkpoint_id", "type": "tag"},
-            {"name": "task_id", "type": "tag"},
-            {"name": "idx", "type": "numeric"},
-            {"name": "channel", "type": "tag"},
-            {"name": "type", "type": "tag"},
-        ],
-    },
-]
-
-
 class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
     """Async Redis implementation that only stores the most recent checkpoint."""
 
@@ -101,12 +55,18 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         redis_client: Optional[AsyncRedis] = None,
         connection_args: Optional[dict[str, Any]] = None,
         ttl: Optional[dict[str, Any]] = None,
+        checkpoint_prefix: str = CHECKPOINT_PREFIX,
+        checkpoint_blob_prefix: str = CHECKPOINT_BLOB_PREFIX,
+        checkpoint_write_prefix: str = CHECKPOINT_WRITE_PREFIX,
     ) -> None:
         super().__init__(
             redis_url=redis_url,
             redis_client=redis_client,
             connection_args=connection_args,
             ttl=ttl,
+            checkpoint_prefix=checkpoint_prefix,
+            checkpoint_blob_prefix=checkpoint_blob_prefix,
+            checkpoint_write_prefix=checkpoint_write_prefix,
         )
         self.loop = asyncio.get_running_loop()
 
@@ -115,9 +75,6 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         self._key_cache_max_size = 1000  # Configurable limit
         self._channel_cache: Dict[str, Any] = {}
 
-        # Cache commonly used prefixes
-        self._checkpoint_prefix = CHECKPOINT_PREFIX
-        self._checkpoint_write_prefix = CHECKPOINT_WRITE_PREFIX
         self._separator = REDIS_KEY_SEPARATOR
 
     async def __aenter__(self) -> AsyncShallowRedisSaver:
@@ -158,6 +115,9 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         redis_client: Optional[AsyncRedis] = None,
         connection_args: Optional[dict[str, Any]] = None,
         ttl: Optional[dict[str, Any]] = None,
+        checkpoint_prefix: str = CHECKPOINT_PREFIX,
+        checkpoint_blob_prefix: str = CHECKPOINT_BLOB_PREFIX,
+        checkpoint_write_prefix: str = CHECKPOINT_WRITE_PREFIX,
     ) -> AsyncIterator[AsyncShallowRedisSaver]:
         """Create a new AsyncShallowRedisSaver instance."""
         async with cls(
@@ -165,6 +125,9 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             redis_client=redis_client,
             connection_args=connection_args,
             ttl=ttl,
+            checkpoint_prefix=checkpoint_prefix,
+            checkpoint_blob_prefix=checkpoint_blob_prefix,
+            checkpoint_write_prefix=checkpoint_write_prefix,
         ) as saver:
             yield saver
 
@@ -837,7 +800,7 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         )
         if cache_key not in self._key_cache:
             self._key_cache[cache_key] = (
-                BaseRedisSaver._make_redis_checkpoint_writes_key(
+                self._make_redis_checkpoint_writes_key(
                     thread_id, checkpoint_ns, checkpoint_id, task_id, idx
                 )
             )
@@ -884,7 +847,7 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             if len(self._key_cache) >= self._key_cache_max_size:
                 # Remove oldest entry when cache is full
                 self._key_cache.pop(next(iter(self._key_cache)))
-            self._key_cache[cache_key] = BaseRedisSaver._make_redis_checkpoint_blob_key(
+            self._key_cache[cache_key] = self._make_redis_checkpoint_blob_key(
                 thread_id, checkpoint_ns, channel, version
             )
         return self._key_cache[cache_key]
