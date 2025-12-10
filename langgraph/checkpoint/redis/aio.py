@@ -1442,9 +1442,9 @@ class AsyncRedisSaver(
         redis_client: Optional[Union[AsyncRedis, AsyncRedisCluster]] = None,
         connection_args: Optional[Dict[str, Any]] = None,
         ttl: Optional[Dict[str, Any]] = None,
-        checkpoint_prefix: Optional[str] = None,
-        checkpoint_blob_prefix: Optional[str] = None,
-        checkpoint_write_prefix: Optional[str] = None,
+        checkpoint_prefix: str = CHECKPOINT_PREFIX,
+        checkpoint_blob_prefix: str = CHECKPOINT_BLOB_PREFIX,
+        checkpoint_write_prefix: str = CHECKPOINT_WRITE_PREFIX,
     ) -> AsyncIterator[AsyncRedisSaver]:
         async with cls(
             redis_url=redis_url,
