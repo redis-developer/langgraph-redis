@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import logging
 import threading
 from collections import defaultdict
@@ -374,7 +375,10 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
         The method is smart about serialization:
         - If the value is a simple JSON-serializable dict/list, it's stored as-is
         - If the value contains complex objects (HumanMessage, etc.), it uses
-          the serde wrapper format
+          the serde wrapper format with __serde_type__ and __serde_data__ keys
+
+        Note: Values containing LangChain messages will be wrapped in a serde format,
+        which means filters on nested fields won't work for such values.
 
         Args:
             value: The value to serialize (can contain HumanMessage, AIMessage, etc.)
@@ -382,8 +386,6 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
         Returns:
             A JSON-serializable representation of the value
         """
-        import json
-
         if value is None:
             return None
 
@@ -393,18 +395,23 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
             # Value is already JSON-serializable, return as-is for backward
             # compatibility and to preserve filter functionality
             return value
-        except (TypeError, ValueError):
+        except TypeError:
             # Value contains non-JSON-serializable objects, use serde wrapper
             pass
 
         # Use the serializer to handle complex objects
         type_str, data_bytes = self._serde.dumps_typed(value)
         # Store the serialized data with type info for proper deserialization
+        # Handle different type formats explicitly for clarity
+        if type_str == "json":
+            data_encoded = data_bytes.decode("utf-8")
+        else:
+            # bytes, bytearray, msgpack, and other types are hex-encoded
+            data_encoded = data_bytes.hex()
+
         return {
             "__serde_type__": type_str,
-            "__serde_data__": (
-                data_bytes.decode("utf-8") if type_str == "json" else data_bytes.hex()
-            ),
+            "__serde_data__": data_encoded,
         }
 
     def _deserialize_value(self, value: Any) -> Any:
@@ -423,21 +430,40 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
             return None
 
         # Check if this is a serialized value (new format)
-        if (
-            isinstance(value, dict)
-            and "__serde_type__" in value
-            and "__serde_data__" in value
-        ):
+        # Use exact key check to prevent collisions with user data
+        if isinstance(value, dict) and set(value.keys()) == {
+            "__serde_type__",
+            "__serde_data__",
+        }:
             type_str = value["__serde_type__"]
             data_str = value["__serde_data__"]
 
-            # Convert back to bytes
-            if type_str == "json":
-                data_bytes = data_str.encode("utf-8")
-            else:
-                data_bytes = bytes.fromhex(data_str)
+            try:
+                # Convert back to bytes based on type
+                if type_str == "json":
+                    data_bytes = data_str.encode("utf-8")
+                else:
+                    # bytes, bytearray, msgpack types are hex-encoded
+                    data_bytes = bytes.fromhex(data_str)
 
-            return self._serde.loads_typed((type_str, data_bytes))
+                return self._serde.loads_typed((type_str, data_bytes))
+            except (ValueError, TypeError) as e:
+                # Handle hex decoding errors or deserialization failures
+                logger.error(
+                    "Failed to deserialize value from Redis: type=%r, error=%s",
+                    type_str,
+                    e,
+                )
+                # Return None to indicate deserialization failure
+                return None
+            except Exception as e:
+                # Handle any other unexpected errors during deserialization
+                logger.error(
+                    "Unexpected error deserializing value from Redis: type=%r, error=%s",
+                    type_str,
+                    e,
+                )
+                return None
 
         # Legacy format: value is stored as-is (plain JSON-serializable data)
         # Return as-is for backward compatibility

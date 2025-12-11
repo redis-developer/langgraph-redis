@@ -209,3 +209,74 @@ class TestIssue128MessageSerialization:
         assert item.value["topic"] == "topic_1"
         assert isinstance(item.value["messages"][0], HumanMessage)
         assert item.value["messages"][0].content == "Message 1"
+
+    def test_backward_compatibility_plain_json(self, store: RedisStore) -> None:
+        """Test that plain JSON-serializable values are stored as-is.
+
+        This ensures backward compatibility: simple dict/list values should
+        be stored without the serde wrapper, preserving filter functionality.
+        """
+        namespace = ("test", "plain_json")
+        key = "simple_value"
+
+        # Plain JSON-serializable value (no LangChain objects)
+        value = {
+            "name": "test",
+            "count": 42,
+            "tags": ["a", "b", "c"],
+            "nested": {"foo": "bar"},
+        }
+
+        store.put(namespace, key, value)
+
+        # Verify we can retrieve it
+        item = store.get(namespace, key)
+        assert item is not None
+        assert item.value == value
+
+        # Verify filters work on plain JSON values
+        results = store.search(namespace, filter={"name": "test"})
+        assert len(results) == 1
+        assert results[0].key == key
+
+    def test_serde_key_collision_prevention(self, store: RedisStore) -> None:
+        """Test that user data with serde-like keys is not incorrectly deserialized.
+
+        If a user stores a dict with __serde_type__ and __serde_data__ keys
+        but also other keys, it should NOT be treated as serialized data.
+        """
+        namespace = ("test", "collision")
+        key = "user_data_with_serde_keys"
+
+        # User data that happens to have serde-like keys plus other keys
+        value = {
+            "__serde_type__": "user_defined_type",
+            "__serde_data__": "user_defined_data",
+            "extra_key": "this makes it not a serde wrapper",
+        }
+
+        store.put(namespace, key, value)
+
+        # Verify the value is retrieved as-is (not deserialized)
+        item = store.get(namespace, key)
+        assert item is not None
+        assert item.value == value
+        assert item.value["extra_key"] == "this makes it not a serde wrapper"
+
+    def test_bytes_value_serialization(self, store: RedisStore) -> None:
+        """Test that bytes values are properly serialized and deserialized."""
+        namespace = ("test", "bytes")
+        key = "binary_data"
+
+        # Value containing bytes (not JSON-serializable)
+        value = {
+            "data": b"binary content here",
+            "name": "test",
+        }
+
+        store.put(namespace, key, value)
+
+        item = store.get(namespace, key)
+        assert item is not None
+        assert item.value["data"] == b"binary content here"
+        assert item.value["name"] == "test"
