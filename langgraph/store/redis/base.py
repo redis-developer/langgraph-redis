@@ -9,6 +9,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import (
     Any,
+    Callable,
     Dict,
     Generic,
     Iterable,
@@ -39,6 +40,8 @@ from redis.exceptions import ResponseError
 from redisvl.index import SearchIndex
 from redisvl.query.filter import Tag, Text
 from redisvl.utils.token_escaper import TokenEscaper
+
+from langgraph.checkpoint.redis.jsonplus_redis import JsonPlusRedisSerializer
 
 from .token_unescaper import TokenUnescaper
 from .types import IndexType, RedisClientType
@@ -123,6 +126,9 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
 
     supports_ttl: bool = True
     ttl_config: Optional[TTLConfig] = None
+
+    # Serializer for handling complex objects like LangChain messages
+    _serde: JsonPlusRedisSerializer
 
     def _apply_ttl_to_keys(
         self,
@@ -223,6 +229,8 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
         self._redis = conn
         # Store cluster_mode; None means auto-detect in RedisStore or AsyncRedisStore
         self.cluster_mode = cluster_mode
+        # Initialize the serializer for handling complex objects like LangChain messages
+        self._serde = JsonPlusRedisSerializer()
 
         # Store custom prefixes
         self.store_prefix = store_prefix
@@ -357,6 +365,84 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
                 # Silently fail if even echo doesn't work
                 pass
 
+    def _serialize_value(self, value: Any) -> Any:
+        """Serialize a value for storage in Redis.
+
+        This method handles complex objects like LangChain messages by
+        serializing them to a JSON-compatible format.
+
+        The method is smart about serialization:
+        - If the value is a simple JSON-serializable dict/list, it's stored as-is
+        - If the value contains complex objects (HumanMessage, etc.), it uses
+          the serde wrapper format
+
+        Args:
+            value: The value to serialize (can contain HumanMessage, AIMessage, etc.)
+
+        Returns:
+            A JSON-serializable representation of the value
+        """
+        import json
+
+        if value is None:
+            return None
+
+        # First, try standard JSON serialization to check if it's needed
+        try:
+            json.dumps(value)
+            # Value is already JSON-serializable, return as-is for backward
+            # compatibility and to preserve filter functionality
+            return value
+        except (TypeError, ValueError):
+            # Value contains non-JSON-serializable objects, use serde wrapper
+            pass
+
+        # Use the serializer to handle complex objects
+        type_str, data_bytes = self._serde.dumps_typed(value)
+        # Store the serialized data with type info for proper deserialization
+        return {
+            "__serde_type__": type_str,
+            "__serde_data__": (
+                data_bytes.decode("utf-8") if type_str == "json" else data_bytes.hex()
+            ),
+        }
+
+    def _deserialize_value(self, value: Any) -> Any:
+        """Deserialize a value from Redis storage.
+
+        This method handles both new serialized format and legacy plain values
+        for backward compatibility.
+
+        Args:
+            value: The value from Redis (may be serialized or plain)
+
+        Returns:
+            The deserialized value with proper Python objects (HumanMessage, etc.)
+        """
+        if value is None:
+            return None
+
+        # Check if this is a serialized value (new format)
+        if (
+            isinstance(value, dict)
+            and "__serde_type__" in value
+            and "__serde_data__" in value
+        ):
+            type_str = value["__serde_type__"]
+            data_str = value["__serde_data__"]
+
+            # Convert back to bytes
+            if type_str == "json":
+                data_bytes = data_str.encode("utf-8")
+            else:
+                data_bytes = bytes.fromhex(data_str)
+
+            return self._serde.loads_typed((type_str, data_bytes))
+
+        # Legacy format: value is stored as-is (plain JSON-serializable data)
+        # Return as-is for backward compatibility
+        return value
+
     def _get_batch_GET_ops_queries(
         self,
         get_ops: Sequence[tuple[int, GetOp]],
@@ -433,7 +519,7 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
                 doc = RedisDocument(
                     prefix=_namespace_to_text(op.namespace),
                     key=op.key,
-                    value=op.value,
+                    value=self._serialize_value(op.value),
                     created_at=now,
                     updated_at=now,
                     ttl_minutes=ttl_minutes,
@@ -568,10 +654,27 @@ def _decode_ns(ns: str) -> tuple[str, ...]:
     return tuple(_token_unescaper.unescape(ns).split("."))
 
 
-def _row_to_item(namespace: tuple[str, ...], row: dict[str, Any]) -> Item:
-    """Convert a row from Redis to an Item."""
+def _row_to_item(
+    namespace: tuple[str, ...],
+    row: dict[str, Any],
+    deserialize_fn: Optional[Callable[[Any], Any]] = None,
+) -> Item:
+    """Convert a row from Redis to an Item.
+
+    Args:
+        namespace: The namespace tuple for this item
+        row: The raw row data from Redis
+        deserialize_fn: Optional function to deserialize the value (handles
+            LangChain messages, etc.)
+
+    Returns:
+        An Item with properly deserialized value
+    """
+    value = row["value"]
+    if deserialize_fn is not None:
+        value = deserialize_fn(value)
     return Item(
-        value=row["value"],
+        value=value,
         key=row["key"],
         namespace=namespace,
         created_at=datetime.fromtimestamp(row["created_at"] / 1_000_000, timezone.utc),
@@ -583,10 +686,25 @@ def _row_to_search_item(
     namespace: tuple[str, ...],
     row: dict[str, Any],
     score: Optional[float] = None,
+    deserialize_fn: Optional[Callable[[Any], Any]] = None,
 ) -> SearchItem:
-    """Convert a row from Redis to a SearchItem."""
+    """Convert a row from Redis to a SearchItem.
+
+    Args:
+        namespace: The namespace tuple for this item
+        row: The raw row data from Redis
+        score: Optional similarity score from vector search
+        deserialize_fn: Optional function to deserialize the value (handles
+            LangChain messages, etc.)
+
+    Returns:
+        A SearchItem with properly deserialized value
+    """
+    value = row["value"]
+    if deserialize_fn is not None:
+        value = deserialize_fn(value)
     return SearchItem(
-        value=row["value"],
+        value=value,
         key=row["key"],
         namespace=namespace,
         created_at=datetime.fromtimestamp(row["created_at"] / 1_000_000, timezone.utc),
