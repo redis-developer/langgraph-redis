@@ -578,7 +578,7 @@ class AsyncRedisStore(
                 doc = RedisDocument(
                     prefix=_namespace_to_text(op.namespace),
                     key=op.key,
-                    value=op.value,
+                    value=self._serialize_value(op.value),
                     created_at=now,
                     updated_at=now,
                     ttl_minutes=ttl_minutes,
