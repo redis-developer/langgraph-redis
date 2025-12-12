@@ -436,10 +436,11 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
             if obj.get("lc") in (1, 2) and obj.get("type") == "constructor":
                 try:
                     # Use the serde's reviver to reconstruct the object
-                    if hasattr(self.serde, "_reviver"):
-                        return self.serde._reviver(obj)
-                    elif hasattr(self.serde, "_revive_if_needed"):
+
+                    if hasattr(self.serde, "_revive_if_needed"):
                         return self.serde._revive_if_needed(obj)
+                    elif hasattr(self.serde, "_reviver"):
+                        return self.serde._reviver(obj)
                     else:
                         # Log warning if serde doesn't have reviver
                         logger.warning(
