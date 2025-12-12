@@ -67,17 +67,20 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
         redis_client: Optional[Union[Redis, RedisCluster]] = None,
         connection_args: Optional[Dict[str, Any]] = None,
         ttl: Optional[Dict[str, Any]] = None,
+        checkpoint_prefix: str = CHECKPOINT_PREFIX,
+        checkpoint_blob_prefix: str = CHECKPOINT_BLOB_PREFIX,
+        checkpoint_write_prefix: str = CHECKPOINT_WRITE_PREFIX,
     ) -> None:
         super().__init__(
             redis_url=redis_url,
             redis_client=redis_client,
             connection_args=connection_args,
             ttl=ttl,
+            checkpoint_prefix=checkpoint_prefix,
+            checkpoint_blob_prefix=checkpoint_blob_prefix,
+            checkpoint_write_prefix=checkpoint_write_prefix,
         )
-        # Pre-compute common prefixes for performance
-        self._checkpoint_prefix = CHECKPOINT_PREFIX
-        self._checkpoint_blob_prefix = CHECKPOINT_BLOB_PREFIX
-        self._checkpoint_write_prefix = CHECKPOINT_WRITE_PREFIX
+        # Prefixes are now set in BaseRedisSaver.__init__
         self._separator = REDIS_KEY_SEPARATOR
 
         # Instance-level cache for frequently used keys (limited size to prevent memory issues)
@@ -116,13 +119,13 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
 
     def create_indexes(self) -> None:
         self.checkpoints_index = SearchIndex.from_dict(
-            self.SCHEMAS[0], redis_client=self._redis
+            self.checkpoints_schema, redis_client=self._redis
         )
         self.checkpoint_blobs_index = SearchIndex.from_dict(
-            self.SCHEMAS[1], redis_client=self._redis
+            self.blobs_schema, redis_client=self._redis
         )
         self.checkpoint_writes_index = SearchIndex.from_dict(
-            self.SCHEMAS[2], redis_client=self._redis
+            self.writes_schema, redis_client=self._redis
         )
 
     def _make_redis_checkpoint_key_cached(
@@ -848,7 +851,7 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
         write_results = self.checkpoint_writes_index.search(write_query)
 
         return [
-            BaseRedisSaver._make_redis_checkpoint_writes_key(
+            self._make_redis_checkpoint_writes_key(
                 to_storage_safe_id(thread_id),
                 to_storage_safe_str(checkpoint_ns),
                 to_storage_safe_id(checkpoint_id),
@@ -1119,6 +1122,9 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
         redis_client: Optional[Union[Redis, RedisCluster]] = None,
         connection_args: Optional[Dict[str, Any]] = None,
         ttl: Optional[Dict[str, Any]] = None,
+        checkpoint_prefix: str = CHECKPOINT_PREFIX,
+        checkpoint_blob_prefix: str = CHECKPOINT_BLOB_PREFIX,
+        checkpoint_write_prefix: str = CHECKPOINT_WRITE_PREFIX,
     ) -> Iterator[RedisSaver]:
         """Create a new RedisSaver instance."""
         saver: Optional[RedisSaver] = None
@@ -1128,6 +1134,9 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
                 redis_client=redis_client,
                 connection_args=connection_args,
                 ttl=ttl,
+                checkpoint_prefix=checkpoint_prefix,
+                checkpoint_blob_prefix=checkpoint_blob_prefix,
+                checkpoint_write_prefix=checkpoint_write_prefix,
             )
 
             yield saver
@@ -1615,7 +1624,7 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
             channel = getattr(doc, "channel", "")
             version = getattr(doc, "version", "")
 
-            blob_key = BaseRedisSaver._make_redis_checkpoint_blob_key(
+            blob_key = self._make_redis_checkpoint_blob_key(
                 storage_safe_thread_id, checkpoint_ns, channel, version
             )
             keys_to_delete.append(blob_key)
@@ -1635,7 +1644,7 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
             task_id = getattr(doc, "task_id", "")
             idx = getattr(doc, "idx", 0)
 
-            write_key = BaseRedisSaver._make_redis_checkpoint_writes_key(
+            write_key = self._make_redis_checkpoint_writes_key(
                 storage_safe_thread_id, checkpoint_ns, checkpoint_id, task_id, idx
             )
             keys_to_delete.append(write_key)

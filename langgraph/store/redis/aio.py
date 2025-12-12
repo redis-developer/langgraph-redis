@@ -31,6 +31,8 @@ from ulid import ULID
 
 from langgraph.store.redis.base import (
     REDIS_KEY_SEPARATOR,
+    STORE_PREFIX,
+    STORE_VECTOR_PREFIX,
     BaseRedisStore,
     RedisDocument,
     _decode_ns,
@@ -74,8 +76,8 @@ class AsyncRedisStore(
         connection_args: Optional[dict[str, Any]] = None,
         ttl: Optional[TTLConfig] = None,
         cluster_mode: Optional[bool] = None,
-        store_prefix: str = "store",
-        vector_prefix: str = "store_vectors",
+        store_prefix: str = STORE_PREFIX,
+        vector_prefix: str = STORE_VECTOR_PREFIX,
     ) -> None:
         """Initialize store with Redis connection and optional index config."""
         if redis_url is None and redis_client is None:
@@ -324,8 +326,8 @@ class AsyncRedisStore(
         *,
         index: Optional[IndexConfig] = None,
         ttl: Optional[TTLConfig] = None,
-        store_prefix: str = "store",
-        vector_prefix: str = "store_vectors",
+        store_prefix: str = STORE_PREFIX,
+        vector_prefix: str = STORE_VECTOR_PREFIX,
     ) -> AsyncIterator[AsyncRedisStore]:
         """Create store from Redis connection string."""
         async with cls(

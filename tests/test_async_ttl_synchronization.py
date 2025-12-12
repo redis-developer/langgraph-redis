@@ -58,13 +58,12 @@ async def test_async_ttl_refresh_on_read(redis_url: str) -> None:
         saved_config = await saver.aput(config, checkpoint, {"test": "metadata"}, {})
 
         # Get the checkpoint key
-        from langgraph.checkpoint.redis.base import BaseRedisSaver
         from langgraph.checkpoint.redis.util import (
             to_storage_safe_id,
             to_storage_safe_str,
         )
 
-        checkpoint_key = BaseRedisSaver._make_redis_checkpoint_key(
+        checkpoint_key = saver._make_redis_checkpoint_key(
             to_storage_safe_id(thread_id),
             to_storage_safe_str(checkpoint_ns),
             to_storage_safe_id(saved_config["configurable"]["checkpoint_id"]),
@@ -132,7 +131,7 @@ async def test_async_ttl_no_refresh_when_disabled(redis_url: str) -> None:
             to_storage_safe_str,
         )
 
-        checkpoint_key = BaseRedisSaver._make_redis_checkpoint_key(
+        checkpoint_key = saver._make_redis_checkpoint_key(
             to_storage_safe_id(thread_id),
             to_storage_safe_str(checkpoint_ns),
             to_storage_safe_id(saved_config["configurable"]["checkpoint_id"]),
@@ -213,13 +212,12 @@ async def test_async_ttl_synchronization_with_external_keys(redis_url: str) -> N
         await saver._redis.expire(external_key2, 120)
 
         # Check that all TTLs are synchronized
-        from langgraph.checkpoint.redis.base import BaseRedisSaver
         from langgraph.checkpoint.redis.util import (
             to_storage_safe_id,
             to_storage_safe_str,
         )
 
-        checkpoint_key = BaseRedisSaver._make_redis_checkpoint_key(
+        checkpoint_key = saver._make_redis_checkpoint_key(
             to_storage_safe_id(thread_id),
             to_storage_safe_str(checkpoint_ns),
             to_storage_safe_id(saved_config["configurable"]["checkpoint_id"]),
@@ -277,13 +275,12 @@ async def test_async_ttl_no_refresh_for_persistent_keys(redis_url: str) -> None:
         saved_config = await saver.aput(config, checkpoint, {"test": "metadata"}, {})
 
         # Remove TTL to make it persistent
-        from langgraph.checkpoint.redis.base import BaseRedisSaver
         from langgraph.checkpoint.redis.util import (
             to_storage_safe_id,
             to_storage_safe_str,
         )
 
-        checkpoint_key = BaseRedisSaver._make_redis_checkpoint_key(
+        checkpoint_key = saver._make_redis_checkpoint_key(
             to_storage_safe_id(thread_id),
             to_storage_safe_str(checkpoint_ns),
             to_storage_safe_id(saved_config["configurable"]["checkpoint_id"]),

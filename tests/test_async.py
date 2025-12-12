@@ -446,7 +446,7 @@ async def test_put_writes_json_structure_async(
         checkpoint_id = saved_config["configurable"]["checkpoint_id"]
 
         # Verify JSON structure directly
-        write_key = BaseRedisSaver._make_redis_checkpoint_writes_key(
+        write_key = saver._make_redis_checkpoint_writes_key(
             thread_id,
             checkpoint_ns,
             checkpoint_id,

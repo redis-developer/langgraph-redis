@@ -44,51 +44,6 @@ MILLISECONDS_PER_SECOND = 1000
 # Logger for this module
 logger = logging.getLogger(__name__)
 
-SCHEMAS = [
-    {
-        "index": {
-            "name": "checkpoints",
-            "prefix": CHECKPOINT_PREFIX + REDIS_KEY_SEPARATOR,
-            "storage_type": "json",
-        },
-        "fields": [
-            {"name": "thread_id", "type": "tag"},
-            {"name": "checkpoint_ns", "type": "tag"},
-            {"name": "source", "type": "tag"},
-            {"name": "step", "type": "numeric"},
-        ],
-    },
-    {
-        "index": {
-            "name": "checkpoints_blobs",
-            "prefix": CHECKPOINT_BLOB_PREFIX + REDIS_KEY_SEPARATOR,
-            "storage_type": "json",
-        },
-        "fields": [
-            {"name": "thread_id", "type": "tag"},
-            {"name": "checkpoint_ns", "type": "tag"},
-            {"name": "channel", "type": "tag"},
-            {"name": "type", "type": "tag"},
-        ],
-    },
-    {
-        "index": {
-            "name": "checkpoint_writes",
-            "prefix": CHECKPOINT_WRITE_PREFIX + REDIS_KEY_SEPARATOR,
-            "storage_type": "json",
-        },
-        "fields": [
-            {"name": "thread_id", "type": "tag"},
-            {"name": "checkpoint_ns", "type": "tag"},
-            {"name": "checkpoint_id", "type": "tag"},
-            {"name": "task_id", "type": "tag"},
-            {"name": "idx", "type": "numeric"},
-            {"name": "channel", "type": "tag"},
-            {"name": "type", "type": "tag"},
-        ],
-    },
-]
-
 
 class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
     """Redis implementation that only stores the most recent checkpoint."""
@@ -106,12 +61,18 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         ttl: Optional[dict[str, Any]] = None,
         key_cache_max_size: Optional[int] = None,
         channel_cache_max_size: Optional[int] = None,
+        checkpoint_prefix: str = CHECKPOINT_PREFIX,
+        checkpoint_blob_prefix: str = CHECKPOINT_BLOB_PREFIX,
+        checkpoint_write_prefix: str = CHECKPOINT_WRITE_PREFIX,
     ) -> None:
         super().__init__(
             redis_url=redis_url,
             redis_client=redis_client,
             connection_args=connection_args,
             ttl=ttl,
+            checkpoint_prefix=checkpoint_prefix,
+            checkpoint_blob_prefix=checkpoint_blob_prefix,
+            checkpoint_write_prefix=checkpoint_write_prefix,
         )
 
         # Instance-level cache for frequently used keys (limited size to prevent memory issues)
@@ -123,9 +84,7 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
             channel_cache_max_size or self.DEFAULT_CHANNEL_CACHE_MAX_SIZE
         )
 
-        # Cache commonly used prefixes
-        self._checkpoint_prefix = CHECKPOINT_PREFIX
-        self._checkpoint_write_prefix = CHECKPOINT_WRITE_PREFIX
+        # Prefixes are now set in BaseRedisSaver.__init__
         self._separator = REDIS_KEY_SEPARATOR
 
     @classmethod
@@ -139,6 +98,9 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         ttl: Optional[dict[str, Any]] = None,
         key_cache_max_size: Optional[int] = None,
         channel_cache_max_size: Optional[int] = None,
+        checkpoint_prefix: str = CHECKPOINT_PREFIX,
+        checkpoint_blob_prefix: str = CHECKPOINT_BLOB_PREFIX,
+        checkpoint_write_prefix: str = CHECKPOINT_WRITE_PREFIX,
     ) -> Iterator[ShallowRedisSaver]:
         """Create a new ShallowRedisSaver instance."""
         saver: Optional[ShallowRedisSaver] = None
@@ -150,6 +112,9 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
                 ttl=ttl,
                 key_cache_max_size=key_cache_max_size,
                 channel_cache_max_size=channel_cache_max_size,
+                checkpoint_prefix=checkpoint_prefix,
+                checkpoint_blob_prefix=checkpoint_blob_prefix,
+                checkpoint_write_prefix=checkpoint_write_prefix,
             )
             yield saver
         finally:
@@ -480,14 +445,14 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
 
     def create_indexes(self) -> None:
         self.checkpoints_index = SearchIndex.from_dict(
-            self.SCHEMAS[0], redis_client=self._redis
+            self.checkpoints_schema, redis_client=self._redis
         )
         # Shallow implementation doesn't use blobs, but base class requires the attribute
         self.checkpoint_blobs_index = SearchIndex.from_dict(
-            self.SCHEMAS[1], redis_client=self._redis
+            self.blobs_schema, redis_client=self._redis
         )
         self.checkpoint_writes_index = SearchIndex.from_dict(
-            self.SCHEMAS[2], redis_client=self._redis
+            self.writes_schema, redis_client=self._redis
         )
 
     def setup(self) -> None:
@@ -737,7 +702,7 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
                 # Remove least recently used (first item)
                 self._key_cache.popitem(last=False)
             self._key_cache[cache_key] = (
-                BaseRedisSaver._make_redis_checkpoint_writes_key(
+                self._make_redis_checkpoint_writes_key(
                     thread_id, checkpoint_ns, checkpoint_id, task_id, idx
                 )
             )
@@ -788,7 +753,7 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
             if len(self._key_cache) >= self._key_cache_max_size:
                 # Remove least recently used (first item)
                 self._key_cache.popitem(last=False)
-            self._key_cache[cache_key] = BaseRedisSaver._make_redis_checkpoint_blob_key(
+            self._key_cache[cache_key] = self._make_redis_checkpoint_blob_key(
                 thread_id, checkpoint_ns, channel, version
             )
         return self._key_cache[cache_key]
