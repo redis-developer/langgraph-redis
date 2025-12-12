@@ -177,51 +177,44 @@ def test_custom_checkpoint_prefix_isolation_sync(
         redis_url, checkpoint_prefix="app1_checkpoint"
     ) as saver1:
         saver1.setup()
-        checkpoint1: Checkpoint = {
-            "v": 1,
-            "id": checkpoint_id,
-            "ts": "2024-01-01T00:00:00Z",
-            "channel_values": {"app": "app1", "value": "from_app1"},
-            "channel_versions": {"app": "1"},
-            "versions_seen": {"agent": {"app": "1"}},
-            "pending_sends": [],
-        }
-        saver1.put(config, checkpoint1, simple_metadata, {})
 
-    # Saver 2 with prefix "app2_checkpoint"
-    with RedisSaver.from_conn_string(
-        redis_url, checkpoint_prefix="app2_checkpoint"
-    ) as saver2:
-        saver2.setup()
-        checkpoint2: Checkpoint = {
-            "v": 1,
-            "id": checkpoint_id,
-            "ts": "2024-01-01T00:00:00Z",
-            "channel_values": {"app": "app2", "value": "from_app2"},
-            "channel_versions": {"app": "1"},
-            "versions_seen": {"agent": {"app": "1"}},
-            "pending_sends": [],
-        }
-        saver2.put(config, checkpoint2, simple_metadata, {})
+        # Saver 2 with prefix "app2_checkpoint"
+        with RedisSaver.from_conn_string(
+                redis_url, checkpoint_prefix="app2_checkpoint"
+        ) as saver2:
+            saver2.setup()
 
-    # Verify isolation - each saver should only see its own data
-    with RedisSaver.from_conn_string(
-        redis_url, checkpoint_prefix="app1_checkpoint"
-    ) as saver1:
-        saver1.setup()
-        retrieved1 = saver1.get_tuple(config)
-        assert retrieved1 is not None
-        assert retrieved1.checkpoint["channel_values"]["app"] == "app1"
-        assert retrieved1.checkpoint["channel_values"]["value"] == "from_app1"
+            checkpoint1: Checkpoint = {
+                "v": 1,
+                "id": checkpoint_id,
+                "ts": "2024-01-01T00:00:00Z",
+                "channel_values": {"app": "app1", "value": "from_app1"},
+                "channel_versions": {"app": "1"},
+                "versions_seen": {"agent": {"app": "1"}},
+                "pending_sends": [],
+            }
+            saver1.put(config, checkpoint1, simple_metadata, {})
 
-    with RedisSaver.from_conn_string(
-        redis_url, checkpoint_prefix="app2_checkpoint"
-    ) as saver2:
-        saver2.setup()
-        retrieved2 = saver2.get_tuple(config)
-        assert retrieved2 is not None
-        assert retrieved2.checkpoint["channel_values"]["app"] == "app2"
-        assert retrieved2.checkpoint["channel_values"]["value"] == "from_app2"
+            checkpoint2: Checkpoint = {
+                "v": 1,
+                "id": checkpoint_id,
+                "ts": "2024-01-01T00:00:00Z",
+                "channel_values": {"app": "app2", "value": "from_app2"},
+                "channel_versions": {"app": "1"},
+                "versions_seen": {"agent": {"app": "1"}},
+                "pending_sends": [],
+            }
+            saver2.put(config, checkpoint2, simple_metadata, {})
+
+            retrieved1 = saver1.get_tuple(config)
+            assert retrieved1 is not None
+            assert retrieved1.checkpoint["channel_values"]["app"] == "app1"
+            assert retrieved1.checkpoint["channel_values"]["value"] == "from_app1"
+
+            retrieved2 = saver2.get_tuple(config)
+            assert retrieved2 is not None
+            assert retrieved2.checkpoint["channel_values"]["app"] == "app2"
+            assert retrieved2.checkpoint["channel_values"]["value"] == "from_app2"
 
 
 def test_custom_checkpoint_prefix_with_special_characters(
@@ -435,51 +428,45 @@ async def test_custom_checkpoint_prefix_isolation_async(
         redis_url, checkpoint_prefix="async_app1_checkpoint"
     ) as saver1:
         await saver1.setup()
-        checkpoint1: Checkpoint = {
-            "v": 1,
-            "id": checkpoint_id,
-            "ts": "2024-01-01T00:00:00Z",
-            "channel_values": {"app": "app1", "value": "from_app1"},
-            "channel_versions": {"app": "1"},
-            "versions_seen": {"agent": {"app": "1"}},
-            "pending_sends": [],
-        }
-        await saver1.aput(config, checkpoint1, simple_metadata, {})
 
-    # Saver 2 with prefix "async_app2_checkpoint"
-    async with AsyncRedisSaver.from_conn_string(
-        redis_url, checkpoint_prefix="async_app2_checkpoint"
-    ) as saver2:
-        await saver2.setup()
-        checkpoint2: Checkpoint = {
-            "v": 1,
-            "id": checkpoint_id,
-            "ts": "2024-01-01T00:00:00Z",
-            "channel_values": {"app": "app2", "value": "from_app2"},
-            "channel_versions": {"app": "1"},
-            "versions_seen": {"agent": {"app": "1"}},
-            "pending_sends": [],
-        }
-        await saver2.aput(config, checkpoint2, simple_metadata, {})
+        # Saver 2 with prefix "async_app2_checkpoint"
+        async with AsyncRedisSaver.from_conn_string(
+                redis_url, checkpoint_prefix="async_app2_checkpoint"
+        ) as saver2:
+            await saver2.setup()
 
-    # Verify isolation - each saver should only see its own data
-    async with AsyncRedisSaver.from_conn_string(
-        redis_url, checkpoint_prefix="async_app1_checkpoint"
-    ) as saver1:
-        await saver1.setup()
-        retrieved1 = await saver1.aget_tuple(config)
-        assert retrieved1 is not None
-        assert retrieved1.checkpoint["channel_values"]["app"] == "app1"
-        assert retrieved1.checkpoint["channel_values"]["value"] == "from_app1"
+            checkpoint1: Checkpoint = {
+                "v": 1,
+                "id": checkpoint_id,
+                "ts": "2024-01-01T00:00:00Z",
+                "channel_values": {"app": "app1", "value": "from_app1"},
+                "channel_versions": {"app": "1"},
+                "versions_seen": {"agent": {"app": "1"}},
+                "pending_sends": [],
+            }
+            await saver1.aput(config, checkpoint1, simple_metadata, {})
 
-    async with AsyncRedisSaver.from_conn_string(
-        redis_url, checkpoint_prefix="async_app2_checkpoint"
-    ) as saver2:
-        await saver2.setup()
-        retrieved2 = await saver2.aget_tuple(config)
-        assert retrieved2 is not None
-        assert retrieved2.checkpoint["channel_values"]["app"] == "app2"
-        assert retrieved2.checkpoint["channel_values"]["value"] == "from_app2"
+
+            checkpoint2: Checkpoint = {
+                "v": 1,
+                "id": checkpoint_id,
+                "ts": "2024-01-01T00:00:00Z",
+                "channel_values": {"app": "app2", "value": "from_app2"},
+                "channel_versions": {"app": "1"},
+                "versions_seen": {"agent": {"app": "1"}},
+                "pending_sends": [],
+            }
+            await saver2.aput(config, checkpoint2, simple_metadata, {})
+
+            retrieved1 = await saver1.aget_tuple(config)
+            assert retrieved1 is not None
+            assert retrieved1.checkpoint["channel_values"]["app"] == "app1"
+            assert retrieved1.checkpoint["channel_values"]["value"] == "from_app1"
+
+            retrieved2 = await saver2.aget_tuple(config)
+            assert retrieved2 is not None
+            assert retrieved2.checkpoint["channel_values"]["app"] == "app2"
+            assert retrieved2.checkpoint["channel_values"]["value"] == "from_app2"
 
 
 @pytest.mark.asyncio
