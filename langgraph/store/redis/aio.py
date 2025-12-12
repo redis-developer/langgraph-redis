@@ -472,7 +472,9 @@ class AsyncRedisStore(
             for idx, key in items:
                 if key in key_to_row:
                     data, doc_id = key_to_row[key]
-                    results[idx] = _row_to_item(namespace, data)
+                    results[idx] = _row_to_item(
+                        namespace, data, deserialize_fn=self._deserialize_value
+                    )
 
                     # Find the corresponding operation by looking it up in the operation list
                     # This is needed because idx is the index in the overall operation list
@@ -578,7 +580,7 @@ class AsyncRedisStore(
                 doc = RedisDocument(
                     prefix=_namespace_to_text(op.namespace),
                     key=op.key,
-                    value=op.value,
+                    value=self._serialize_value(op.value),
                     created_at=now,
                     updated_at=now,
                     ttl_minutes=ttl_minutes,
@@ -872,6 +874,7 @@ class AsyncRedisStore(
                                 _decode_ns(store_doc["prefix"]),
                                 store_doc,
                                 score=score,
+                                deserialize_fn=self._deserialize_value,
                             )
                         )
 
@@ -939,7 +942,13 @@ class AsyncRedisStore(
                         )
                         refresh_keys.append(vector_key)
 
-                    items.append(_row_to_search_item(_decode_ns(data["prefix"]), data))
+                    items.append(
+                        _row_to_search_item(
+                            _decode_ns(data["prefix"]),
+                            data,
+                            deserialize_fn=self._deserialize_value,
+                        )
+                    )
 
                 # Refresh TTL if requested
                 if op.refresh_ttl and refresh_keys and self.ttl_config:
