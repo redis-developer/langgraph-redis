@@ -701,10 +701,8 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
             if len(self._key_cache) >= self._key_cache_max_size:
                 # Remove least recently used (first item)
                 self._key_cache.popitem(last=False)
-            self._key_cache[cache_key] = (
-                self._make_redis_checkpoint_writes_key(
-                    thread_id, checkpoint_ns, checkpoint_id, task_id, idx
-                )
+            self._key_cache[cache_key] = self._make_redis_checkpoint_writes_key(
+                thread_id, checkpoint_ns, checkpoint_id, task_id, idx
             )
         return self._key_cache[cache_key]
 
