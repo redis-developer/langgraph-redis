@@ -41,11 +41,11 @@ from redisvl.query.filter import Num, Tag
 from ulid import ULID
 
 from langgraph.checkpoint.redis.base import (
-    BaseRedisSaver,
     CHECKPOINT_BLOB_PREFIX,
     CHECKPOINT_PREFIX,
     CHECKPOINT_WRITE_PREFIX,
     REDIS_KEY_SEPARATOR,
+    BaseRedisSaver,
 )
 from langgraph.checkpoint.redis.key_registry import (
     AsyncCheckpointKeyRegistry as AsyncKeyRegistry,

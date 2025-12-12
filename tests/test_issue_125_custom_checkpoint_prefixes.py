@@ -180,7 +180,7 @@ def test_custom_checkpoint_prefix_isolation_sync(
 
         # Saver 2 with prefix "app2_checkpoint"
         with RedisSaver.from_conn_string(
-                redis_url, checkpoint_prefix="app2_checkpoint"
+            redis_url, checkpoint_prefix="app2_checkpoint"
         ) as saver2:
             saver2.setup()
 
@@ -300,7 +300,9 @@ def test_custom_checkpoint_prefix_delete_thread(
         saver.delete_thread(thread_id)
 
         # Verify all keys are deleted
-        checkpoint_keys_after = list(saver._redis.scan_iter(f"{custom_checkpoint_prefix}:*"))
+        checkpoint_keys_after = list(
+            saver._redis.scan_iter(f"{custom_checkpoint_prefix}:*")
+        )
         write_keys_after = list(saver._redis.scan_iter(f"{custom_write_prefix}:*"))
         assert len(checkpoint_keys_after) == 0
         assert len(write_keys_after) == 0
@@ -431,7 +433,7 @@ async def test_custom_checkpoint_prefix_isolation_async(
 
         # Saver 2 with prefix "async_app2_checkpoint"
         async with AsyncRedisSaver.from_conn_string(
-                redis_url, checkpoint_prefix="async_app2_checkpoint"
+            redis_url, checkpoint_prefix="async_app2_checkpoint"
         ) as saver2:
             await saver2.setup()
 
@@ -445,7 +447,6 @@ async def test_custom_checkpoint_prefix_isolation_async(
                 "pending_sends": [],
             }
             await saver1.aput(config, checkpoint1, simple_metadata, {})
-
 
             checkpoint2: Checkpoint = {
                 "v": 1,
@@ -489,11 +490,17 @@ async def test_custom_checkpoint_prefix_async_delete_thread(
         await saver.setup()
 
         await saver.aput(config, simple_checkpoint, simple_metadata, {})
-        await saver.aput_writes(config, writes=[("channel1", "value1")], task_id="task_1")
+        await saver.aput_writes(
+            config, writes=[("channel1", "value1")], task_id="task_1"
+        )
 
         # Verify keys exist
-        checkpoint_keys = [k async for k in saver._redis.scan_iter(f"{custom_checkpoint_prefix}:*")]
-        write_keys = [k async for k in saver._redis.scan_iter(f"{custom_write_prefix}:*")]
+        checkpoint_keys = [
+            k async for k in saver._redis.scan_iter(f"{custom_checkpoint_prefix}:*")
+        ]
+        write_keys = [
+            k async for k in saver._redis.scan_iter(f"{custom_write_prefix}:*")
+        ]
         assert len(checkpoint_keys) > 0
         assert len(write_keys) > 0
 
@@ -501,7 +508,11 @@ async def test_custom_checkpoint_prefix_async_delete_thread(
         await saver.adelete_thread(thread_id)
 
         # Verify all keys are deleted
-        checkpoint_keys_after = [k async for k in saver._redis.scan_iter(f"{custom_checkpoint_prefix}:*")]
-        write_keys_after = [k async for k in saver._redis.scan_iter(f"{custom_write_prefix}:*")]
+        checkpoint_keys_after = [
+            k async for k in saver._redis.scan_iter(f"{custom_checkpoint_prefix}:*")
+        ]
+        write_keys_after = [
+            k async for k in saver._redis.scan_iter(f"{custom_write_prefix}:*")
+        ]
         assert len(checkpoint_keys_after) == 0
         assert len(write_keys_after) == 0

@@ -38,6 +38,7 @@ from langgraph.checkpoint.redis.util import (
     to_storage_safe_str,
 )
 
+
 class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
     """Async Redis implementation that only stores the most recent checkpoint."""
 
@@ -799,10 +800,8 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             f"writes:{thread_id}:{checkpoint_ns}:{checkpoint_id}:{task_id}:{idx}"
         )
         if cache_key not in self._key_cache:
-            self._key_cache[cache_key] = (
-                self._make_redis_checkpoint_writes_key(
-                    thread_id, checkpoint_ns, checkpoint_id, task_id, idx
-                )
+            self._key_cache[cache_key] = self._make_redis_checkpoint_writes_key(
+                thread_id, checkpoint_ns, checkpoint_id, task_id, idx
             )
         return self._key_cache[cache_key]
 

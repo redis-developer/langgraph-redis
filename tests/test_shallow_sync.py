@@ -9,13 +9,13 @@ from langgraph.checkpoint.base import (
     create_checkpoint,
     empty_checkpoint,
 )
+from redis import Redis
+from redis.exceptions import ConnectionError as RedisConnectionError
+
 from langgraph.checkpoint.redis.base import (
     CHECKPOINT_BLOB_PREFIX,
     CHECKPOINT_WRITE_PREFIX,
 )
-from redis import Redis
-from redis.exceptions import ConnectionError as RedisConnectionError
-
 from langgraph.checkpoint.redis.shallow import ShallowRedisSaver
 
 
@@ -377,7 +377,9 @@ def test_key_generation_inconsistency(redis_url: str) -> None:
         )
 
         # The base key uses storage-safe transformations
-        expected_base_key = f"{CHECKPOINT_BLOB_PREFIX}:test_thread:__empty__:test_channel:1"
+        expected_base_key = (
+            f"{CHECKPOINT_BLOB_PREFIX}:test_thread:__empty__:test_channel:1"
+        )
         assert base_blob_key == expected_base_key
 
         # The shallow pattern now uses storage-safe transformations (fixed!)
@@ -402,9 +404,7 @@ def test_key_generation_inconsistency(redis_url: str) -> None:
         )
 
         # The base key uses storage-safe transformations
-        expected_base_key = (
-            f"{CHECKPOINT_WRITE_PREFIX}:test_thread:__empty__:test_checkpoint:test_task:0"
-        )
+        expected_base_key = f"{CHECKPOINT_WRITE_PREFIX}:test_thread:__empty__:test_checkpoint:test_task:0"
         assert base_writes_key == expected_base_key
 
         # The shallow pattern now uses storage-safe transformations (fixed!)
