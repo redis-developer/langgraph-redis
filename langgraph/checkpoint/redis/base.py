@@ -103,7 +103,7 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         """Schema for the checkpoints index."""
         return {
             "index": {
-                "name": "checkpoints",
+                "name": self._checkpoint_prefix,
                 "prefix": self._checkpoint_prefix + REDIS_KEY_SEPARATOR,
                 "storage_type": "json",
             },
@@ -124,7 +124,7 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         """Schema for the checkpoint blobs index."""
         return {
             "index": {
-                "name": "checkpoints_blobs",
+                "name": self._checkpoint_blob_prefix,
                 "prefix": self._checkpoint_blob_prefix + REDIS_KEY_SEPARATOR,
                 "storage_type": "json",
             },
@@ -143,7 +143,7 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         """Schema for the checkpoint writes index."""
         return {
             "index": {
-                "name": "checkpoint_writes",
+                "name": self._checkpoint_write_prefix,
                 "prefix": self._checkpoint_write_prefix + REDIS_KEY_SEPARATOR,
                 "storage_type": "json",
             },
