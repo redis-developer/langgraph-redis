@@ -200,34 +200,8 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
             thread_id, checkpoint_ns
         )
 
-        # Get the previous checkpoint ID to clean up its writes
-        prev_checkpoint_data = self._redis.json().get(checkpoint_key)
-        prev_checkpoint_id = None
-        if prev_checkpoint_data and isinstance(prev_checkpoint_data, dict):
-            prev_checkpoint_id = prev_checkpoint_data.get("checkpoint_id")
-
         with self._redis.pipeline(transaction=False) as pipeline:
             pipeline.json().set(checkpoint_key, "$", checkpoint_data)
-
-            # If checkpoint changed, clean up old writes
-            if prev_checkpoint_id and prev_checkpoint_id != checkpoint["id"]:
-                # Clean up writes from the previous checkpoint
-                thread_write_registry_key = (
-                    f"write_registry:{thread_id}:{checkpoint_ns}:shallow"
-                )
-
-                # Get all existing write keys and delete them
-                existing_write_keys = self._redis.zrange(
-                    thread_write_registry_key, 0, -1
-                )
-                for old_key in existing_write_keys:
-                    old_key_str = (
-                        old_key.decode() if isinstance(old_key, bytes) else old_key
-                    )
-                    pipeline.delete(old_key_str)
-
-                # Clear the registry
-                pipeline.delete(thread_write_registry_key)
 
             # Apply TTL if configured
             if self.ttl_config and "default_ttl" in self.ttl_config:
@@ -235,6 +209,19 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
                 pipeline.expire(checkpoint_key, ttl_seconds)
 
             pipeline.execute()
+
+        # NOTE: We intentionally do NOT clean up old writes here.
+        # In the HITL (Human-in-the-Loop) flow, interrupt writes are saved via
+        # put_writes BEFORE the new checkpoint is saved. If we clean up writes
+        # when the checkpoint changes, we would delete the interrupt writes
+        # before they can be consumed when resuming.
+        #
+        # Writes are cleaned up in the following scenarios:
+        # 1. When delete_thread is called
+        # 2. When TTL expires (if configured)
+        # 3. When put_writes is called again for the same task/idx (overwrites)
+        #
+        # See Issue #133 for details on this bug fix.
 
         return next_config
 
@@ -501,8 +488,10 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
             writes_objects.append(write_obj)
 
         # THREAD-LEVEL REGISTRY: Only keep writes for the current checkpoint
+        # Use to_storage_safe_str for consistent key naming with delete_thread
+        safe_checkpoint_ns = to_storage_safe_str(checkpoint_ns)
         thread_write_registry_key = (
-            f"write_registry:{thread_id}:{checkpoint_ns}:shallow"
+            f"write_registry:{thread_id}:{safe_checkpoint_ns}:shallow"
         )
 
         # Collect all write keys
@@ -525,7 +514,7 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
             # THREAD-LEVEL REGISTRY: Store write keys in thread-level sorted set
             # These will be cleared when checkpoint changes
             zadd_mapping = {key: idx for idx, key in enumerate(write_keys)}
-            pipeline.zadd(thread_write_registry_key, zadd_mapping)
+            pipeline.zadd(thread_write_registry_key, zadd_mapping)  # type: ignore[arg-type]
 
             # Note: We don't update has_writes on the checkpoint anymore
             # because put_writes can be called before the checkpoint exists
@@ -550,8 +539,10 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
 
         # Use thread-level registry that only contains current checkpoint writes
         # All writes belong to the current checkpoint
+        # Use to_storage_safe_str for consistent key naming with delete_thread
+        safe_checkpoint_ns = to_storage_safe_str(checkpoint_ns)
         thread_write_registry_key = (
-            f"write_registry:{thread_id}:{checkpoint_ns}:shallow"
+            f"write_registry:{thread_id}:{safe_checkpoint_ns}:shallow"
         )
 
         # Get all write keys from the thread's registry (already sorted by index)

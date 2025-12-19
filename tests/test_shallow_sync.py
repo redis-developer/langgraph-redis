@@ -545,11 +545,19 @@ def test_shallow_saver_inline_storage(redis_url: str) -> None:
             redis_client.close()
 
 
-def test_pr37_incomplete_writes_cleanup(redis_url: str) -> None:
-    """Test for PR #37: Complete cleanup of writes in ShallowRedisSaver.
+def test_pr37_writes_persist_for_hitl_support(redis_url: str) -> None:
+    """Test for PR #37 updated for Issue #133: Writes persist across checkpoints for HITL.
 
-    This test verifies that old writes are properly cleaned up
-    when putting new writes, now that key generation is consistent.
+    This test verifies that writes are NOT cleaned up when new checkpoints are saved.
+    This is necessary to support Human-in-the-Loop (HITL) workflows where interrupt
+    writes are saved BEFORE the new checkpoint is created.
+
+    Writes are cleaned up via:
+    1. delete_thread - explicitly cleans up all data for a thread
+    2. TTL expiration - if configured
+    3. Overwrite - when put_writes is called with the same task_id and idx
+
+    See Issue #133 for details on why this behavior is required.
     """
     import uuid
 
@@ -558,7 +566,7 @@ def test_pr37_incomplete_writes_cleanup(redis_url: str) -> None:
     with _saver(redis_url) as saver:
         # Create test data
         thread_id = f"test_thread_{uuid.uuid4()}"
-        checkpoint_ns = ""  # Empty namespace - problematic case
+        checkpoint_ns = ""  # Empty namespace
         checkpoint_id1 = str(uuid.uuid4())
         checkpoint_id2 = str(uuid.uuid4())
 
@@ -639,12 +647,26 @@ def test_pr37_incomplete_writes_cleanup(redis_url: str) -> None:
             for key in sorted(write_keys_after_second):
                 print(f"  {key}")
 
-            # In a proper shallow implementation, old writes for different checkpoints
-            # should be cleaned up. This test verifies the cleanup works correctly.
-            # We expect only the writes from the second checkpoint (2 writes)
-            assert (
-                len(write_keys_after_second) == 2
-            ), f"Bug: old write keys not cleaned up properly. Expected 2, got {len(write_keys_after_second)}"
+            # Issue #133 fix: Writes now persist across checkpoint updates to support HITL.
+            # We expect all 4 writes to still exist (2 from checkpoint1 + 2 from checkpoint2)
+            assert len(write_keys_after_second) == 4, (
+                f"Writes should persist across checkpoints for HITL support. "
+                f"Expected 4, got {len(write_keys_after_second)}"
+            )
+
+            # Verify that delete_thread properly cleans up writes
+            saver.delete_thread(thread_id)
+
+            all_keys = redis_client.keys("*")
+            test_keys = [k for k in all_keys if thread_id in k]
+            write_keys_after_delete = [
+                k for k in test_keys if k.startswith(CHECKPOINT_WRITE_PREFIX)
+            ]
+
+            assert len(write_keys_after_delete) == 0, (
+                f"delete_thread should clean up all writes. "
+                f"Expected 0, got {len(write_keys_after_delete)}"
+            )
 
         finally:
             redis_client.close()

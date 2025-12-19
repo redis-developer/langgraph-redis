@@ -396,8 +396,18 @@ def test_metadata_dict_handling(redis_url: str) -> None:
         assert retrieved.metadata["writes"]["nested"]["complex"] == "structure"
 
 
-def test_put_writes_cleanup_old_writes(redis_url: str) -> None:
-    """Test cleanup of old writes when checkpoint changes."""
+def test_put_writes_persist_for_hitl_support(redis_url: str) -> None:
+    """Test that writes persist across checkpoints for HITL support (Issue #133).
+
+    Writes are NOT cleaned up when a new checkpoint is saved because this breaks
+    Human-in-the-Loop (HITL) workflows where interrupt writes are saved BEFORE
+    the new checkpoint is created.
+
+    Writes are cleaned up via:
+    1. delete_thread - explicitly cleans up all data for a thread
+    2. TTL expiration - if configured
+    3. Overwrite - when put_writes is called with the same task_id and idx
+    """
     with shallow_saver(redis_url) as saver:
         thread_id = str(uuid4())
 
@@ -424,7 +434,7 @@ def test_put_writes_cleanup_old_writes(redis_url: str) -> None:
         writes1 = [("channel1", "value1"), ("channel2", "value2")]
         saver.put_writes(result_config1, writes1, "task1")
 
-        # Create second checkpoint (should trigger cleanup - lines 587-612)
+        # Create second checkpoint
         config2: RunnableConfig = {
             "configurable": {
                 "thread_id": thread_id,
@@ -443,21 +453,34 @@ def test_put_writes_cleanup_old_writes(redis_url: str) -> None:
 
         result_config2 = saver.put(config2, checkpoint2, metadata2, {})
 
-        # Add writes to second checkpoint (should clean up old writes)
+        # Add writes to second checkpoint
         writes2 = [("channel3", "value3")]
         saver.put_writes(result_config2, writes2, "task2")
 
-        # Verify old writes are cleaned up and new writes exist
+        # Verify all writes persist (for HITL support)
         retrieved = saver.get_tuple(result_config2)
         assert retrieved is not None
 
-        # Should only have writes from checkpoint2
+        # Issue #133 fix: All writes should persist
         pending_writes = retrieved.pending_writes
         write_channels = {w[1] for w in pending_writes}
         assert "channel3" in write_channels
-        # Old writes should be cleaned up
-        assert "channel1" not in write_channels
-        assert "channel2" not in write_channels
+        # Old writes should also be present (for HITL support)
+        assert "channel1" in write_channels
+        assert "channel2" in write_channels
+
+        # Verify that delete_thread properly cleans up all writes
+        saver.delete_thread(thread_id)
+
+        # After delete_thread, writes should be cleaned up
+        # Note: The checkpoint itself may still exist briefly due to index lag,
+        # but the writes should be cleaned up immediately
+        retrieved_after_delete = saver.get_tuple(result_config2)
+        if retrieved_after_delete is not None:
+            # If checkpoint still exists, verify writes are cleaned up
+            assert (
+                len(retrieved_after_delete.pending_writes) == 0
+            ), "Writes should be cleaned up by delete_thread"
 
 
 def test_error_handling_missing_checkpoint(redis_url: str) -> None:

@@ -105,7 +105,7 @@ class SyncCheckpointKeyRegistry(CheckpointKeyRegistry):
         )
         # Use index as score to maintain order
         mapping = {key: idx for idx, key in enumerate(write_keys)}
-        self._redis.zadd(zset_key, mapping)
+        self._redis.zadd(zset_key, mapping)  # type: ignore[arg-type]
 
     def get_write_keys(
         self, thread_id: str, checkpoint_ns: str, checkpoint_id: str
@@ -215,7 +215,7 @@ class AsyncCheckpointKeyRegistry(CheckpointKeyRegistry):
             thread_id, checkpoint_ns, checkpoint_id
         )
         mapping = {key: idx for idx, key in enumerate(write_keys)}
-        await self._redis.zadd(zset_key, mapping)
+        await self._redis.zadd(zset_key, mapping)  # type: ignore[arg-type]
 
     async def get_write_keys(
         self, thread_id: str, checkpoint_ns: str, checkpoint_id: str
