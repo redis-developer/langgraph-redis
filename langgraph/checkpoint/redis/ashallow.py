@@ -94,7 +94,7 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         _tb: Optional[TracebackType],
     ) -> None:
         if self._owns_its_client:
-            await self._redis.aclose()
+            await self._redis.aclose()  # type: ignore[attr-defined]
             # RedisCluster doesn't have connection_pool attribute
             if getattr(self._redis, "connection_pool", None):
                 coro = self._redis.connection_pool.disconnect()
@@ -229,9 +229,6 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             # Create pipeline for all operations
             pipeline = self._redis.pipeline(transaction=False)
 
-            # Get the previous checkpoint ID to potentially clean up its writes
-            pipeline.json().get(checkpoint_key)
-
             # Set the new checkpoint data
             pipeline.json().set(checkpoint_key, "$", checkpoint_data)
 
@@ -240,41 +237,21 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
                 ttl_seconds = int(self.ttl_config.get("default_ttl") * 60)
                 pipeline.expire(checkpoint_key, ttl_seconds)
 
-            # Execute pipeline to get prev data and set new data
-            results = await pipeline.execute()
-            prev_checkpoint_data = results[0]
+            # Execute pipeline to set new checkpoint data
+            await pipeline.execute()
 
-            # Check if we need to clean up old writes
-            prev_checkpoint_id = None
-            if prev_checkpoint_data and isinstance(prev_checkpoint_data, dict):
-                prev_checkpoint_id = prev_checkpoint_data.get("checkpoint_id")
-
-            # If checkpoint changed, clean up old writes in a second pipeline
-            if prev_checkpoint_id and prev_checkpoint_id != checkpoint["id"]:
-                thread_zset_key = f"write_keys_zset:{thread_id}:{checkpoint_ns}:shallow"
-
-                # Create cleanup pipeline
-                cleanup_pipeline = self._redis.pipeline(transaction=False)
-
-                # Get all existing write keys
-                cleanup_pipeline.zrange(thread_zset_key, 0, -1)
-
-                # Delete the registry
-                cleanup_pipeline.delete(thread_zset_key)
-
-                # Execute to get keys and delete registry
-                cleanup_results = await cleanup_pipeline.execute()
-                existing_write_keys = cleanup_results[0]
-
-                # If there are keys to delete, do it in another pipeline
-                if existing_write_keys:
-                    delete_pipeline = self._redis.pipeline(transaction=False)
-                    for old_key in existing_write_keys:
-                        old_key_str = (
-                            old_key.decode() if isinstance(old_key, bytes) else old_key
-                        )
-                        delete_pipeline.delete(old_key_str)
-                    await delete_pipeline.execute()
+            # NOTE: We intentionally do NOT clean up old writes here.
+            # In the HITL (Human-in-the-Loop) flow, interrupt writes are saved via
+            # put_writes BEFORE the new checkpoint is saved. If we clean up writes
+            # when the checkpoint changes, we would delete the interrupt writes
+            # before they can be consumed when resuming.
+            #
+            # Writes are cleaned up in the following scenarios:
+            # 1. When delete_thread is called
+            # 2. When TTL expires (if configured)
+            # 3. When put_writes is called again for the same task/idx (overwrites)
+            #
+            # See Issue #133 for details on this bug fix.
 
             return next_config
 
@@ -388,7 +365,7 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         )
 
         # Single fetch gets everything inline - matching sync implementation
-        full_checkpoint_data = await self._redis.json().get(checkpoint_key)  # type: ignore[misc]
+        full_checkpoint_data = await self._redis.json().get(checkpoint_key)
         if not full_checkpoint_data or not isinstance(full_checkpoint_data, dict):
             return None
 
@@ -505,7 +482,11 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
                 writes_objects.append(write_obj)
 
             # Thread-level sorted set for write keys
-            thread_zset_key = f"write_keys_zset:{thread_id}:{checkpoint_ns}:shallow"
+            # Use to_storage_safe_str for consistent key naming
+            safe_checkpoint_ns = to_storage_safe_str(checkpoint_ns)
+            thread_zset_key = (
+                f"write_keys_zset:{thread_id}:{safe_checkpoint_ns}:shallow"
+            )
 
             # Collect all write keys
             write_keys = []
@@ -529,7 +510,7 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
 
             # Use thread-level sorted set
             zadd_mapping = {key: idx for idx, key in enumerate(write_keys)}
-            pipeline.zadd(thread_zset_key, zadd_mapping)
+            pipeline.zadd(thread_zset_key, zadd_mapping)  # type: ignore[arg-type]
 
             # Apply TTL to registry key if configured
             if self.ttl_config and "default_ttl" in self.ttl_config:
@@ -563,7 +544,7 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         )
 
         # Single JSON.GET operation to retrieve checkpoint with inline channel_values
-        checkpoint_data = await self._redis.json().get(checkpoint_key, "$.checkpoint")  # type: ignore[misc]
+        checkpoint_data = await self._redis.json().get(checkpoint_key, "$.checkpoint")
 
         if not checkpoint_data:
             return {}
@@ -631,7 +612,9 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             return []
 
         # Use thread-level sorted set
-        thread_zset_key = f"write_keys_zset:{thread_id}:{checkpoint_ns}:shallow"
+        # Use to_storage_safe_str for consistent key naming
+        safe_checkpoint_ns = to_storage_safe_str(checkpoint_ns)
+        thread_zset_key = f"write_keys_zset:{thread_id}:{safe_checkpoint_ns}:shallow"
 
         try:
             # Check if we have any writes in the thread sorted set

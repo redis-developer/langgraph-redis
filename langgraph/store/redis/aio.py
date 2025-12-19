@@ -376,7 +376,7 @@ class AsyncRedisStore(
 
         # Close Redis connections if we own them
         if self._owns_its_client:
-            await self._redis.aclose()
+            await self._redis.aclose()  # type: ignore[attr-defined]
             await self._redis.connection_pool.disconnect()
 
     async def abatch(self, ops: Iterable[Op]) -> list[Result]:
@@ -781,7 +781,7 @@ class AsyncRedisStore(
                             )
                             result_map[store_key] = doc
                             # Fetch individually in cluster mode
-                            store_doc_item = await self._redis.json().get(store_key)  # type: ignore
+                            store_doc_item = await self._redis.json().get(store_key)
                             store_docs.append(store_doc_item)
                     store_docs_raw = store_docs
                 else:

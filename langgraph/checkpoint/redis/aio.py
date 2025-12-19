@@ -1063,7 +1063,7 @@ class AsyncRedisSaver(
 
                     if self.cluster_mode:
                         # For cluster mode, execute operation directly
-                        await self._redis.json().set(  # type: ignore[misc]
+                        await self._redis.json().set(
                             checkpoint_key, "$", checkpoint_data
                         )
                     else:
@@ -1146,7 +1146,7 @@ class AsyncRedisSaver(
                     )
 
                     # Redis JSON.SET is an UPSERT by default
-                    await self._redis.json().set(key, "$", cast(Any, write_obj))  # type: ignore[misc]
+                    await self._redis.json().set(key, "$", cast(Any, write_obj))
                     created_keys.append(key)
 
                 # Apply TTL to newly created keys
@@ -1181,7 +1181,7 @@ class AsyncRedisSaver(
 
                         # Add all write keys with their index as score for ordering
                         zadd_mapping = {key: idx for idx, key in enumerate(write_keys)}
-                        await self._redis.zadd(zset_key, zadd_mapping)
+                        await self._redis.zadd(zset_key, zadd_mapping)  # type: ignore[arg-type]
 
                         # Apply TTL to registry key if configured
                         if self.ttl_config and "default_ttl" in self.ttl_config:
@@ -1243,7 +1243,7 @@ class AsyncRedisSaver(
 
                     # Add all write keys with their index as score for ordering
                     zadd_mapping = {key: idx for idx, key in enumerate(write_keys)}
-                    pipeline.zadd(zset_key, zadd_mapping)
+                    pipeline.zadd(zset_key, zadd_mapping)  # type: ignore[arg-type]
 
                     # Apply TTL to registry key if configured
                     if self.ttl_config and "default_ttl" in self.ttl_config:
@@ -1291,7 +1291,7 @@ class AsyncRedisSaver(
                                 zadd_mapping = {
                                     key: idx for idx, key in enumerate(write_keys)
                                 }
-                                fallback_pipeline.zadd(zset_key, zadd_mapping)
+                                fallback_pipeline.zadd(zset_key, zadd_mapping)  # type: ignore[arg-type]
                                 if self.ttl_config and "default_ttl" in self.ttl_config:
                                     ttl_seconds = int(
                                         self.ttl_config.get("default_ttl") * 60
@@ -1304,14 +1304,16 @@ class AsyncRedisSaver(
                             # Update has_writes flag separately for older Redis
                             if checkpoint_key:
                                 try:
-                                    checkpoint_data = await self._redis.json().get(checkpoint_key)  # type: ignore[misc]
+                                    checkpoint_data = await self._redis.json().get(
+                                        checkpoint_key
+                                    )
                                     if isinstance(
                                         checkpoint_data, dict
                                     ) and not checkpoint_data.get("has_writes"):
                                         checkpoint_data["has_writes"] = True
                                         await self._redis.json().set(
                                             checkpoint_key, "$", checkpoint_data
-                                        )  # type: ignore[misc]
+                                        )
                                 except Exception:
                                     # If this fails, it's not critical - the writes are still saved
                                     pass
@@ -1477,7 +1479,7 @@ class AsyncRedisSaver(
         )
 
         # Single JSON.GET operation to retrieve checkpoint with inline channel_values
-        checkpoint_data = await self._redis.json().get(checkpoint_key, "$.checkpoint")  # type: ignore[misc]
+        checkpoint_data = await self._redis.json().get(checkpoint_key, "$.checkpoint")
 
         if not checkpoint_data:
             return {}

@@ -541,7 +541,7 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
                         if not isinstance(store_doc, dict):
                             try:
                                 store_doc = json.loads(
-                                    store_doc  # type: ignore[arg-type]
+                                    store_doc
                                 )  # Attempt to parse if it's a JSON string
                             except (json.JSONDecodeError, TypeError):
                                 logger.error(f"Failed to parse store_doc: {store_doc}")

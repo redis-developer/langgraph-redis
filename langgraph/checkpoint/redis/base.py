@@ -563,7 +563,7 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
             return []
 
         writes = []
-        for write in result["writes"]:  # type: ignore[call-overload]
+        for write in result["writes"]:
             writes.append(
                 (
                     write["task_id"],
@@ -636,17 +636,17 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
                     # UPSERT case - only update specific fields
                     if key_exists:
                         # Update only channel, type, and blob fields
-                        pipeline.set(key, "$.channel", write_obj["channel"])
-                        pipeline.set(key, "$.type", write_obj["type"])
-                        pipeline.set(key, "$.blob", write_obj["blob"])
+                        pipeline.json().set(key, "$.channel", write_obj["channel"])
+                        pipeline.json().set(key, "$.type", write_obj["type"])
+                        pipeline.json().set(key, "$.blob", write_obj["blob"])
                     else:
                         # For new records, set the complete object
-                        pipeline.set(key, "$", write_obj)
+                        pipeline.json().set(key, "$", write_obj)
                         created_keys.append(key)
                 else:
                     # INSERT case - only insert if doesn't exist
                     if not key_exists:
-                        pipeline.set(key, "$", write_obj)
+                        pipeline.json().set(key, "$", write_obj)
                         created_keys.append(key)
 
             pipeline.execute()
