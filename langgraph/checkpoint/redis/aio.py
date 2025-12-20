@@ -1063,7 +1063,7 @@ class AsyncRedisSaver(
 
                     if self.cluster_mode:
                         # For cluster mode, execute operation directly
-                        await self._redis.json().set(
+                        await self._redis.json().set(  # type: ignore[misc]
                             checkpoint_key, "$", checkpoint_data
                         )
                     else:
@@ -1146,7 +1146,7 @@ class AsyncRedisSaver(
                     )
 
                     # Redis JSON.SET is an UPSERT by default
-                    await self._redis.json().set(key, "$", cast(Any, write_obj))
+                    await self._redis.json().set(key, "$", cast(Any, write_obj))  # type: ignore[misc]
                     created_keys.append(key)
 
                 # Apply TTL to newly created keys
@@ -1304,14 +1304,14 @@ class AsyncRedisSaver(
                             # Update has_writes flag separately for older Redis
                             if checkpoint_key:
                                 try:
-                                    checkpoint_data = await self._redis.json().get(
+                                    checkpoint_data = await self._redis.json().get(  # type: ignore[misc]
                                         checkpoint_key
                                     )
                                     if isinstance(
                                         checkpoint_data, dict
                                     ) and not checkpoint_data.get("has_writes"):
                                         checkpoint_data["has_writes"] = True
-                                        await self._redis.json().set(
+                                        await self._redis.json().set(  # type: ignore[misc]
                                             checkpoint_key, "$", checkpoint_data
                                         )
                                 except Exception:
@@ -1479,7 +1479,7 @@ class AsyncRedisSaver(
         )
 
         # Single JSON.GET operation to retrieve checkpoint with inline channel_values
-        checkpoint_data = await self._redis.json().get(checkpoint_key, "$.checkpoint")
+        checkpoint_data = await self._redis.json().get(checkpoint_key, "$.checkpoint")  # type: ignore[misc]
 
         if not checkpoint_data:
             return {}

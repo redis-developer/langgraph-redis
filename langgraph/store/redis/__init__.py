@@ -540,8 +540,9 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
                         score = (1.0 - float(dist)) if dist is not None else 0.0
                         if not isinstance(store_doc, dict):
                             try:
+                                # Cast needed: redis-py types json().get() incorrectly
                                 store_doc = json.loads(
-                                    store_doc
+                                    cast(str, store_doc)
                                 )  # Attempt to parse if it's a JSON string
                             except (json.JSONDecodeError, TypeError):
                                 logger.error(f"Failed to parse store_doc: {store_doc}")

@@ -558,7 +558,8 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
             return []
 
         # Get the full JSON document
-        result = self._redis.json().get(write_key)
+        # Cast needed: redis-py types json().get() as List[JsonType] but returns dict
+        result = cast(Optional[Dict[str, Any]], self._redis.json().get(write_key))
         if not result:
             return []
 
