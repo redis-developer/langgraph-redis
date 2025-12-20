@@ -781,7 +781,7 @@ class AsyncRedisStore(
                             )
                             result_map[store_key] = doc
                             # Fetch individually in cluster mode
-                            store_doc_item = await self._redis.json().get(store_key)
+                            store_doc_item = await self._redis.json().get(store_key)  # type: ignore[misc]
                             store_docs.append(store_doc_item)
                     store_docs_raw = store_docs
                 else:

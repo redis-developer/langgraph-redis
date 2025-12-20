@@ -365,7 +365,7 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         )
 
         # Single fetch gets everything inline - matching sync implementation
-        full_checkpoint_data = await self._redis.json().get(checkpoint_key)
+        full_checkpoint_data = await self._redis.json().get(checkpoint_key)  # type: ignore[misc]
         if not full_checkpoint_data or not isinstance(full_checkpoint_data, dict):
             return None
 
@@ -544,7 +544,7 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         )
 
         # Single JSON.GET operation to retrieve checkpoint with inline channel_values
-        checkpoint_data = await self._redis.json().get(checkpoint_key, "$.checkpoint")
+        checkpoint_data = await self._redis.json().get(checkpoint_key, "$.checkpoint")  # type: ignore[misc]
 
         if not checkpoint_data:
             return {}
