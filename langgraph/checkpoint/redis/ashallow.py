@@ -512,6 +512,12 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
                 # Always set the complete object - simpler and faster than checking existence
                 pipeline.json().set(key, "$", write_obj)
 
+            # Apply TTL to checkpoint_write keys if configured
+            if self.ttl_config and "default_ttl" in self.ttl_config:
+                ttl_seconds = int(self.ttl_config.get("default_ttl") * 60)
+                for key in write_keys:
+                    pipeline.expire(key, ttl_seconds)
+
             # Use thread-level sorted set
             zadd_mapping = {key: idx for idx, key in enumerate(write_keys)}
             pipeline.zadd(thread_zset_key, zadd_mapping)  # type: ignore[arg-type]
