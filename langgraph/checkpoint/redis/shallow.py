@@ -145,32 +145,18 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
             }
         }
 
-        # Extract timestamp from checkpoint_id (ULID)
+        # Extract timestamp from checkpoint_id (ULID) or fallback to checkpoint's ts field
+        # Note: LangGraph may generate checkpoint IDs in different formats (ULID, UUIDv6, etc.)
+        # We try ULID first, then fall back gracefully without warnings (Issue #136)
         checkpoint_ts = None
         if checkpoint["id"]:
             try:
                 ulid_obj = ULID.from_str(checkpoint["id"])
                 checkpoint_ts = ulid_obj.timestamp  # milliseconds since epoch
-            except Exception as e:
-                # If not a valid ULID, use checkpoint's timestamp if available, else current time
-                logger.warning(
-                    f"Invalid ULID checkpoint_id '{checkpoint['id']}': {e}. "
-                    f"Using fallback timestamp."
-                )
-                # Try to use checkpoint's own timestamp field if available
-                ts_value = checkpoint.get("ts")
-                if ts_value:
-                    # Handle both ISO string and numeric timestamps
-                    if isinstance(ts_value, str):
-                        try:
-                            dt = datetime.fromisoformat(ts_value.replace("Z", "+00:00"))
-                            checkpoint_ts = dt.timestamp() * MILLISECONDS_PER_SECOND
-                        except Exception:
-                            checkpoint_ts = time.time() * MILLISECONDS_PER_SECOND
-                    else:
-                        checkpoint_ts = ts_value
-                else:
-                    checkpoint_ts = time.time() * MILLISECONDS_PER_SECOND
+            except Exception:
+                # Not a valid ULID - this is expected for UUIDv6 and other formats
+                # Fall back to checkpoint's timestamp field or current time
+                checkpoint_ts = self._extract_fallback_timestamp(checkpoint)
 
         # Parse metadata from string to dict to avoid double serialization
         metadata_str = self._dump_metadata(metadata)
@@ -810,3 +796,28 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
 
                 # Execute all deletions
                 pipeline.execute()
+
+    def _extract_fallback_timestamp(self, checkpoint: Checkpoint) -> float:
+        """Extract timestamp from checkpoint's ts field or use current time.
+
+        This is used when the checkpoint_id is not a valid ULID (e.g., UUIDv6 format).
+        See Issue #136 for details.
+
+        Args:
+            checkpoint: The checkpoint object containing an optional ts field.
+
+        Returns:
+            Timestamp in milliseconds since epoch.
+        """
+        ts_value = checkpoint.get("ts")
+        if ts_value:
+            # Handle both ISO string and numeric timestamps
+            if isinstance(ts_value, str):
+                try:
+                    dt = datetime.fromisoformat(ts_value.replace("Z", "+00:00"))
+                    return dt.timestamp() * MILLISECONDS_PER_SECOND
+                except Exception:
+                    return time.time() * MILLISECONDS_PER_SECOND
+            else:
+                return ts_value
+        return time.time() * MILLISECONDS_PER_SECOND
