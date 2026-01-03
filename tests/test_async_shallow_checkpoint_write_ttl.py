@@ -4,7 +4,6 @@ This test verifies that checkpoint_write keys have TTL applied when default_ttl 
 """
 
 import asyncio
-import time
 from contextlib import asynccontextmanager
 from uuid import uuid4
 
@@ -103,8 +102,12 @@ async def test_checkpoint_write_keys_have_ttl(redis_url: str) -> None:
         )
 
         # TTL should be approximately 6 seconds (with some tolerance)
-        assert 0 < ttl_write_1 <= 6, f"TTL should be around 6 seconds, got {ttl_write_1}"
-        assert 0 < ttl_write_2 <= 6, f"TTL should be around 6 seconds, got {ttl_write_2}"
+        assert (
+            0 < ttl_write_1 <= 6
+        ), f"TTL should be around 6 seconds, got {ttl_write_1}"
+        assert (
+            0 < ttl_write_2 <= 6
+        ), f"TTL should be around 6 seconds, got {ttl_write_2}"
 
 
 @pytest.mark.asyncio
