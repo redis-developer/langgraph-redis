@@ -260,6 +260,10 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
                     filter_expression.append(Tag("source") == v)
                 elif k == "step":
                     filter_expression.append(Num("step") == v)
+                elif k == "thread_id":
+                    filter_expression.append(Tag("thread_id") == to_storage_safe_id(v))
+                elif k == "run_id":
+                    filter_expression.append(Tag("run_id") == to_storage_safe_id(v))
                 else:
                     raise ValueError(f"Unsupported filter key: {k}")
 
@@ -476,6 +480,7 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
         """Store a checkpoint to Redis with separate blob storage."""
         configurable = config["configurable"].copy()
 
+        run_id = configurable.pop("run_id", None)
         thread_id = configurable.pop("thread_id")
         checkpoint_ns = configurable.pop("checkpoint_ns")
         # Get checkpoint_id from config - this will be parent if saving a child
@@ -527,8 +532,12 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
 
                 checkpoint_ts = time.time() * 1000
 
+        if run_id is None:
+            run_id = metadata.get("run_id")
+
         checkpoint_data = {
             "thread_id": storage_safe_thread_id,
+            "run_id": to_storage_safe_id(run_id) if run_id else "",
             "checkpoint_ns": storage_safe_checkpoint_ns,
             "checkpoint_id": storage_safe_checkpoint_id,
             "parent_checkpoint_id": (

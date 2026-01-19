@@ -5,9 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import time
 from contextlib import asynccontextmanager
-from datetime import datetime
 from types import TracebackType
 from typing import Any, AsyncIterator, Dict, List, Optional, Sequence, Tuple, Type, cast
 
@@ -40,8 +38,51 @@ from langgraph.checkpoint.redis.util import (
     to_storage_safe_str,
 )
 
-# Constants
-MILLISECONDS_PER_SECOND = 1000
+SCHEMAS = [
+    {
+        "index": {
+            "name": "checkpoints",
+            "prefix": CHECKPOINT_PREFIX + REDIS_KEY_SEPARATOR,
+            "storage_type": "json",
+        },
+        "fields": [
+            {"name": "thread_id", "type": "tag"},
+            {"name": "run_id", "type": "tag"},
+            {"name": "checkpoint_ns", "type": "tag"},
+            {"name": "source", "type": "tag"},
+            {"name": "step", "type": "numeric"},
+        ],
+    },
+    {
+        "index": {
+            "name": "checkpoints_blobs",
+            "prefix": CHECKPOINT_BLOB_PREFIX + REDIS_KEY_SEPARATOR,
+            "storage_type": "json",
+        },
+        "fields": [
+            {"name": "thread_id", "type": "tag"},
+            {"name": "checkpoint_ns", "type": "tag"},
+            {"name": "channel", "type": "tag"},
+            {"name": "type", "type": "tag"},
+        ],
+    },
+    {
+        "index": {
+            "name": "checkpoint_writes",
+            "prefix": CHECKPOINT_WRITE_PREFIX + REDIS_KEY_SEPARATOR,
+            "storage_type": "json",
+        },
+        "fields": [
+            {"name": "thread_id", "type": "tag"},
+            {"name": "checkpoint_ns", "type": "tag"},
+            {"name": "checkpoint_id", "type": "tag"},
+            {"name": "task_id", "type": "tag"},
+            {"name": "idx", "type": "numeric"},
+            {"name": "channel", "type": "tag"},
+            {"name": "type", "type": "tag"},
+        ],
+    },
+]
 
 
 class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
@@ -61,18 +102,12 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         redis_client: Optional[AsyncRedis] = None,
         connection_args: Optional[dict[str, Any]] = None,
         ttl: Optional[dict[str, Any]] = None,
-        checkpoint_prefix: str = CHECKPOINT_PREFIX,
-        checkpoint_blob_prefix: str = CHECKPOINT_BLOB_PREFIX,
-        checkpoint_write_prefix: str = CHECKPOINT_WRITE_PREFIX,
     ) -> None:
         super().__init__(
             redis_url=redis_url,
             redis_client=redis_client,
             connection_args=connection_args,
             ttl=ttl,
-            checkpoint_prefix=checkpoint_prefix,
-            checkpoint_blob_prefix=checkpoint_blob_prefix,
-            checkpoint_write_prefix=checkpoint_write_prefix,
         )
         self.loop = asyncio.get_running_loop()
 
@@ -81,6 +116,9 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         self._key_cache_max_size = 1000  # Configurable limit
         self._channel_cache: Dict[str, Any] = {}
 
+        # Cache commonly used prefixes
+        self._checkpoint_prefix = CHECKPOINT_PREFIX
+        self._checkpoint_write_prefix = CHECKPOINT_WRITE_PREFIX
         self._separator = REDIS_KEY_SEPARATOR
 
     async def __aenter__(self) -> AsyncShallowRedisSaver:
@@ -99,7 +137,7 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         _tb: Optional[TracebackType],
     ) -> None:
         if self._owns_its_client:
-            await self._redis.aclose()  # type: ignore[attr-defined]
+            await self._redis.aclose()
             # RedisCluster doesn't have connection_pool attribute
             if getattr(self._redis, "connection_pool", None):
                 coro = self._redis.connection_pool.disconnect()
@@ -121,9 +159,6 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         redis_client: Optional[AsyncRedis] = None,
         connection_args: Optional[dict[str, Any]] = None,
         ttl: Optional[dict[str, Any]] = None,
-        checkpoint_prefix: str = CHECKPOINT_PREFIX,
-        checkpoint_blob_prefix: str = CHECKPOINT_BLOB_PREFIX,
-        checkpoint_write_prefix: str = CHECKPOINT_WRITE_PREFIX,
     ) -> AsyncIterator[AsyncShallowRedisSaver]:
         """Create a new AsyncShallowRedisSaver instance."""
         async with cls(
@@ -131,9 +166,6 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             redis_client=redis_client,
             connection_args=connection_args,
             ttl=ttl,
-            checkpoint_prefix=checkpoint_prefix,
-            checkpoint_blob_prefix=checkpoint_blob_prefix,
-            checkpoint_write_prefix=checkpoint_write_prefix,
         ) as saver:
             yield saver
 
@@ -181,6 +213,7 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             asyncio.CancelledError: If the operation is cancelled/interrupted
         """
         configurable = config["configurable"].copy()
+        run_id = configurable.pop("run_id", metadata.get("run_id"))
         thread_id = configurable.pop("thread_id")
         checkpoint_ns = configurable.pop("checkpoint_ns")
 
@@ -194,24 +227,26 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         }
 
         try:
-            # Extract timestamp from checkpoint_id (ULID) or fallback to checkpoint's ts field
-            # Note: LangGraph may generate checkpoint IDs in different formats (ULID, UUIDv6, etc.)
-            # We try ULID first, then fall back gracefully without warnings (Issue #136)
+            # Extract timestamp from checkpoint_id (ULID)
             checkpoint_ts = None
             if checkpoint["id"]:
                 try:
+                    from ulid import ULID
+
                     ulid_obj = ULID.from_str(checkpoint["id"])
                     checkpoint_ts = ulid_obj.timestamp  # milliseconds since epoch
                 except Exception:
-                    # Not a valid ULID - this is expected for UUIDv6 and other formats
-                    # Fall back to checkpoint's timestamp field or current time
-                    checkpoint_ts = self._extract_fallback_timestamp(checkpoint)
+                    # If not a valid ULID, use current time
+                    import time
+
+                    checkpoint_ts = time.time() * 1000
 
             # Store channel values inline in the checkpoint
             copy["channel_values"] = checkpoint.get("channel_values", {})
 
             checkpoint_data = {
                 "thread_id": thread_id,
+                "run_id": to_storage_safe_id(run_id) if run_id else "",
                 "checkpoint_ns": checkpoint_ns,
                 "checkpoint_id": checkpoint["id"],
                 "checkpoint_ts": checkpoint_ts,
@@ -233,6 +268,9 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             # Create pipeline for all operations
             pipeline = self._redis.pipeline(transaction=False)
 
+            # Get the previous checkpoint ID to potentially clean up its writes
+            pipeline.json().get(checkpoint_key)
+
             # Set the new checkpoint data
             pipeline.json().set(checkpoint_key, "$", checkpoint_data)
 
@@ -241,21 +279,41 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
                 ttl_seconds = int(self.ttl_config.get("default_ttl") * 60)
                 pipeline.expire(checkpoint_key, ttl_seconds)
 
-            # Execute pipeline to set new checkpoint data
-            await pipeline.execute()
+            # Execute pipeline to get prev data and set new data
+            results = await pipeline.execute()
+            prev_checkpoint_data = results[0]
 
-            # NOTE: We intentionally do NOT clean up old writes here.
-            # In the HITL (Human-in-the-Loop) flow, interrupt writes are saved via
-            # put_writes BEFORE the new checkpoint is saved. If we clean up writes
-            # when the checkpoint changes, we would delete the interrupt writes
-            # before they can be consumed when resuming.
-            #
-            # Writes are cleaned up in the following scenarios:
-            # 1. When delete_thread is called
-            # 2. When TTL expires (if configured)
-            # 3. When put_writes is called again for the same task/idx (overwrites)
-            #
-            # See Issue #133 for details on this bug fix.
+            # Check if we need to clean up old writes
+            prev_checkpoint_id = None
+            if prev_checkpoint_data and isinstance(prev_checkpoint_data, dict):
+                prev_checkpoint_id = prev_checkpoint_data.get("checkpoint_id")
+
+            # If checkpoint changed, clean up old writes in a second pipeline
+            if prev_checkpoint_id and prev_checkpoint_id != checkpoint["id"]:
+                thread_zset_key = f"write_keys_zset:{thread_id}:{checkpoint_ns}:shallow"
+
+                # Create cleanup pipeline
+                cleanup_pipeline = self._redis.pipeline(transaction=False)
+
+                # Get all existing write keys
+                cleanup_pipeline.zrange(thread_zset_key, 0, -1)
+
+                # Delete the registry
+                cleanup_pipeline.delete(thread_zset_key)
+
+                # Execute to get keys and delete registry
+                cleanup_results = await cleanup_pipeline.execute()
+                existing_write_keys = cleanup_results[0]
+
+                # If there are keys to delete, do it in another pipeline
+                if existing_write_keys:
+                    delete_pipeline = self._redis.pipeline(transaction=False)
+                    for old_key in existing_write_keys:
+                        old_key_str = (
+                            old_key.decode() if isinstance(old_key, bytes) else old_key
+                        )
+                        delete_pipeline.delete(old_key_str)
+                    await delete_pipeline.execute()
 
             return next_config
 
@@ -289,6 +347,8 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
                 query_filter.append(
                     Tag("checkpoint_ns") == to_storage_safe_str(checkpoint_ns)
                 )
+            if run_id := config["configurable"].get("run_id"):
+                query_filter.append(Tag("run_id") == to_storage_safe_id(run_id))
 
         if filter:
             for key, value in filter.items():
@@ -296,6 +356,10 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
                     query_filter.append(Tag("source") == value)
                 elif key == "step":
                     query_filter.append(Num("step") == value)
+                elif key == "thread_id":
+                    query_filter.append(Tag("thread_id") == to_storage_safe_id(value))
+                elif key == "run_id":
+                    query_filter.append(Tag("run_id") == to_storage_safe_id(value))
 
         if before:
             before_checkpoint_id = get_checkpoint_id(before)
@@ -313,7 +377,6 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         for expr in query_filter[1:]:
             combined_filter &= expr
 
-        # Sort by checkpoint_id in descending order to get most recent checkpoints first
         query = FilterQuery(
             filter_expression=combined_filter,
             return_fields=[
@@ -326,7 +389,6 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
                 "ts",
             ],
             num_results=limit or 100,  # Set higher limit to retrieve more results
-            sort_by=("checkpoint_id", "DESC"),
         )
 
         results = await self.checkpoints_index.search(query)
@@ -479,18 +541,12 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
                     "idx": WRITES_IDX_MAP.get(channel, idx),
                     "channel": channel,
                     "type": type_,
-                    "blob": self._encode_blob(
-                        blob
-                    ),  # Encode bytes to base64 string for Redis
+                    "blob": blob,
                 }
                 writes_objects.append(write_obj)
 
             # Thread-level sorted set for write keys
-            # Use to_storage_safe_str for consistent key naming
-            safe_checkpoint_ns = to_storage_safe_str(checkpoint_ns)
-            thread_zset_key = (
-                f"write_keys_zset:{thread_id}:{safe_checkpoint_ns}:shallow"
-            )
+            thread_zset_key = f"write_keys_zset:{thread_id}:{checkpoint_ns}:shallow"
 
             # Collect all write keys
             write_keys = []
@@ -512,15 +568,9 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
                 # Always set the complete object - simpler and faster than checking existence
                 pipeline.json().set(key, "$", write_obj)
 
-            # Apply TTL to checkpoint_write keys if configured
-            if self.ttl_config and "default_ttl" in self.ttl_config:
-                ttl_seconds = int(self.ttl_config.get("default_ttl") * 60)
-                for key in write_keys:
-                    pipeline.expire(key, ttl_seconds)
-
             # Use thread-level sorted set
             zadd_mapping = {key: idx for idx, key in enumerate(write_keys)}
-            pipeline.zadd(thread_zset_key, zadd_mapping)  # type: ignore[arg-type]
+            pipeline.zadd(thread_zset_key, zadd_mapping)
 
             # Apply TTL to registry key if configured
             if self.ttl_config and "default_ttl" in self.ttl_config:
@@ -622,9 +672,7 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             return []
 
         # Use thread-level sorted set
-        # Use to_storage_safe_str for consistent key naming
-        safe_checkpoint_ns = to_storage_safe_str(checkpoint_ns)
-        thread_zset_key = f"write_keys_zset:{thread_id}:{safe_checkpoint_ns}:shallow"
+        thread_zset_key = f"write_keys_zset:{thread_id}:{checkpoint_ns}:shallow"
 
         try:
             # Check if we have any writes in the thread sorted set
@@ -690,14 +738,14 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
     def create_indexes(self) -> None:
         """Create indexes without connecting to Redis."""
         self.checkpoints_index = AsyncSearchIndex.from_dict(
-            self.checkpoints_schema, redis_client=self._redis
+            self.SCHEMAS[0], redis_client=self._redis
         )
         # Shallow implementation doesn't use blobs, but base class requires the attribute
         self.checkpoint_blobs_index = AsyncSearchIndex.from_dict(
-            self.blobs_schema, redis_client=self._redis
+            self.SCHEMAS[1], redis_client=self._redis
         )
         self.checkpoint_writes_index = AsyncSearchIndex.from_dict(
-            self.writes_schema, redis_client=self._redis
+            self.SCHEMAS[2], redis_client=self._redis
         )
 
     def get_tuple(self, config: RunnableConfig) -> Optional[CheckpointTuple]:
@@ -793,8 +841,10 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             f"writes:{thread_id}:{checkpoint_ns}:{checkpoint_id}:{task_id}:{idx}"
         )
         if cache_key not in self._key_cache:
-            self._key_cache[cache_key] = self._make_redis_checkpoint_writes_key(
-                thread_id, checkpoint_ns, checkpoint_id, task_id, idx
+            self._key_cache[cache_key] = (
+                BaseRedisSaver._make_redis_checkpoint_writes_key(
+                    thread_id, checkpoint_ns, checkpoint_id, task_id, idx
+                )
             )
         return self._key_cache[cache_key]
 
@@ -839,32 +889,7 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             if len(self._key_cache) >= self._key_cache_max_size:
                 # Remove oldest entry when cache is full
                 self._key_cache.pop(next(iter(self._key_cache)))
-            self._key_cache[cache_key] = self._make_redis_checkpoint_blob_key(
+            self._key_cache[cache_key] = BaseRedisSaver._make_redis_checkpoint_blob_key(
                 thread_id, checkpoint_ns, channel, version
             )
         return self._key_cache[cache_key]
-
-    def _extract_fallback_timestamp(self, checkpoint: Checkpoint) -> float:
-        """Extract timestamp from checkpoint's ts field or use current time.
-
-        This is used when the checkpoint_id is not a valid ULID (e.g., UUIDv6 format).
-        See Issue #136 for details.
-
-        Args:
-            checkpoint: The checkpoint object containing an optional ts field.
-
-        Returns:
-            Timestamp in milliseconds since epoch.
-        """
-        ts_value = checkpoint.get("ts")
-        if ts_value:
-            # Handle both ISO string and numeric timestamps
-            if isinstance(ts_value, str):
-                try:
-                    dt = datetime.fromisoformat(ts_value.replace("Z", "+00:00"))
-                    return dt.timestamp() * MILLISECONDS_PER_SECOND
-                except Exception:
-                    return time.time() * MILLISECONDS_PER_SECOND
-            else:
-                return ts_value
-        return time.time() * MILLISECONDS_PER_SECOND
