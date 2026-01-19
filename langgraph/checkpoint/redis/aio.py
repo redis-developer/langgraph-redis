@@ -655,6 +655,8 @@ class AsyncRedisSaver(
                 Tag("thread_id")
                 == to_storage_safe_id(config["configurable"]["thread_id"])
             )
+            if run_id := config["configurable"].get("run_id"):
+                filter_expression.append(Tag("run_id") == to_storage_safe_id(run_id))
 
             # Search for checkpoints with any namespace, including an empty
             # string, while `checkpoint_id` has to have a value.
@@ -666,8 +668,6 @@ class AsyncRedisSaver(
                 filter_expression.append(
                     Tag("checkpoint_id") == to_storage_safe_id(checkpoint_id)
                 )
-            if run_id := config["configurable"].get("run_id"):
-                filter_expression.append(Tag("run_id") == to_storage_safe_id(run_id))
 
         if filter:
             for k, v in filter.items():
@@ -917,6 +917,7 @@ class AsyncRedisSaver(
             asyncio.CancelledError: If the operation is cancelled/interrupted
         """
         configurable = config["configurable"].copy()
+
         run_id = configurable.pop("run_id", metadata.get("run_id"))
         thread_id = configurable.pop("thread_id")
         checkpoint_ns = configurable.pop("checkpoint_ns")

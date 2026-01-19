@@ -187,7 +187,7 @@ async def test_aget_state_history_run_id_and_thread_id_pregel(redis_url: str) ->
         ):
             history_run_2.append(item)
         assert len(full_history) == 8
-        assert full_history == history_run_1 + history_run_2
+        assert full_history == history_run_2 + history_run_1
         history_run_3 = []
         async for item in graph.aget_state_history(
             config={"configurable": {"thread_id": thread_id_2}},
@@ -263,7 +263,7 @@ def test_get_state_history_run_id_and_thread_id_pregel(redis_url: str) -> None:
         ):
             history_run_2.append(item)
         assert len(full_history) == 8
-        assert full_history == history_run_1 + history_run_2
+        assert full_history == history_run_2 + history_run_1
         history_run_3 = []
         for item in graph.get_state_history(
             config={"configurable": {"thread_id": thread_id_2}},

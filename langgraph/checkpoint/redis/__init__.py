@@ -242,6 +242,8 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
                 Tag("thread_id")
                 == to_storage_safe_id(config["configurable"]["thread_id"])
             )
+            if run_id := config["configurable"].get("run_id"):
+                filter_expression.append(Tag("run_id") == to_storage_safe_id(run_id))
 
             # Search for checkpoints with any namespace, including an empty
             # string, while `checkpoint_id` has to have a value.
@@ -480,7 +482,7 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
         """Store a checkpoint to Redis with separate blob storage."""
         configurable = config["configurable"].copy()
 
-        run_id = configurable.pop("run_id", None)
+        run_id = configurable.pop("run_id", metadata.get("run_id"))
         thread_id = configurable.pop("thread_id")
         checkpoint_ns = configurable.pop("checkpoint_ns")
         # Get checkpoint_id from config - this will be parent if saving a child
@@ -531,9 +533,6 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
                 import time
 
                 checkpoint_ts = time.time() * 1000
-
-        if run_id is None:
-            run_id = metadata.get("run_id")
 
         checkpoint_data = {
             "thread_id": storage_safe_thread_id,
