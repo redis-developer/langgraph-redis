@@ -44,6 +44,52 @@ MILLISECONDS_PER_SECOND = 1000
 # Logger for this module
 logger = logging.getLogger(__name__)
 
+SCHEMAS = [
+    {
+        "index": {
+            "name": "checkpoints",
+            "prefix": CHECKPOINT_PREFIX + REDIS_KEY_SEPARATOR,
+            "storage_type": "json",
+        },
+        "fields": [
+            {"name": "thread_id", "type": "tag"},
+            {"name": "run_id", "type": "tag"},
+            {"name": "checkpoint_ns", "type": "tag"},
+            {"name": "source", "type": "tag"},
+            {"name": "step", "type": "numeric"},
+        ],
+    },
+    {
+        "index": {
+            "name": "checkpoints_blobs",
+            "prefix": CHECKPOINT_BLOB_PREFIX + REDIS_KEY_SEPARATOR,
+            "storage_type": "json",
+        },
+        "fields": [
+            {"name": "thread_id", "type": "tag"},
+            {"name": "checkpoint_ns", "type": "tag"},
+            {"name": "channel", "type": "tag"},
+            {"name": "type", "type": "tag"},
+        ],
+    },
+    {
+        "index": {
+            "name": "checkpoint_writes",
+            "prefix": CHECKPOINT_WRITE_PREFIX + REDIS_KEY_SEPARATOR,
+            "storage_type": "json",
+        },
+        "fields": [
+            {"name": "thread_id", "type": "tag"},
+            {"name": "checkpoint_ns", "type": "tag"},
+            {"name": "checkpoint_id", "type": "tag"},
+            {"name": "task_id", "type": "tag"},
+            {"name": "idx", "type": "numeric"},
+            {"name": "channel", "type": "tag"},
+            {"name": "type", "type": "tag"},
+        ],
+    },
+]
+
 
 class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
     """Redis implementation that only stores the most recent checkpoint."""
@@ -61,18 +107,12 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         ttl: Optional[dict[str, Any]] = None,
         key_cache_max_size: Optional[int] = None,
         channel_cache_max_size: Optional[int] = None,
-        checkpoint_prefix: str = CHECKPOINT_PREFIX,
-        checkpoint_blob_prefix: str = CHECKPOINT_BLOB_PREFIX,
-        checkpoint_write_prefix: str = CHECKPOINT_WRITE_PREFIX,
     ) -> None:
         super().__init__(
             redis_url=redis_url,
             redis_client=redis_client,
             connection_args=connection_args,
             ttl=ttl,
-            checkpoint_prefix=checkpoint_prefix,
-            checkpoint_blob_prefix=checkpoint_blob_prefix,
-            checkpoint_write_prefix=checkpoint_write_prefix,
         )
 
         # Instance-level cache for frequently used keys (limited size to prevent memory issues)
@@ -84,7 +124,9 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
             channel_cache_max_size or self.DEFAULT_CHANNEL_CACHE_MAX_SIZE
         )
 
-        # Prefixes are now set in BaseRedisSaver.__init__
+        # Cache commonly used prefixes
+        self._checkpoint_prefix = CHECKPOINT_PREFIX
+        self._checkpoint_write_prefix = CHECKPOINT_WRITE_PREFIX
         self._separator = REDIS_KEY_SEPARATOR
 
     @classmethod
@@ -98,9 +140,6 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         ttl: Optional[dict[str, Any]] = None,
         key_cache_max_size: Optional[int] = None,
         channel_cache_max_size: Optional[int] = None,
-        checkpoint_prefix: str = CHECKPOINT_PREFIX,
-        checkpoint_blob_prefix: str = CHECKPOINT_BLOB_PREFIX,
-        checkpoint_write_prefix: str = CHECKPOINT_WRITE_PREFIX,
     ) -> Iterator[ShallowRedisSaver]:
         """Create a new ShallowRedisSaver instance."""
         saver: Optional[ShallowRedisSaver] = None
@@ -112,9 +151,6 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
                 ttl=ttl,
                 key_cache_max_size=key_cache_max_size,
                 channel_cache_max_size=channel_cache_max_size,
-                checkpoint_prefix=checkpoint_prefix,
-                checkpoint_blob_prefix=checkpoint_blob_prefix,
-                checkpoint_write_prefix=checkpoint_write_prefix,
             )
             yield saver
         finally:
@@ -133,6 +169,7 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
     ) -> RunnableConfig:
         """Store checkpoint with inline channel values."""
         configurable = config["configurable"].copy()
+        run_id = configurable.pop("run_id", metadata.get("run_id"))
         thread_id = configurable.pop("thread_id")
         checkpoint_ns = configurable.pop("checkpoint_ns")
 
@@ -145,18 +182,32 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
             }
         }
 
-        # Extract timestamp from checkpoint_id (ULID) or fallback to checkpoint's ts field
-        # Note: LangGraph may generate checkpoint IDs in different formats (ULID, UUIDv6, etc.)
-        # We try ULID first, then fall back gracefully without warnings (Issue #136)
+        # Extract timestamp from checkpoint_id (ULID)
         checkpoint_ts = None
         if checkpoint["id"]:
             try:
                 ulid_obj = ULID.from_str(checkpoint["id"])
                 checkpoint_ts = ulid_obj.timestamp  # milliseconds since epoch
-            except Exception:
-                # Not a valid ULID - this is expected for UUIDv6 and other formats
-                # Fall back to checkpoint's timestamp field or current time
-                checkpoint_ts = self._extract_fallback_timestamp(checkpoint)
+            except Exception as e:
+                # If not a valid ULID, use checkpoint's timestamp if available, else current time
+                logger.warning(
+                    f"Invalid ULID checkpoint_id '{checkpoint['id']}': {e}. "
+                    f"Using fallback timestamp."
+                )
+                # Try to use checkpoint's own timestamp field if available
+                ts_value = checkpoint.get("ts")
+                if ts_value:
+                    # Handle both ISO string and numeric timestamps
+                    if isinstance(ts_value, str):
+                        try:
+                            dt = datetime.fromisoformat(ts_value.replace("Z", "+00:00"))
+                            checkpoint_ts = dt.timestamp() * MILLISECONDS_PER_SECOND
+                        except Exception:
+                            checkpoint_ts = time.time() * MILLISECONDS_PER_SECOND
+                    else:
+                        checkpoint_ts = ts_value
+                else:
+                    checkpoint_ts = time.time() * MILLISECONDS_PER_SECOND
 
         # Parse metadata from string to dict to avoid double serialization
         metadata_str = self._dump_metadata(metadata)
@@ -169,6 +220,7 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
 
         checkpoint_data = {
             "thread_id": thread_id,
+            "run_id": to_storage_safe_id(run_id) if run_id else "",
             "checkpoint_ns": to_storage_safe_str(checkpoint_ns),
             "checkpoint_id": checkpoint["id"],
             "checkpoint_ts": checkpoint_ts,
@@ -186,8 +238,34 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
             thread_id, checkpoint_ns
         )
 
+        # Get the previous checkpoint ID to clean up its writes
+        prev_checkpoint_data = self._redis.json().get(checkpoint_key)
+        prev_checkpoint_id = None
+        if prev_checkpoint_data and isinstance(prev_checkpoint_data, dict):
+            prev_checkpoint_id = prev_checkpoint_data.get("checkpoint_id")
+
         with self._redis.pipeline(transaction=False) as pipeline:
             pipeline.json().set(checkpoint_key, "$", checkpoint_data)
+
+            # If checkpoint changed, clean up old writes
+            if prev_checkpoint_id and prev_checkpoint_id != checkpoint["id"]:
+                # Clean up writes from the previous checkpoint
+                thread_write_registry_key = (
+                    f"write_registry:{thread_id}:{checkpoint_ns}:shallow"
+                )
+
+                # Get all existing write keys and delete them
+                existing_write_keys = self._redis.zrange(
+                    thread_write_registry_key, 0, -1
+                )
+                for old_key in existing_write_keys:
+                    old_key_str = (
+                        old_key.decode() if isinstance(old_key, bytes) else old_key
+                    )
+                    pipeline.delete(old_key_str)
+
+                # Clear the registry
+                pipeline.delete(thread_write_registry_key)
 
             # Apply TTL if configured
             if self.ttl_config and "default_ttl" in self.ttl_config:
@@ -195,19 +273,6 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
                 pipeline.expire(checkpoint_key, ttl_seconds)
 
             pipeline.execute()
-
-        # NOTE: We intentionally do NOT clean up old writes here.
-        # In the HITL (Human-in-the-Loop) flow, interrupt writes are saved via
-        # put_writes BEFORE the new checkpoint is saved. If we clean up writes
-        # when the checkpoint changes, we would delete the interrupt writes
-        # before they can be consumed when resuming.
-        #
-        # Writes are cleaned up in the following scenarios:
-        # 1. When delete_thread is called
-        # 2. When TTL expires (if configured)
-        # 3. When put_writes is called again for the same task/idx (overwrites)
-        #
-        # See Issue #133 for details on this bug fix.
 
         return next_config
 
@@ -231,6 +296,8 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
                 filter_expression.append(
                     Tag("checkpoint_ns") == to_storage_safe_str(checkpoint_ns)
                 )
+            if run_id := config["configurable"].get("run_id"):
+                filter_expression.append(Tag("run_id") == to_storage_safe_id(run_id))
 
         if filter:
             for k, v in filter.items():
@@ -238,6 +305,8 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
                     filter_expression.append(Tag("source") == v)
                 elif k == "step":
                     filter_expression.append(Num("step") == v)
+                elif k == "run_id":
+                    filter_expression.append(Tag("run_id") == to_storage_safe_id(v))
                 else:
                     raise ValueError(f"Unsupported filter key: {k}")
 
@@ -259,7 +328,6 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
             combined_filter &= expr
 
         # Get checkpoint data
-        # Sort by checkpoint_id in descending order to get most recent checkpoints first
         query = FilterQuery(
             filter_expression=combined_filter,
             return_fields=[
@@ -269,7 +337,6 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
                 "$.metadata",
             ],
             num_results=limit or 10000,
-            sort_by=("checkpoint_id", "DESC"),
         )
 
         # Execute the query
@@ -418,14 +485,14 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
 
     def create_indexes(self) -> None:
         self.checkpoints_index = SearchIndex.from_dict(
-            self.checkpoints_schema, redis_client=self._redis
+            self.SCHEMAS[0], redis_client=self._redis
         )
         # Shallow implementation doesn't use blobs, but base class requires the attribute
         self.checkpoint_blobs_index = SearchIndex.from_dict(
-            self.blobs_schema, redis_client=self._redis
+            self.SCHEMAS[1], redis_client=self._redis
         )
         self.checkpoint_writes_index = SearchIndex.from_dict(
-            self.writes_schema, redis_client=self._redis
+            self.SCHEMAS[2], redis_client=self._redis
         )
 
     def setup(self) -> None:
@@ -467,17 +534,13 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
                 "idx": WRITES_IDX_MAP.get(channel, idx),
                 "channel": channel,
                 "type": type_,
-                "blob": self._encode_blob(
-                    blob
-                ),  # Encode bytes to base64 string for Redis
+                "blob": blob,
             }
             writes_objects.append(write_obj)
 
         # THREAD-LEVEL REGISTRY: Only keep writes for the current checkpoint
-        # Use to_storage_safe_str for consistent key naming with delete_thread
-        safe_checkpoint_ns = to_storage_safe_str(checkpoint_ns)
         thread_write_registry_key = (
-            f"write_registry:{thread_id}:{safe_checkpoint_ns}:shallow"
+            f"write_registry:{thread_id}:{checkpoint_ns}:shallow"
         )
 
         # Collect all write keys
@@ -500,7 +563,7 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
             # THREAD-LEVEL REGISTRY: Store write keys in thread-level sorted set
             # These will be cleared when checkpoint changes
             zadd_mapping = {key: idx for idx, key in enumerate(write_keys)}
-            pipeline.zadd(thread_write_registry_key, zadd_mapping)  # type: ignore[arg-type]
+            pipeline.zadd(thread_write_registry_key, zadd_mapping)
 
             # Note: We don't update has_writes on the checkpoint anymore
             # because put_writes can be called before the checkpoint exists
@@ -525,10 +588,8 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
 
         # Use thread-level registry that only contains current checkpoint writes
         # All writes belong to the current checkpoint
-        # Use to_storage_safe_str for consistent key naming with delete_thread
-        safe_checkpoint_ns = to_storage_safe_str(checkpoint_ns)
         thread_write_registry_key = (
-            f"write_registry:{thread_id}:{safe_checkpoint_ns}:shallow"
+            f"write_registry:{thread_id}:{checkpoint_ns}:shallow"
         )
 
         # Get all write keys from the thread's registry (already sorted by index)
@@ -678,8 +739,10 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
             if len(self._key_cache) >= self._key_cache_max_size:
                 # Remove least recently used (first item)
                 self._key_cache.popitem(last=False)
-            self._key_cache[cache_key] = self._make_redis_checkpoint_writes_key(
-                thread_id, checkpoint_ns, checkpoint_id, task_id, idx
+            self._key_cache[cache_key] = (
+                BaseRedisSaver._make_redis_checkpoint_writes_key(
+                    thread_id, checkpoint_ns, checkpoint_id, task_id, idx
+                )
             )
         return self._key_cache[cache_key]
 
@@ -728,7 +791,7 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
             if len(self._key_cache) >= self._key_cache_max_size:
                 # Remove least recently used (first item)
                 self._key_cache.popitem(last=False)
-            self._key_cache[cache_key] = self._make_redis_checkpoint_blob_key(
+            self._key_cache[cache_key] = BaseRedisSaver._make_redis_checkpoint_blob_key(
                 thread_id, checkpoint_ns, channel, version
             )
         return self._key_cache[cache_key]
@@ -796,28 +859,3 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
 
                 # Execute all deletions
                 pipeline.execute()
-
-    def _extract_fallback_timestamp(self, checkpoint: Checkpoint) -> float:
-        """Extract timestamp from checkpoint's ts field or use current time.
-
-        This is used when the checkpoint_id is not a valid ULID (e.g., UUIDv6 format).
-        See Issue #136 for details.
-
-        Args:
-            checkpoint: The checkpoint object containing an optional ts field.
-
-        Returns:
-            Timestamp in milliseconds since epoch.
-        """
-        ts_value = checkpoint.get("ts")
-        if ts_value:
-            # Handle both ISO string and numeric timestamps
-            if isinstance(ts_value, str):
-                try:
-                    dt = datetime.fromisoformat(ts_value.replace("Z", "+00:00"))
-                    return dt.timestamp() * MILLISECONDS_PER_SECOND
-                except Exception:
-                    return time.time() * MILLISECONDS_PER_SECOND
-            else:
-                return ts_value
-        return time.time() * MILLISECONDS_PER_SECOND

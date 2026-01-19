@@ -666,6 +666,8 @@ class AsyncRedisSaver(
                 filter_expression.append(
                     Tag("checkpoint_id") == to_storage_safe_id(checkpoint_id)
                 )
+            if run_id := config["configurable"].get("run_id"):
+                filter_expression.append(Tag("run_id") == to_storage_safe_id(run_id))
 
         if filter:
             for k, v in filter.items():
@@ -673,6 +675,10 @@ class AsyncRedisSaver(
                     filter_expression.append(Tag("source") == v)
                 elif k == "step":
                     filter_expression.append(Num("step") == v)
+                elif k == "thread_id":
+                    filter_expression.append(Tag("thread_id") == to_storage_safe_id(v))
+                elif k == "run_id":
+                    filter_expression.append(Tag("run_id") == to_storage_safe_id(v))
                 else:
                     raise ValueError(f"Unsupported filter key: {k}")
 
@@ -911,7 +917,7 @@ class AsyncRedisSaver(
             asyncio.CancelledError: If the operation is cancelled/interrupted
         """
         configurable = config["configurable"].copy()
-
+        run_id = configurable.pop("run_id", metadata.get("run_id"))
         thread_id = configurable.pop("thread_id")
         checkpoint_ns = configurable.pop("checkpoint_ns")
         # Get checkpoint_id from config - this will be parent if saving a child
@@ -968,6 +974,7 @@ class AsyncRedisSaver(
 
             checkpoint_data = {
                 "thread_id": storage_safe_thread_id,
+                "run_id": to_storage_safe_id(run_id) if run_id else "",
                 "checkpoint_ns": storage_safe_checkpoint_ns,
                 "checkpoint_id": storage_safe_checkpoint_id,
                 "parent_checkpoint_id": (
@@ -1034,6 +1041,7 @@ class AsyncRedisSaver(
                     # Store minimal checkpoint data
                     checkpoint_data = {
                         "thread_id": storage_safe_thread_id,
+                        "run_id": to_storage_safe_id(run_id) if run_id else "",
                         "checkpoint_ns": storage_safe_checkpoint_ns,
                         "checkpoint_id": storage_safe_checkpoint_id,
                         "parent_checkpoint_id": (
