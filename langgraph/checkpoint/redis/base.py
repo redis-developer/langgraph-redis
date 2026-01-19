@@ -35,58 +35,6 @@ CHECKPOINT_PREFIX = "checkpoint"
 CHECKPOINT_BLOB_PREFIX = "checkpoint_blob"
 CHECKPOINT_WRITE_PREFIX = "checkpoint_write"
 
-SCHEMAS = [
-    {
-        "index": {
-            "name": "checkpoints",
-            "prefix": CHECKPOINT_PREFIX + REDIS_KEY_SEPARATOR,
-            "storage_type": "json",
-        },
-        "fields": [
-            {"name": "thread_id", "type": "tag"},
-            {"name": "run_id", "type": "tag"},
-            {"name": "checkpoint_ns", "type": "tag"},
-            {"name": "checkpoint_id", "type": "tag"},
-            {"name": "parent_checkpoint_id", "type": "tag"},
-            {"name": "checkpoint_ts", "type": "numeric"},
-            {"name": "source", "type": "tag"},
-            {"name": "step", "type": "numeric"},
-            {"name": "has_writes", "type": "tag"},
-        ],
-    },
-    {
-        "index": {
-            "name": "checkpoints_blobs",
-            "prefix": CHECKPOINT_BLOB_PREFIX + REDIS_KEY_SEPARATOR,
-            "storage_type": "json",
-        },
-        "fields": [
-            {"name": "thread_id", "type": "tag"},
-            {"name": "checkpoint_ns", "type": "tag"},
-            {"name": "checkpoint_id", "type": "tag"},
-            {"name": "channel", "type": "tag"},
-            {"name": "version", "type": "tag"},
-            {"name": "type", "type": "tag"},
-        ],
-    },
-    {
-        "index": {
-            "name": "checkpoint_writes",
-            "prefix": CHECKPOINT_WRITE_PREFIX + REDIS_KEY_SEPARATOR,
-            "storage_type": "json",
-        },
-        "fields": [
-            {"name": "thread_id", "type": "tag"},
-            {"name": "checkpoint_ns", "type": "tag"},
-            {"name": "checkpoint_id", "type": "tag"},
-            {"name": "task_id", "type": "tag"},
-            {"name": "idx", "type": "numeric"},
-            {"name": "channel", "type": "tag"},
-            {"name": "type", "type": "tag"},
-        ],
-    },
-]
-
 
 class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexType]):
     """Base Redis implementation for checkpoint saving.
@@ -97,7 +45,6 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
     _redis: RedisClientType
     _owns_its_client: bool = False
     _key_registry: Optional[Any] = None
-    SCHEMAS = SCHEMAS
 
     checkpoints_index: IndexType
     checkpoint_blobs_index: IndexType
@@ -110,6 +57,9 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         redis_client: Optional[RedisClientType] = None,
         connection_args: Optional[Dict[str, Any]] = None,
         ttl: Optional[Dict[str, Any]] = None,
+        checkpoint_prefix: str = CHECKPOINT_PREFIX,
+        checkpoint_blob_prefix: str = CHECKPOINT_BLOB_PREFIX,
+        checkpoint_write_prefix: str = CHECKPOINT_WRITE_PREFIX,
     ) -> None:
         """Initialize Redis-backed checkpoint saver.
 
@@ -120,6 +70,9 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
             ttl: Optional TTL configuration dict with optional keys:
                 - default_ttl: TTL in minutes for all checkpoint keys
                 - refresh_on_read: Whether to refresh TTL on reads
+            checkpoint_prefix: Prefix for checkpoint keys (default: "checkpoint")
+            checkpoint_blob_prefix: Prefix for checkpoint blob keys (default: "checkpoint_blob")
+            checkpoint_write_prefix: Prefix for checkpoint write keys (default: "checkpoint_write")
         """
         super().__init__(serde=JsonPlusRedisSerializer())
         if redis_url is None and redis_client is None:
@@ -127,6 +80,11 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
 
         # Store TTL configuration
         self.ttl_config = ttl
+
+        # Store custom prefixes
+        self._checkpoint_prefix = checkpoint_prefix
+        self._checkpoint_blob_prefix = checkpoint_blob_prefix
+        self._checkpoint_write_prefix = checkpoint_write_prefix
 
         self.configure_client(
             redis_url=redis_url,
@@ -139,6 +97,67 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         self.checkpoint_blobs_index: IndexType
         self.checkpoint_writes_index: IndexType
         self.create_indexes()
+
+    @property
+    def checkpoints_schema(self) -> Dict[str, Any]:
+        """Schema for the checkpoints index."""
+        return {
+            "index": {
+                "name": self._checkpoint_prefix,
+                "prefix": self._checkpoint_prefix + REDIS_KEY_SEPARATOR,
+                "storage_type": "json",
+            },
+            "fields": [
+                {"name": "thread_id", "type": "tag"},
+                {"name": "run_id", "type": "tag"},
+                {"name": "checkpoint_ns", "type": "tag"},
+                {"name": "checkpoint_id", "type": "tag"},
+                {"name": "parent_checkpoint_id", "type": "tag"},
+                {"name": "checkpoint_ts", "type": "numeric"},
+                {"name": "source", "type": "tag"},
+                {"name": "step", "type": "numeric"},
+                {"name": "has_writes", "type": "tag"},
+            ],
+        }
+
+    @property
+    def blobs_schema(self) -> Dict[str, Any]:
+        """Schema for the checkpoint blobs index."""
+        return {
+            "index": {
+                "name": self._checkpoint_blob_prefix,
+                "prefix": self._checkpoint_blob_prefix + REDIS_KEY_SEPARATOR,
+                "storage_type": "json",
+            },
+            "fields": [
+                {"name": "thread_id", "type": "tag"},
+                {"name": "checkpoint_ns", "type": "tag"},
+                {"name": "checkpoint_id", "type": "tag"},
+                {"name": "channel", "type": "tag"},
+                {"name": "version", "type": "tag"},
+                {"name": "type", "type": "tag"},
+            ],
+        }
+
+    @property
+    def writes_schema(self) -> Dict[str, Any]:
+        """Schema for the checkpoint writes index."""
+        return {
+            "index": {
+                "name": self._checkpoint_write_prefix,
+                "prefix": self._checkpoint_write_prefix + REDIS_KEY_SEPARATOR,
+                "storage_type": "json",
+            },
+            "fields": [
+                {"name": "thread_id", "type": "tag"},
+                {"name": "checkpoint_ns", "type": "tag"},
+                {"name": "checkpoint_id", "type": "tag"},
+                {"name": "task_id", "type": "tag"},
+                {"name": "idx", "type": "numeric"},
+                {"name": "channel", "type": "tag"},
+                {"name": "type", "type": "tag"},
+            ],
+        }
 
     @abstractmethod
     def create_indexes(self) -> None:
@@ -176,19 +195,16 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         """Set client info for Redis monitoring asynchronously."""
         from redis.exceptions import ResponseError
 
-        from langgraph.checkpoint.redis.version import __redisvl_version__
-
-        # Create the client info string with only the redisvl version
-        client_info = f"redis-py(redisvl_v{__redisvl_version__})"
+        from langgraph.checkpoint.redis.version import __full_lib_name__
 
         try:
             # Try to use client_setinfo command if available
-            await self._redis.client_setinfo("LIB-NAME", client_info)
+            await self._redis.client_setinfo("LIB-NAME", __full_lib_name__)
         except (ResponseError, AttributeError):
             # Fall back to a simple echo if client_setinfo is not available
             try:
                 # Call with await to ensure it's an async call
-                echo_result = self._redis.echo(client_info)
+                echo_result = self._redis.echo(__full_lib_name__)
                 if hasattr(echo_result, "__await__"):
                     await echo_result
             except Exception:
@@ -311,8 +327,21 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         """Convert checkpoint to Redis format."""
         type_, data = self.serde.dumps_typed(checkpoint)
 
-        # Since we're keeping JSON format, decode string data
-        checkpoint_data = cast(dict, orjson.loads(data))
+        # Decode the serialized data - handle both JSON and msgpack
+        if type_ == "json":
+            checkpoint_data = cast(dict, orjson.loads(data))
+        else:
+            # For msgpack or other types, deserialize with loads_typed
+            checkpoint_data = cast(dict, self.serde.loads_typed((type_, data)))
+
+            # When using msgpack, bytes are preserved - but Redis JSON.SET can't handle them
+            # Encode bytes in channel_values with type marker for JSON storage
+            if "channel_values" in checkpoint_data:
+                for key, value in checkpoint_data["channel_values"].items():
+                    if isinstance(value, bytes):
+                        checkpoint_data["channel_values"][key] = {
+                            "__bytes__": self._encode_blob(value)
+                        }
 
         # Ensure channel_versions are always strings to fix issue #40
         if "channel_versions" in checkpoint_data:
@@ -380,14 +409,39 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
             The deserialized object, with LangChain objects properly reconstructed.
         """
         if isinstance(obj, dict):
+            # Check if this is a bytes marker from msgpack storage
+            if "__bytes__" in obj and len(obj) == 1:
+                # Decode base64-encoded bytes
+                return self._decode_blob(obj["__bytes__"])
+
+            # Check if this is a Send object marker (issue #94)
+            if (
+                obj.get("__send__") is True
+                and "node" in obj
+                and "arg" in obj
+                and len(obj) == 3
+            ):
+                try:
+                    from langgraph.types import Send
+
+                    return Send(
+                        node=obj["node"],
+                        arg=self._recursive_deserialize(obj["arg"]),
+                    )
+                except (ImportError, TypeError, ValueError) as e:
+                    logger.debug(
+                        "Failed to deserialize Send object: %s", e, exc_info=True
+                    )
+
             # Check if this is a LangChain serialized object
             if obj.get("lc") in (1, 2) and obj.get("type") == "constructor":
                 try:
                     # Use the serde's reviver to reconstruct the object
-                    if hasattr(self.serde, "_reviver"):
-                        return self.serde._reviver(obj)
-                    elif hasattr(self.serde, "_revive_if_needed"):
+
+                    if hasattr(self.serde, "_revive_if_needed"):
                         return self.serde._revive_if_needed(obj)
+                    elif hasattr(self.serde, "_reviver"):
+                        return self.serde._reviver(obj)
                     else:
                         # Log warning if serde doesn't have reviver
                         logger.warning(
@@ -439,7 +493,7 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
                 "idx": WRITES_IDX_MAP.get(channel, idx),
                 "channel": channel,
                 "type": t,
-                "blob": b,
+                "blob": self._encode_blob(b),  # Encode bytes to base64 string for Redis
             }
             for idx, (channel, value) in enumerate(writes)
             for t, b in [self.serde.dumps_typed(value)]
@@ -454,7 +508,9 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         Returns:
             Original metadata dictionary.
         """
-        return self.serde.loads(self.serde.dumps(metadata))
+        # Roundtrip through serializer to ensure proper type handling
+        type_str, data_bytes = self.serde.dumps_typed(metadata)
+        return self.serde.loads_typed((type_str, data_bytes))
 
     def _dump_metadata(self, metadata: CheckpointMetadata) -> str:
         """Convert metadata to a Redis-compatible dictionary.
@@ -465,9 +521,9 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         Returns:
             Dictionary representation of metadata for Redis storage.
         """
-        serialized_metadata = self.serde.dumps(metadata)
+        type_str, serialized_bytes = self.serde.dumps_typed(metadata)
         # NOTE: we're using JSON serializer (not msgpack), so we need to remove null characters before writing
-        return serialized_metadata.decode().replace("\\u0000", "")
+        return serialized_bytes.decode().replace("\\u0000", "")
 
     def get_next_version(  # type: ignore[override]
         self, current: Optional[str], channel: ChannelProtocol[Any, Any, Any]
@@ -503,12 +559,13 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
             return []
 
         # Get the full JSON document
-        result = self._redis.json().get(write_key)
+        # Cast needed: redis-py types json().get() as List[JsonType] but returns dict
+        result = cast(Optional[Dict[str, Any]], self._redis.json().get(write_key))
         if not result:
             return []
 
         writes = []
-        for write in result["writes"]:  # type: ignore[call-overload]
+        for write in result["writes"]:
             writes.append(
                 (
                     write["task_id"],
@@ -552,7 +609,9 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
                 "idx": WRITES_IDX_MAP.get(channel, idx),
                 "channel": channel,
                 "type": type_,
-                "blob": blob,
+                "blob": self._encode_blob(
+                    blob
+                ),  # Encode bytes to base64 string for Redis
             }
             writes_objects.append(write_obj)
 
@@ -579,17 +638,17 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
                     # UPSERT case - only update specific fields
                     if key_exists:
                         # Update only channel, type, and blob fields
-                        pipeline.set(key, "$.channel", write_obj["channel"])
-                        pipeline.set(key, "$.type", write_obj["type"])
-                        pipeline.set(key, "$.blob", write_obj["blob"])
+                        pipeline.json().set(key, "$.channel", write_obj["channel"])
+                        pipeline.json().set(key, "$.type", write_obj["type"])
+                        pipeline.json().set(key, "$.blob", write_obj["blob"])
                     else:
                         # For new records, set the complete object
-                        pipeline.set(key, "$", write_obj)
+                        pipeline.json().set(key, "$", write_obj)
                         created_keys.append(key)
                 else:
                     # INSERT case - only insert if doesn't exist
                     if not key_exists:
-                        pipeline.set(key, "$", write_obj)
+                        pipeline.json().set(key, "$", write_obj)
                         created_keys.append(key)
 
             pipeline.execute()
@@ -731,11 +790,26 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
             (
                 task_id,
                 data["channel"],
-                serde.loads_typed((data["type"], data["blob"])),
+                serde.loads_typed(
+                    (data["type"], BaseRedisSaver._decode_blob_static(data["blob"]))
+                ),
             )
             for (task_id, _), data in task_id_to_data.items()
         ]
         return writes
+
+    @staticmethod
+    def _decode_blob_static(blob: bytes | str) -> bytes:
+        """Decode blob data from Redis storage (static method)."""
+        try:
+            # If it's already bytes, try to decode as base64
+            if isinstance(blob, bytes):
+                return base64.b64decode(blob)
+            # If it's a string, encode to bytes first then decode
+            return base64.b64decode(blob.encode("utf-8"))
+        except (binascii.Error, TypeError, ValueError):
+            # Handle both malformed base64 data and incorrect input types
+            return blob.encode("utf-8") if isinstance(blob, str) else blob
 
     @staticmethod
     def _parse_redis_checkpoint_writes_key(redis_key: str) -> dict:
@@ -763,26 +837,24 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
             "idx": idx,
         }
 
-    @staticmethod
     def _make_redis_checkpoint_key(
-        thread_id: str, checkpoint_ns: str, checkpoint_id: str
+        self, thread_id: str, checkpoint_ns: str, checkpoint_id: str
     ) -> str:
         return REDIS_KEY_SEPARATOR.join(
             [
-                CHECKPOINT_PREFIX,
+                self._checkpoint_prefix,
                 str(to_storage_safe_id(thread_id)),
                 to_storage_safe_str(checkpoint_ns),
                 str(to_storage_safe_id(checkpoint_id)),
             ]
         )
 
-    @staticmethod
     def _make_redis_checkpoint_blob_key(
-        thread_id: str, checkpoint_ns: str, channel: str, version: str
+        self, thread_id: str, checkpoint_ns: str, channel: str, version: str
     ) -> str:
         return REDIS_KEY_SEPARATOR.join(
             [
-                CHECKPOINT_BLOB_PREFIX,
+                self._checkpoint_blob_prefix,
                 str(to_storage_safe_id(thread_id)),
                 to_storage_safe_str(checkpoint_ns),
                 channel,
@@ -790,8 +862,8 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
             ]
         )
 
-    @staticmethod
     def _make_redis_checkpoint_writes_key(
+        self,
         thread_id: str,
         checkpoint_ns: str,
         checkpoint_id: str,
@@ -805,7 +877,7 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         if idx is None:
             return REDIS_KEY_SEPARATOR.join(
                 [
-                    CHECKPOINT_WRITE_PREFIX,
+                    self._checkpoint_write_prefix,
                     storage_safe_thread_id,
                     storage_safe_checkpoint_ns,
                     storage_safe_checkpoint_id,
@@ -815,7 +887,7 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
 
         return REDIS_KEY_SEPARATOR.join(
             [
-                CHECKPOINT_WRITE_PREFIX,
+                self._checkpoint_write_prefix,
                 storage_safe_thread_id,
                 storage_safe_checkpoint_ns,
                 storage_safe_checkpoint_id,
