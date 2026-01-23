@@ -16,10 +16,11 @@ This repository contains Redis implementations for LangGraph, providing both Che
 
 ## Overview
 
-The project consists of two main components:
+The project consists of three main components:
 
 1. **Redis Checkpoint Savers**: Implementations for storing and managing checkpoints using Redis
 2. **Redis Stores**: Redis-backed key-value stores with optional vector search capabilities
+3. **Redis Middleware**: LangChain agent middleware for semantic caching, tool caching, and conversation memory
 
 ## Dependencies
 
@@ -351,14 +352,200 @@ async def main():
 asyncio.run(main())
 ```
 
+## Redis Middleware for LangChain Agents
+
+Redis middleware provides semantic caching, tool result caching, conversation memory, and semantic routing for LangChain agents. These middleware components integrate directly with `langchain.agents.create_agent()`.
+
+### Key Features
+
+- **SemanticCacheMiddleware**: Cache LLM responses by semantic similarity, reducing costs and latency
+- **ToolResultCacheMiddleware**: Cache expensive tool executions (API calls, computations)
+- **ConversationMemoryMiddleware**: Inject semantically relevant past messages into context
+- **SemanticRouterMiddleware**: Route requests based on semantic matching
+
+### Quick Start
+
+```python
+import ast
+import operator as op
+
+from langchain.agents import create_agent
+from langchain_core.messages import HumanMessage
+from langchain_core.tools import tool
+from langgraph.middleware.redis import (
+    SemanticCacheMiddleware,
+    SemanticCacheConfig,
+    ToolResultCacheMiddleware,
+    ToolCacheConfig,
+)
+
+# Safe math expression evaluator (no arbitrary code execution)
+SAFE_OPERATORS = {
+    ast.Add: op.add, ast.Sub: op.sub, ast.Mult: op.mul,
+    ast.Div: op.truediv, ast.Pow: op.pow, ast.USub: op.neg,
+}
+
+def _eval_expr(node):
+    if isinstance(node, ast.Constant):
+        return node.value
+    elif isinstance(node, ast.BinOp) and type(node.op) in SAFE_OPERATORS:
+        return SAFE_OPERATORS[type(node.op)](_eval_expr(node.left), _eval_expr(node.right))
+    elif isinstance(node, ast.UnaryOp) and type(node.op) in SAFE_OPERATORS:
+        return SAFE_OPERATORS[type(node.op)](_eval_expr(node.operand))
+    raise ValueError(f"Unsupported expression")
+
+def safe_eval(expr: str) -> float:
+    return _eval_expr(ast.parse(expr, mode='eval').body)
+
+# Define tools with cacheability metadata
+@tool
+def calculate(expression: str) -> str:
+    """Evaluate a math expression."""
+    return str(safe_eval(expression))
+
+calculate.metadata = {"cacheable": True}  # Deterministic - safe to cache
+
+@tool
+def get_stock_price(symbol: str) -> str:
+    """Get current stock price."""
+    return fetch_price(symbol)
+
+get_stock_price.metadata = {"cacheable": False}  # Temporal - don't cache
+
+# Create middleware
+semantic_cache = SemanticCacheMiddleware(
+    SemanticCacheConfig(
+        redis_url="redis://localhost:6379",
+        name="llm_cache",
+        distance_threshold=0.15,
+        ttl_seconds=3600,
+        deterministic_tools=["calculate"],  # Safe to cache after these tools
+    )
+)
+
+tool_cache = ToolResultCacheMiddleware(
+    ToolCacheConfig(
+        redis_url="redis://localhost:6379",
+        name="tool_cache",
+        ttl_seconds=1800,
+    )
+)
+
+# Create agent with middleware
+agent = create_agent(
+    model="gpt-4o-mini",
+    tools=[calculate, get_stock_price],
+    middleware=[semantic_cache, tool_cache],
+)
+
+# Use async invocation (middleware is async-first)
+result = await agent.ainvoke({"messages": [HumanMessage(content="Calculate 25 * 4")]})
+```
+
+### Tool Cacheability
+
+Control which tools are cached using LangChain's native metadata:
+
+```python
+# Option 1: Set metadata after @tool decoration
+@tool
+def search(query: str) -> str:
+    """Search the web."""
+    return web_search(query)
+
+search.metadata = {"cacheable": True}
+
+# Option 2: Use StructuredTool with metadata
+from langchain_core.tools import StructuredTool
+
+get_weather = StructuredTool.from_function(
+    func=fetch_weather,
+    name="get_weather",
+    description="Get current weather",
+    metadata={"cacheable": False},  # Real-time data
+)
+```
+
+### Middleware Composition
+
+Combine multiple middleware using `MiddlewareStack` or factory functions:
+
+```python
+from langgraph.middleware.redis import MiddlewareStack, from_configs
+
+# Option 1: Create stack directly
+stack = MiddlewareStack([
+    SemanticCacheMiddleware(SemanticCacheConfig(redis_url="redis://localhost:6379", name="llm_cache")),
+    ToolResultCacheMiddleware(ToolCacheConfig(redis_url="redis://localhost:6379", name="tool_cache")),
+])
+
+# Option 2: Use from_configs factory (shares Redis connection)
+stack = from_configs(
+    configs=[
+        SemanticCacheConfig(name="llm_cache", ttl_seconds=3600),
+        ToolCacheConfig(name="tool_cache", ttl_seconds=1800),
+    ],
+    redis_url="redis://localhost:6379",
+)
+
+agent = create_agent(model="gpt-4o-mini", tools=tools, middleware=[stack])
+```
+
+### Connection Sharing with Checkpointer
+
+Share Redis connections between middleware and checkpointer:
+
+```python
+from langgraph.checkpoint.redis.aio import AsyncRedisSaver
+from langgraph.middleware.redis import IntegratedRedisMiddleware
+
+# Create checkpointer
+checkpointer = AsyncRedisSaver(redis_url="redis://localhost:6379")
+await checkpointer.asetup()
+
+# Create middleware that shares the connection
+middleware = IntegratedRedisMiddleware.from_saver(
+    checkpointer,
+    configs=[
+        SemanticCacheConfig(name="llm_cache"),
+        ToolCacheConfig(name="tool_cache"),
+    ],
+)
+
+agent = create_agent(
+    model="gpt-4o-mini",
+    tools=tools,
+    checkpointer=checkpointer,
+    middleware=[middleware],
+)
+```
+
+### Example Notebooks
+
+See the `examples/middleware/` directory for detailed notebooks:
+
+- `middleware_semantic_cache.ipynb`: LLM response caching with semantic matching
+- `middleware_tool_caching.ipynb`: Tool result caching with metadata-based control
+- `middleware_conversation_memory.ipynb`: Semantic conversation history retrieval
+- `middleware_composition.ipynb`: Combining middleware with checkpointers
+
 ## Examples
 
 The `examples` directory contains Jupyter notebooks demonstrating the usage of Redis with LangGraph:
+
+### Checkpoint and Store Examples
 
 - `persistence_redis.ipynb`: Demonstrates the usage of Redis checkpoint savers with LangGraph
 - `create-react-agent-memory.ipynb`: Shows how to create an agent with persistent memory using Redis
 - `cross-thread-persistence.ipynb`: Demonstrates cross-thread persistence capabilities
 - `persistence-functional.ipynb`: Shows functional persistence patterns with Redis
+
+### Middleware Examples (`examples/middleware/`)
+
+- `middleware_semantic_cache.ipynb`: LLM response caching with semantic similarity matching
+- `middleware_tool_caching.ipynb`: Tool result caching with metadata-based cacheability control
+- `middleware_conversation_memory.ipynb`: Semantic conversation history and context injection
+- `middleware_composition.ipynb`: Combining multiple middleware with shared Redis connections
 
 ### Running Example Notebooks
 

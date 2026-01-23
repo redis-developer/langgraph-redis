@@ -45,6 +45,7 @@ vulture = "^2.14"
 pympler = "^1.1"
 aiofiles = "^24.1.0"
 langmem = "^0.0.30"
+sentence-transformers = "^5.2.0"
 
 [tool.pytest.ini_options]
 # --strict-markers will raise errors on unknown marks.
