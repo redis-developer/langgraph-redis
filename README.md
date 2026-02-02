@@ -53,13 +53,13 @@ If you're using a Redis version lower than 8.0, you'll need to ensure these modu
 
 Failure to have these modules available will result in errors during index creation and checkpoint operations.
 
-### Azure Cache for Redis / Redis Enterprise Configuration
+### Azure Managed Redis / Azure Cache for Redis / Redis Enterprise Configuration
 
-If you're using **Azure Cache for Redis** (especially Enterprise tier) or **Redis Enterprise**, there are important configuration considerations:
+If you're using **Azure Managed Redis**, **Azure Cache for Redis** (especially Enterprise tier) or **Redis Enterprise**, there are important configuration considerations:
 
 #### Client Configuration
 
-Azure Cache for Redis and Redis Enterprise use a **proxy layer** that makes the cluster appear as a single endpoint. This requires using a **standard Redis client**, not a cluster-aware client:
+Azure Managed Redis, Azure Cache for Redis and Redis Enterprise use a **proxy layer** that makes the cluster appear as a single endpoint. This requires using a **standard Redis client**, not a cluster-aware client:
 
 ```python
 from redis import Redis
@@ -68,7 +68,7 @@ from langgraph.checkpoint.redis import RedisSaver
 # ✅ CORRECT: Use standard Redis client for Azure/Enterprise
 client = Redis(
     host="your-cache.redis.cache.windows.net",  # or your Redis Enterprise endpoint
-    port=6379,  # or 10000 for Azure Enterprise with TLS
+    port=6379,  # or 10000 for Azure Managed Redis / Azure Enterprise with TLS
     password="your-access-key",
     ssl=True,  # Azure/Enterprise typically requires SSL
     ssl_cert_reqs="required",  # or "none" for self-signed certs
@@ -86,23 +86,23 @@ saver.setup()
 
 #### Why This Matters
 
-- **Proxy Architecture**: Azure Cache for Redis and Redis Enterprise use a proxy layer that handles cluster operations internally
+- **Proxy Architecture**: Azure Managed Redis, Azure Cache for Redis and Redis Enterprise use a proxy layer that handles cluster operations internally
 - **Automatic Detection**: RedisSaver will correctly detect this as non-cluster mode when using the standard client
 - **No Cross-Slot Errors**: The proxy handles key distribution, avoiding cross-slot errors
 
-#### Azure Cache for Redis Specific Settings
+#### Azure Specific Settings
 
-For Azure Cache for Redis Enterprise tier:
+For Azure Managed Redis & Azure Cache for Redis Enterprise tier:
 
-- **Port**: Use port `10000` for Enterprise tier with TLS, or `6379` for standard
-- **Modules**: Enterprise tier includes RediSearch and RedisJSON by default
-- **SSL/TLS**: Always enabled, minimum TLS 1.2 for Enterprise
+- **Port**: Use port `10000` with TLS, or `6379` for standard
+- **Modules**: RediSearch and RedisJSON need to be selected at creation
+- **SSL/TLS**: Always enabled, minimum TLS 1.2
 
-Example for Azure Cache for Redis Enterprise:
+Example for Azure Managed Redis, Azure Cache for Redis Enterprise:
 
 ```python
 client = Redis(
-    host="your-cache.redisenterprise.cache.azure.net",
+    host="your-host-endpoint",
     port=10000,  # Enterprise TLS port
     password="your-access-key",
     ssl=True,
