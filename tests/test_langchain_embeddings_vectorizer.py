@@ -20,7 +20,6 @@ import json
 import os
 import uuid
 from typing import List
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from langchain_core.embeddings import Embeddings
@@ -263,6 +262,8 @@ class TestLangChainVectorizerWithMiddleware:
             request1 = {"messages": [HumanMessage(content="Tell me about Redis")]}
             result1 = await middleware.awrap_model_call(request1, mock_handler)
             assert call_count[0] == 1
+            # Verify first response is not marked as cached
+            assert result1.result[0].additional_kwargs.get("cached") is not True
 
             # Second call - should hit cache
             request2 = {"messages": [HumanMessage(content="Tell me about Redis")]}

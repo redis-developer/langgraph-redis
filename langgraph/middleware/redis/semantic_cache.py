@@ -96,17 +96,16 @@ def _deserialize_response(cached_str: str) -> ModelResponse:
                 # Use the project's serializer to properly revive
                 revived = _serializer._revive_if_needed(data)
                 if isinstance(revived, AIMessage):
-                    # Create a new AIMessage with fresh ID and cached marker
-                    cached_message = AIMessage(
-                        content=revived.content,
-                        id=new_message_id,
-                        additional_kwargs={
-                            **revived.additional_kwargs,
-                            "cached": True,
-                        },
-                        response_metadata=revived.response_metadata,
-                        tool_calls=revived.tool_calls,
-                        invalid_tool_calls=revived.invalid_tool_calls,
+                    # Create a new AIMessage with fresh ID and cached marker,
+                    # preserving all fields from the revived message
+                    cached_message = revived.model_copy(
+                        update={
+                            "id": new_message_id,
+                            "additional_kwargs": {
+                                **getattr(revived, "additional_kwargs", {}),
+                                "cached": True,
+                            },
+                        }
                     )
                     return ModelResponse(
                         result=[cached_message], structured_response=None

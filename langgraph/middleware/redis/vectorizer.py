@@ -239,17 +239,17 @@ class LangChainVectorizer(BaseVectorizer):
         preprocess: Optional[Callable] = None,
         as_buffer: bool = False,
         **kwargs: Any,
-    ) -> List[float]:
+    ) -> Union[List[float], bytes]:
         """Embed a single text using LangChain embeddings.
 
         Args:
             text: The text to embed.
             preprocess: Optional preprocessing function (applied if provided).
-            as_buffer: If True, return as bytes buffer (not typically used).
+            as_buffer: If True, return as bytes buffer.
             **kwargs: Additional arguments (ignored).
 
         Returns:
-            The embedding vector as a list of floats.
+            The embedding vector as a list of floats, or bytes if as_buffer=True.
         """
         if preprocess is not None:
             text = preprocess(text)
@@ -271,7 +271,7 @@ class LangChainVectorizer(BaseVectorizer):
         batch_size: int = 1000,
         as_buffer: bool = False,
         **kwargs: Any,
-    ) -> List[List[float]]:
+    ) -> Union[List[List[float]], List[bytes]]:
         """Embed multiple texts using LangChain embeddings.
 
         Args:
@@ -282,7 +282,7 @@ class LangChainVectorizer(BaseVectorizer):
             **kwargs: Additional arguments (ignored).
 
         Returns:
-            List of embedding vectors.
+            List of embedding vectors, or list of bytes if as_buffer=True.
         """
         all_embeddings: List[List[float]] = []
 
@@ -303,7 +303,7 @@ class LangChainVectorizer(BaseVectorizer):
         preprocess: Optional[Callable] = None,
         as_buffer: bool = False,
         **kwargs: Any,
-    ) -> List[float]:
+    ) -> Union[List[float], bytes]:
         """Asynchronously embed a single text.
 
         Args:
@@ -313,7 +313,7 @@ class LangChainVectorizer(BaseVectorizer):
             **kwargs: Additional arguments (ignored).
 
         Returns:
-            The embedding vector as a list of floats.
+            The embedding vector as a list of floats, or bytes if as_buffer=True.
         """
         if preprocess is not None:
             text = preprocess(text)
@@ -339,7 +339,7 @@ class LangChainVectorizer(BaseVectorizer):
         batch_size: int = 1000,
         as_buffer: bool = False,
         **kwargs: Any,
-    ) -> List[List[float]]:
+    ) -> Union[List[List[float]], List[bytes]]:
         """Asynchronously embed multiple texts.
 
         Args:
@@ -350,7 +350,7 @@ class LangChainVectorizer(BaseVectorizer):
             **kwargs: Additional arguments (ignored).
 
         Returns:
-            List of embedding vectors.
+            List of embedding vectors, or list of bytes if as_buffer=True.
         """
         all_embeddings: List[List[float]] = []
 
