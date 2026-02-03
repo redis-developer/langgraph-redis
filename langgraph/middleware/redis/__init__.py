@@ -28,6 +28,8 @@ from langgraph.middleware.redis.types import (
 )
 from langgraph.middleware.redis.vectorizer import (
     AsyncEmbeddingVectorizer,
+    LangChainVectorizer,
+    create_langchain_vectorizer,
     create_vectorizer_from_langchain,
 )
 
@@ -53,5 +55,7 @@ __all__ = [
     "IntegratedRedisMiddleware",
     # Vectorizer utilities
     "AsyncEmbeddingVectorizer",
+    "LangChainVectorizer",
+    "create_langchain_vectorizer",
     "create_vectorizer_from_langchain",
 ]
