@@ -7,6 +7,7 @@ LangChain's AgentMiddleware protocol for use with create_agent.
 
 import json
 import logging
+import uuid
 from typing import Any, Awaitable, Callable, List, Union
 
 from langchain.agents.middleware.types import (
@@ -70,12 +71,23 @@ def _deserialize_response(cached_str: str) -> ModelResponse:
     Uses the project's JsonPlusRedisSerializer for proper LangChain object revival.
     Always returns a ModelResponse to maintain compatibility with agent routing.
 
+    IMPORTANT: Each cache hit generates a NEW message ID (UUID). This is critical
+    for frontend streaming compatibility - without unique IDs, the frontend
+    deduplicates messages and cached responses don't appear.
+
+    The cached response is also marked with additional_kwargs={"cached": True}
+    to allow consumers to identify cached responses.
+
     Args:
         cached_str: The cached JSON string.
 
     Returns:
-        A ModelResponse containing the cached message.
+        A ModelResponse containing the cached message with a unique ID.
     """
+    # Generate a new UUID for this cache hit
+    # This ensures each cached response appears as a new message in the frontend
+    new_message_id = str(uuid.uuid4())
+
     try:
         data = json.loads(cached_str)
         if isinstance(data, dict):
@@ -84,25 +96,67 @@ def _deserialize_response(cached_str: str) -> ModelResponse:
                 # Use the project's serializer to properly revive
                 revived = _serializer._revive_if_needed(data)
                 if isinstance(revived, AIMessage):
-                    return ModelResponse(result=[revived], structured_response=None)
+                    # Create a new AIMessage with fresh ID and cached marker
+                    cached_message = AIMessage(
+                        content=revived.content,
+                        id=new_message_id,
+                        additional_kwargs={
+                            **revived.additional_kwargs,
+                            "cached": True,
+                        },
+                        response_metadata=revived.response_metadata,
+                        tool_calls=revived.tool_calls,
+                        invalid_tool_calls=revived.invalid_tool_calls,
+                    )
+                    return ModelResponse(
+                        result=[cached_message], structured_response=None
+                    )
                 # If revived is not an AIMessage, wrap content in one
                 content = getattr(revived, "content", str(revived))
                 return ModelResponse(
-                    result=[AIMessage(content=content)], structured_response=None
+                    result=[
+                        AIMessage(
+                            content=content,
+                            id=new_message_id,
+                            additional_kwargs={"cached": True},
+                        )
+                    ],
+                    structured_response=None,
                 )
             # Simple dict with content - wrap in ModelResponse
             content = data.get("content", "")
             return ModelResponse(
-                result=[AIMessage(content=content)], structured_response=None
+                result=[
+                    AIMessage(
+                        content=content,
+                        id=new_message_id,
+                        additional_kwargs={"cached": True},
+                    )
+                ],
+                structured_response=None,
             )
         # Non-dict data - convert to string
         return ModelResponse(
-            result=[AIMessage(content=str(data))], structured_response=None
+            result=[
+                AIMessage(
+                    content=str(data),
+                    id=new_message_id,
+                    additional_kwargs={"cached": True},
+                )
+            ],
+            structured_response=None,
         )
     except json.JSONDecodeError:
         # If not valid JSON, treat as plain content
         return ModelResponse(
-            result=[AIMessage(content=cached_str)], structured_response=None
+            result=[
+                AIMessage(
+                    content=cached_str,
+                    id=new_message_id,
+                    additional_kwargs={"cached": True},
+                )
+            ],
+            structured_response=None,
         )
 
 
