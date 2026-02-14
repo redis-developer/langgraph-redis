@@ -134,12 +134,13 @@ class ToolResultCacheMiddleware(AsyncRedisMiddleware):
         Returns:
             True if the tool's results should be cached, False otherwise.
         """
-        # Get tool name
+        # Extract tool name and tool object from ToolCallRequest
         if isinstance(request, dict):
             tool_name = request.get("tool_name", "")
             tool = None
         else:
-            tool_name = getattr(request, "name", "")
+            tool_call = getattr(request, "tool_call", None)
+            tool_name = tool_call.get("name", "") if isinstance(tool_call, dict) else ""
             tool = getattr(request, "tool", None)
 
         # Check tool metadata first (LangChain standard pattern)
@@ -168,8 +169,13 @@ class ToolResultCacheMiddleware(AsyncRedisMiddleware):
             tool_name = request.get("tool_name", "")
             args = request.get("args", {})
         else:
-            tool_name = getattr(request, "name", "")
-            args = getattr(request, "args", {})
+            tool_call = getattr(request, "tool_call", None)
+            if isinstance(tool_call, dict):
+                tool_name = tool_call.get("name", "")
+                args = tool_call.get("args", {})
+            else:
+                tool_name = ""
+                args = {}
 
         # Create a human-readable representation for semantic matching
         args_str = json.dumps(args, sort_keys=True)
@@ -201,6 +207,45 @@ class ToolResultCacheMiddleware(AsyncRedisMiddleware):
             # Last resort: store string representation
             return json.dumps(str(value))
 
+    def _deserialize_tool_result(
+        self, cached_response: str, tool_name: str, tool_call_id: str
+    ) -> LangChainToolMessage:
+        """Deserialize a cached tool result into a ToolMessage.
+
+        Converts the cached JSON string back into a proper LangChain
+        ToolMessage so it conforms to the AgentMiddleware protocol.
+
+        Args:
+            cached_response: The cached JSON string.
+            tool_name: The name of the tool that produced this result.
+            tool_call_id: The ID of the tool call this result is for.
+
+        Returns:
+            A LangChainToolMessage containing the cached result.
+        """
+        # Parse the cached content
+        if isinstance(cached_response, str):
+            try:
+                parsed = json.loads(cached_response)
+            except json.JSONDecodeError:
+                parsed = cached_response
+        else:
+            parsed = cached_response
+
+        # Extract content from the parsed result
+        if isinstance(parsed, dict):
+            content = parsed.get("content", json.dumps(parsed))
+        elif isinstance(parsed, str):
+            content = parsed
+        else:
+            content = json.dumps(parsed)
+
+        return LangChainToolMessage(
+            content=content,
+            name=tool_name,
+            tool_call_id=tool_call_id or "",
+        )
+
     async def awrap_tool_call(
         self,
         request: ToolCallRequest,
@@ -225,11 +270,18 @@ class ToolResultCacheMiddleware(AsyncRedisMiddleware):
         Raises:
             Exception: If graceful_degradation is False and cache operations fail.
         """
-        tool_name = (
-            getattr(request, "name", "") or request.get("tool_name", "")
-            if isinstance(request, dict)
-            else getattr(request, "name", "")
-        )
+        # Extract tool name from the request
+        if isinstance(request, dict):
+            tool_name = request.get("tool_name", "")
+            tool_call_id = request.get("id", "")
+        else:
+            tool_call = getattr(request, "tool_call", None)
+            if isinstance(tool_call, dict):
+                tool_name = tool_call.get("name", "")
+                tool_call_id = tool_call.get("id", "")
+            else:
+                tool_name = ""
+                tool_call_id = ""
 
         # If no tool name or tool is not cacheable, skip caching
         if not tool_name or not self._is_tool_cacheable(request):
@@ -246,13 +298,9 @@ class ToolResultCacheMiddleware(AsyncRedisMiddleware):
                 # Cache hit - return cached result
                 cached_response = cached[0].get("response")
                 if cached_response:
-                    # Parse the cached response if it's a string
-                    if isinstance(cached_response, str):
-                        try:
-                            return json.loads(cached_response)
-                        except json.JSONDecodeError:
-                            return {"content": cached_response}
-                    return cached_response
+                    return self._deserialize_tool_result(
+                        cached_response, tool_name, tool_call_id
+                    )
         except Exception as e:
             if not self._graceful_degradation:
                 raise

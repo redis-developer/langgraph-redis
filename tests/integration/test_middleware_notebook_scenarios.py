@@ -4,8 +4,10 @@ These tests verify that the middleware works correctly in the patterns
 demonstrated in the example notebooks.
 """
 
+from unittest.mock import MagicMock
+
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from testcontainers.redis import RedisContainer
 
 from langgraph.checkpoint.redis import RedisSaver
@@ -169,6 +171,8 @@ class TestToolCachingNotebookScenario:
     @pytest.mark.asyncio
     async def test_cacheable_vs_excluded_tools(self, redis_url: str) -> None:
         """Test that cacheable_tools and excluded_tools work correctly."""
+        from langgraph.prebuilt.tool_node import ToolCallRequest
+
         config = ToolCacheConfig(
             redis_url=redis_url,
             name="notebook_tool_cache_test",
@@ -182,34 +186,58 @@ class TestToolCachingNotebookScenario:
             search_calls = [0]
             random_calls = [0]
 
-            async def mock_search(request: dict) -> dict:
+            async def mock_search(request: ToolCallRequest) -> ToolMessage:
                 search_calls[0] += 1
-                return {"result": f"Search results #{search_calls[0]}"}
+                return ToolMessage(
+                    content=f"Search results #{search_calls[0]}",
+                    name="search",
+                    tool_call_id=request.tool_call["id"],
+                )
 
-            async def mock_random(request: dict) -> dict:
+            async def mock_random(request: ToolCallRequest) -> ToolMessage:
                 random_calls[0] += 1
                 import random
 
-                return {"result": f"Random: {random.randint(1, 100)}"}
+                return ToolMessage(
+                    content=f"Random: {random.randint(1, 100)}",
+                    name="random_number",
+                    tool_call_id=request.tool_call["id"],
+                )
 
             # Search tool - should be cached
-            search_request = {"tool_name": "search", "args": {"query": "Python"}}
+            search_request = ToolCallRequest(
+                tool_call={"name": "search", "args": {"query": "Python"}, "id": "c1"},
+                tool=None,
+                state={},
+                runtime=MagicMock(),
+            )
             result1 = await middleware.awrap_tool_call(search_request, mock_search)
             assert search_calls[0] == 1
-            assert "result" in result1
+            assert isinstance(result1, ToolMessage)
+            assert "Search results" in result1.content
 
             # Same search - might hit cache
             result2 = await middleware.awrap_tool_call(search_request, mock_search)
-            # Cache hit or miss, but should have result
-            assert "result" in result2
+            # Cache hit or miss, but should have a ToolMessage result
+            assert isinstance(result2, ToolMessage)
+            assert "Search results" in result2.content
 
-            # Random tool - should NOT be cached (excluded)
-            random_request = {"tool_name": "random_number", "args": {"max": 100}}
+            # Random tool - should NOT be cached (not in cacheable_tools)
+            random_request = ToolCallRequest(
+                tool_call={
+                    "name": "random_number",
+                    "args": {"max": 100},
+                    "id": "c2",
+                },
+                tool=None,
+                state={},
+                runtime=MagicMock(),
+            )
             await middleware.awrap_tool_call(random_request, mock_random)
             first_random_count = random_calls[0]
 
             await middleware.awrap_tool_call(random_request, mock_random)
-            # Should have been called again
+            # Should have been called again (not cached)
             assert random_calls[0] == first_random_count + 1
 
 
