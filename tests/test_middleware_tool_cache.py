@@ -3,8 +3,26 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from langchain_core.messages import ToolMessage as LangChainToolMessage
+from langgraph.prebuilt.tool_node import ToolCallRequest
 
 from langgraph.middleware.redis.types import ToolCacheConfig
+
+
+def _make_tool_call_request(
+    tool_name: str,
+    args: dict | None = None,
+    tool_call_id: str = "call_123",
+    tool: MagicMock | None = None,
+) -> ToolCallRequest:
+    """Create a ToolCallRequest for testing."""
+    tool_call = {"name": tool_name, "args": args or {}, "id": tool_call_id}
+    return ToolCallRequest(
+        tool_call=tool_call,
+        tool=tool,
+        state={},
+        runtime=MagicMock(),
+    )
 
 
 class TestToolResultCacheMiddleware:
@@ -26,17 +44,34 @@ class TestToolResultCacheMiddleware:
         assert middleware._config.distance_threshold == 0.15
 
     @pytest.mark.asyncio
-    async def test_is_tool_cacheable_with_no_restrictions(self) -> None:
-        """Test that all tools are cacheable when no restrictions set."""
+    async def test_is_tool_cacheable_with_no_restrictions_dict(self) -> None:
+        """Test that all tools are cacheable when no restrictions set (dict path)."""
         from langgraph.middleware.redis.tool_cache import ToolResultCacheMiddleware
 
         mock_client = AsyncMock()
         config = ToolCacheConfig(redis_client=mock_client)
         middleware = ToolResultCacheMiddleware(config)
 
-        assert middleware._is_tool_cacheable("search") is True
-        assert middleware._is_tool_cacheable("calculate") is True
-        assert middleware._is_tool_cacheable("any_tool") is True
+        assert middleware._is_tool_cacheable({"tool_name": "search"}) is True
+        assert middleware._is_tool_cacheable({"tool_name": "calculate"}) is True
+        assert middleware._is_tool_cacheable({"tool_name": "any_tool"}) is True
+
+    @pytest.mark.asyncio
+    async def test_is_tool_cacheable_with_no_restrictions_request(self) -> None:
+        """Test that all tools are cacheable when no restrictions set (ToolCallRequest)."""
+        from langgraph.middleware.redis.tool_cache import ToolResultCacheMiddleware
+
+        mock_client = AsyncMock()
+        config = ToolCacheConfig(redis_client=mock_client)
+        middleware = ToolResultCacheMiddleware(config)
+
+        assert middleware._is_tool_cacheable(_make_tool_call_request("search")) is True
+        assert (
+            middleware._is_tool_cacheable(_make_tool_call_request("calculate")) is True
+        )
+        assert (
+            middleware._is_tool_cacheable(_make_tool_call_request("any_tool")) is True
+        )
 
     @pytest.mark.asyncio
     async def test_is_tool_cacheable_with_cacheable_list(self) -> None:
@@ -50,10 +85,20 @@ class TestToolResultCacheMiddleware:
         )
         middleware = ToolResultCacheMiddleware(config)
 
-        # Test with dict-style requests (no tool object, falls back to config)
+        # Dict-style requests
         assert middleware._is_tool_cacheable({"tool_name": "search"}) is True
         assert middleware._is_tool_cacheable({"tool_name": "calculate"}) is True
         assert middleware._is_tool_cacheable({"tool_name": "random_tool"}) is False
+
+        # ToolCallRequest objects
+        assert middleware._is_tool_cacheable(_make_tool_call_request("search")) is True
+        assert (
+            middleware._is_tool_cacheable(_make_tool_call_request("calculate")) is True
+        )
+        assert (
+            middleware._is_tool_cacheable(_make_tool_call_request("random_tool"))
+            is False
+        )
 
     @pytest.mark.asyncio
     async def test_is_tool_cacheable_with_excluded_list(self) -> None:
@@ -67,10 +112,21 @@ class TestToolResultCacheMiddleware:
         )
         middleware = ToolResultCacheMiddleware(config)
 
-        # Test with dict-style requests (no tool object, falls back to config)
+        # Dict-style requests
         assert middleware._is_tool_cacheable({"tool_name": "search"}) is True
         assert middleware._is_tool_cacheable({"tool_name": "random_tool"}) is False
         assert middleware._is_tool_cacheable({"tool_name": "dangerous_tool"}) is False
+
+        # ToolCallRequest objects
+        assert middleware._is_tool_cacheable(_make_tool_call_request("search")) is True
+        assert (
+            middleware._is_tool_cacheable(_make_tool_call_request("random_tool"))
+            is False
+        )
+        assert (
+            middleware._is_tool_cacheable(_make_tool_call_request("dangerous_tool"))
+            is False
+        )
 
     @pytest.mark.asyncio
     async def test_cacheable_takes_precedence_over_excluded(self) -> None:
@@ -86,54 +142,43 @@ class TestToolResultCacheMiddleware:
         middleware = ToolResultCacheMiddleware(config)
 
         # When cacheable_tools is set, only those tools are cached
-        # Test with dict-style request
         assert middleware._is_tool_cacheable({"tool_name": "search"}) is True
+        assert middleware._is_tool_cacheable(_make_tool_call_request("search")) is True
 
     @pytest.mark.asyncio
     async def test_tool_metadata_cacheable_overrides_config(self) -> None:
         """Test that tool.metadata['cacheable'] overrides config settings."""
-        from unittest.mock import MagicMock
-
         from langgraph.middleware.redis.tool_cache import ToolResultCacheMiddleware
 
         mock_client = AsyncMock()
-        # Config says only 'search' is cacheable
         config = ToolCacheConfig(
             redis_client=mock_client,
             cacheable_tools=["search"],
         )
         middleware = ToolResultCacheMiddleware(config)
 
-        # Create a mock tool with metadata={'cacheable': True}
+        # Tool 'calculate' is NOT in cacheable_tools, but has metadata={'cacheable': True}
         mock_tool = MagicMock()
         mock_tool.metadata = {"cacheable": True}
-
-        # Create request with tool object (simulating ToolCallRequest)
-        class MockRequest:
-            def __init__(self, name: str, tool: MagicMock):
-                self.name = name
-                self.tool = tool
-
-        # Tool 'calculate' is NOT in cacheable_tools, but has metadata={'cacheable': True}
-        request = MockRequest("calculate", mock_tool)
+        request = _make_tool_call_request("calculate", tool=mock_tool)
         assert middleware._is_tool_cacheable(request) is True
 
         # Tool 'search' IS in cacheable_tools, but has metadata={'cacheable': False}
         mock_tool.metadata = {"cacheable": False}
-        request = MockRequest("search", mock_tool)
+        request = _make_tool_call_request("search", tool=mock_tool)
         assert middleware._is_tool_cacheable(request) is False
 
         # Tool with no metadata falls back to config
         mock_tool.metadata = None
-        request = MockRequest("search", mock_tool)
+        request = _make_tool_call_request("search", tool=mock_tool)
         assert middleware._is_tool_cacheable(request) is True  # In cacheable_tools
 
-        request = MockRequest("calculate", mock_tool)
+        request = _make_tool_call_request("calculate", tool=mock_tool)
         assert middleware._is_tool_cacheable(request) is False  # Not in cacheable_tools
 
     @pytest.mark.asyncio
-    async def test_build_cache_key_from_request(self) -> None:
-        """Test cache key generation from tool request."""
+    async def test_build_cache_key_from_dict(self) -> None:
+        """Test cache key generation from dict request."""
         from langgraph.middleware.redis.tool_cache import ToolResultCacheMiddleware
 
         mock_client = AsyncMock()
@@ -149,6 +194,22 @@ class TestToolResultCacheMiddleware:
         assert "Python programming" in cache_key
 
     @pytest.mark.asyncio
+    async def test_build_cache_key_from_tool_call_request(self) -> None:
+        """Test cache key generation from ToolCallRequest."""
+        from langgraph.middleware.redis.tool_cache import ToolResultCacheMiddleware
+
+        mock_client = AsyncMock()
+        config = ToolCacheConfig(redis_client=mock_client)
+        middleware = ToolResultCacheMiddleware(config)
+
+        request = _make_tool_call_request(
+            "search", args={"query": "Python programming"}
+        )
+        cache_key = middleware._build_cache_key(request)
+        assert "search" in cache_key
+        assert "Python programming" in cache_key
+
+    @pytest.mark.asyncio
     async def test_build_cache_key_with_complex_args(self) -> None:
         """Test cache key generation with complex arguments."""
         from langgraph.middleware.redis.tool_cache import ToolResultCacheMiddleware
@@ -157,16 +218,57 @@ class TestToolResultCacheMiddleware:
         config = ToolCacheConfig(redis_client=mock_client)
         middleware = ToolResultCacheMiddleware(config)
 
-        request = {
-            "tool_name": "api_call",
-            "args": {"endpoint": "/users", "method": "GET", "params": {"id": 123}},
-        }
+        request = _make_tool_call_request(
+            "api_call",
+            args={"endpoint": "/users", "method": "GET", "params": {"id": 123}},
+        )
         cache_key = middleware._build_cache_key(request)
         assert "api_call" in cache_key
 
     @pytest.mark.asyncio
-    async def test_cache_hit_returns_cached_result(self) -> None:
-        """Test that cache hit returns cached result without calling handler."""
+    async def test_cache_hit_returns_tool_message(self) -> None:
+        """Test that cache hit returns a proper ToolMessage."""
+        from langgraph.middleware.redis.tool_cache import ToolResultCacheMiddleware
+
+        mock_client = AsyncMock()
+        config = ToolCacheConfig(redis_client=mock_client)
+
+        with patch(
+            "langgraph.middleware.redis.tool_cache.SemanticCache"
+        ) as mock_cache_class:
+            mock_cache = MagicMock()
+            mock_cache.acheck = AsyncMock(
+                return_value=[{"response": '{"result": "cached"}', "metadata": {}}]
+            )
+            mock_cache_class.return_value = mock_cache
+
+            middleware = ToolResultCacheMiddleware(config)
+            await middleware._ensure_initialized_async()
+
+            handler_called = []
+
+            async def mock_handler(
+                request: ToolCallRequest,
+            ) -> LangChainToolMessage:
+                handler_called.append(True)
+                return LangChainToolMessage(
+                    content="new", name="search", tool_call_id="call_123"
+                )
+
+            request = _make_tool_call_request(
+                "search", args={"query": "test"}, tool_call_id="call_456"
+            )
+            result = await middleware.awrap_tool_call(request, mock_handler)
+
+            # Should return a ToolMessage, not a raw dict
+            assert isinstance(result, LangChainToolMessage)
+            assert result.name == "search"
+            assert result.tool_call_id == "call_456"
+            assert len(handler_called) == 0
+
+    @pytest.mark.asyncio
+    async def test_cache_hit_with_dict_request(self) -> None:
+        """Test cache hit with dict-style request for backward compat."""
         from langgraph.middleware.redis.tool_cache import ToolResultCacheMiddleware
 
         mock_client = AsyncMock()
@@ -190,10 +292,11 @@ class TestToolResultCacheMiddleware:
                 handler_called.append(True)
                 return {"result": "new"}
 
-            request = {"tool_name": "search", "args": {"query": "test"}}
+            request = {"tool_name": "search", "args": {"query": "test"}, "id": "c1"}
             result = await middleware.awrap_tool_call(request, mock_handler)
 
-            assert result == {"result": "cached"}
+            assert isinstance(result, LangChainToolMessage)
+            assert result.name == "search"
             assert len(handler_called) == 0
 
     @pytest.mark.asyncio
@@ -215,13 +318,19 @@ class TestToolResultCacheMiddleware:
             middleware = ToolResultCacheMiddleware(config)
             await middleware._ensure_initialized_async()
 
-            async def mock_handler(request: dict) -> dict:
-                return {"result": "new result"}
+            expected = LangChainToolMessage(
+                content="new result", name="search", tool_call_id="call_123"
+            )
 
-            request = {"tool_name": "search", "args": {"query": "test"}}
+            async def mock_handler(
+                request: ToolCallRequest,
+            ) -> LangChainToolMessage:
+                return expected
+
+            request = _make_tool_call_request("search", args={"query": "test"})
             result = await middleware.awrap_tool_call(request, mock_handler)
 
-            assert result == {"result": "new result"}
+            assert result is expected
             mock_cache.astore.assert_called_once()
 
     @pytest.mark.asyncio
@@ -246,13 +355,19 @@ class TestToolResultCacheMiddleware:
             middleware = ToolResultCacheMiddleware(config)
             await middleware._ensure_initialized_async()
 
-            async def mock_handler(request: dict) -> dict:
-                return {"result": "random"}
+            expected = LangChainToolMessage(
+                content="random", name="random_tool", tool_call_id="call_123"
+            )
 
-            request = {"tool_name": "random_tool", "args": {}}
+            async def mock_handler(
+                request: ToolCallRequest,
+            ) -> LangChainToolMessage:
+                return expected
+
+            request = _make_tool_call_request("random_tool")
             result = await middleware.awrap_tool_call(request, mock_handler)
 
-            assert result == {"result": "random"}
+            assert result is expected
             mock_cache.acheck.assert_not_called()
             mock_cache.astore.assert_not_called()
 
@@ -274,13 +389,19 @@ class TestToolResultCacheMiddleware:
             middleware = ToolResultCacheMiddleware(config)
             await middleware._ensure_initialized_async()
 
-            async def mock_handler(request: dict) -> dict:
-                return {"result": "handler response"}
+            expected = LangChainToolMessage(
+                content="handler response", name="search", tool_call_id="call_123"
+            )
 
-            request = {"tool_name": "search", "args": {"query": "test"}}
+            async def mock_handler(
+                request: ToolCallRequest,
+            ) -> LangChainToolMessage:
+                return expected
+
+            request = _make_tool_call_request("search", args={"query": "test"})
             result = await middleware.awrap_tool_call(request, mock_handler)
 
-            assert result == {"result": "handler response"}
+            assert result is expected
 
     @pytest.mark.asyncio
     async def test_raises_on_cache_error_without_graceful_degradation(self) -> None:
@@ -300,10 +421,14 @@ class TestToolResultCacheMiddleware:
             middleware = ToolResultCacheMiddleware(config)
             await middleware._ensure_initialized_async()
 
-            async def mock_handler(request: dict) -> dict:
-                return {"result": "handler response"}
+            async def mock_handler(
+                request: ToolCallRequest,
+            ) -> LangChainToolMessage:
+                return LangChainToolMessage(
+                    content="response", name="search", tool_call_id="call_123"
+                )
 
-            request = {"tool_name": "search", "args": {"query": "test"}}
+            request = _make_tool_call_request("search", args={"query": "test"})
             with pytest.raises(Exception, match="Redis error"):
                 await middleware.awrap_tool_call(request, mock_handler)
 
@@ -329,7 +454,7 @@ class TestToolResultCacheMiddleware:
 
     @pytest.mark.asyncio
     async def test_stores_with_tool_name_metadata(self) -> None:
-        """Test that tool name is stored as metadata for filtering."""
+        """Test that tool results are stored in cache."""
         from langgraph.middleware.redis.tool_cache import ToolResultCacheMiddleware
 
         mock_client = AsyncMock()
@@ -346,10 +471,14 @@ class TestToolResultCacheMiddleware:
             middleware = ToolResultCacheMiddleware(config)
             await middleware._ensure_initialized_async()
 
-            async def mock_handler(request: dict) -> dict:
-                return {"result": "data"}
+            async def mock_handler(
+                request: ToolCallRequest,
+            ) -> LangChainToolMessage:
+                return LangChainToolMessage(
+                    content="data", name="api_search", tool_call_id="call_123"
+                )
 
-            request = {"tool_name": "api_search", "args": {"q": "test"}}
+            request = _make_tool_call_request("api_search", args={"q": "test"})
             await middleware.awrap_tool_call(request, mock_handler)
 
             # Verify astore was called
@@ -398,3 +527,51 @@ class TestToolResultCacheMiddleware:
         result = await middleware.awrap_model_call(request, mock_handler)
 
         assert result == {"content": "model response"}
+
+    @pytest.mark.asyncio
+    async def test_deserialize_tool_result_json_content(self) -> None:
+        """Test deserialization of cached JSON content into ToolMessage."""
+        from langgraph.middleware.redis.tool_cache import ToolResultCacheMiddleware
+
+        mock_client = AsyncMock()
+        config = ToolCacheConfig(redis_client=mock_client)
+        middleware = ToolResultCacheMiddleware(config)
+
+        result = middleware._deserialize_tool_result(
+            '{"content": "hello world"}', "search", "call_1"
+        )
+        assert isinstance(result, LangChainToolMessage)
+        assert result.content == "hello world"
+        assert result.name == "search"
+        assert result.tool_call_id == "call_1"
+
+    @pytest.mark.asyncio
+    async def test_deserialize_tool_result_plain_string(self) -> None:
+        """Test deserialization of plain string cached content."""
+        from langgraph.middleware.redis.tool_cache import ToolResultCacheMiddleware
+
+        mock_client = AsyncMock()
+        config = ToolCacheConfig(redis_client=mock_client)
+        middleware = ToolResultCacheMiddleware(config)
+
+        result = middleware._deserialize_tool_result(
+            '"plain text result"', "calc", "call_2"
+        )
+        assert isinstance(result, LangChainToolMessage)
+        assert result.content == "plain text result"
+        assert result.name == "calc"
+
+    @pytest.mark.asyncio
+    async def test_deserialize_tool_result_invalid_json(self) -> None:
+        """Test deserialization gracefully handles invalid JSON."""
+        from langgraph.middleware.redis.tool_cache import ToolResultCacheMiddleware
+
+        mock_client = AsyncMock()
+        config = ToolCacheConfig(redis_client=mock_client)
+        middleware = ToolResultCacheMiddleware(config)
+
+        result = middleware._deserialize_tool_result(
+            "not valid json {{{", "tool", "call_3"
+        )
+        assert isinstance(result, LangChainToolMessage)
+        assert result.content == "not valid json {{{"
