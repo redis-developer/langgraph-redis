@@ -876,3 +876,66 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             else:
                 return ts_value
         return time.time() * MILLISECONDS_PER_SECOND
+
+    async def adelete_thread(self, thread_id: str) -> None:
+        """Delete checkpoint and writes associated with a specific thread ID.
+
+        Args:
+            thread_id: The thread ID which checkpoint should be deleted.
+        """
+        storage_safe_thread_id = to_storage_safe_id(thread_id)
+
+        # Despite the fact that shallow saver stores only the current version
+        # of checkpoint, there may be several while using subgraphs.
+        checkpoint_query = FilterQuery(
+            filter_expression=Tag("thread_id") == thread_id,
+            return_fields=["checkpoint_ns", "checkpoint_id"],
+            num_results=10000,
+        )
+
+        checkpoint_results = await self.checkpoints_index.search(checkpoint_query)
+
+        # Collect all keys to delete
+        keys_to_delete = []
+        checkpoint_namespaces = set()
+
+        for doc in checkpoint_results.docs:
+            checkpoint_ns = getattr(doc, "checkpoint_ns", "")
+            # Collect namespaces to clean write_keys_zset later
+            checkpoint_namespaces.add(checkpoint_ns)
+
+            # Delete checkpoint key
+            checkpoint_key = self._make_shallow_redis_checkpoint_key(
+                thread_id, checkpoint_ns
+            )
+            keys_to_delete.append(checkpoint_key)
+
+        checkpoint_writes_query = FilterQuery(
+            filter_expression=Tag("thread_id") == thread_id,
+            return_fields=["checkpoint_ns", "checkpoint_id", "task_id", "idx"],
+            num_results=10000,
+        )
+        checkpoint_writes_results = await self.checkpoint_writes_index.search(
+            checkpoint_writes_query
+        )
+        for doc in checkpoint_writes_results.docs:
+            checkpoint_ns = getattr(doc, "checkpoint_ns", "")
+            checkpoint_id = getattr(doc, "checkpoint_id", "")
+            task_id = getattr(doc, "task_id", "")
+            idx = getattr(doc, "idx", 0)
+            write_key = self._make_redis_checkpoint_writes_key(
+                thread_id, checkpoint_ns, checkpoint_id, task_id, idx
+            )
+            keys_to_delete.append(write_key)
+            checkpoint_namespaces.add(checkpoint_ns)
+
+        for checkpoint_ns in checkpoint_namespaces:
+            keys_to_delete.append(
+                f"write_keys_zset:{storage_safe_thread_id}:{to_storage_safe_str(checkpoint_ns)}:shallow"
+            )
+
+        # use pipeline for efficiency
+        pipeline = self._redis.pipeline()
+        for key in keys_to_delete:
+            pipeline.delete(key)
+        await pipeline.execute()
