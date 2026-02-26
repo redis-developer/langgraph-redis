@@ -13,6 +13,11 @@ from langchain.agents.middleware.types import (
     ModelRequest,
     ModelResponse,
 )
+from langchain_core.messages import (
+    AIMessage,
+    HumanMessage,
+    SystemMessage,
+)
 from langchain_core.messages import ToolMessage as LangChainToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
@@ -124,25 +129,27 @@ class ConversationMemoryMiddleware(AsyncRedisMiddleware):
 
         return ""
 
-    def _format_context_messages(
-        self, context: List[Dict[str, Any]]
-    ) -> List[Dict[str, str]]:
+    def _format_context_messages(self, context: List[Dict[str, Any]]) -> List[Any]:
         """Format retrieved context messages for injection.
 
         Args:
             context: List of retrieved context messages.
 
         Returns:
-            Formatted messages ready for injection.
+            Formatted LangChain message objects ready for injection.
         """
-        formatted = []
+        formatted: List[Any] = []
         for msg in context:
-            formatted.append(
-                {
-                    "role": msg.get("role", "user"),
-                    "content": msg.get("content", ""),
-                }
-            )
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if role == "system":
+                formatted.append(SystemMessage(content=content))
+            elif role in ("user", "human"):
+                formatted.append(HumanMessage(content=content))
+            elif role in ("llm", "ai", "assistant"):
+                formatted.append(AIMessage(content=content))
+            else:
+                formatted.append(HumanMessage(content=content))
         return formatted
 
     async def awrap_model_call(
@@ -193,10 +200,9 @@ class ConversationMemoryMiddleware(AsyncRedisMiddleware):
             formatted_context = self._format_context_messages(context_messages)
             # Insert context before the current messages
             # We add them as a context block
-            context_note = {
-                "role": "system",
-                "content": "Relevant context from previous conversations:",
-            }
+            context_note = SystemMessage(
+                content="Relevant context from previous conversations:"
+            )
             enhanced_messages = [context_note] + formatted_context + list(messages)
             # Support both dict-style and LangChain ModelRequest types
             if isinstance(request, dict):
@@ -211,8 +217,15 @@ class ConversationMemoryMiddleware(AsyncRedisMiddleware):
         try:
             # Get the user message
             user_content = query
-            # Get the assistant response (support both dict and LangChain types)
-            if isinstance(response, dict):
+            # Get the assistant response (support ModelResponse, dict, and
+            # other LangChain types)
+            if hasattr(response, "result") and isinstance(response.result, list):
+                # ModelResponse: result is list[BaseMessage]
+                if response.result:
+                    assistant_content = getattr(response.result[-1], "content", "")
+                else:
+                    assistant_content = ""
+            elif isinstance(response, dict):
                 assistant_content = response.get("content", "")
             else:
                 assistant_content = getattr(response, "content", "")
@@ -226,7 +239,7 @@ class ConversationMemoryMiddleware(AsyncRedisMiddleware):
             if assistant_content:
                 self._history.add_messages(
                     [
-                        {"role": "assistant", "content": assistant_content},
+                        {"role": "llm", "content": assistant_content},
                     ]
                 )
         except Exception as e:

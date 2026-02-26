@@ -7,6 +7,7 @@ demonstrated in the example notebooks.
 from unittest.mock import MagicMock
 
 import pytest
+from langchain.agents.middleware.types import ModelResponse
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from testcontainers.redis import RedisContainer
 
@@ -409,10 +410,12 @@ class TestConversationMemoryNotebookScenario:
             await middleware_user1._ensure_initialized_async()
             await middleware_user2._ensure_initialized_async()
 
-            async def mock_llm(request: dict) -> dict:
+            async def mock_llm(request: dict) -> ModelResponse:
                 # Extract messages to check context
                 msgs = request.get("messages", [])
-                return {"content": f"Response with {len(msgs)} messages"}
+                return ModelResponse(
+                    result=[AIMessage(content=f"Response with {len(msgs)} messages")]
+                )
 
             # User 1 sends a message
             request1 = {
@@ -429,6 +432,57 @@ class TestConversationMemoryNotebookScenario:
         finally:
             await middleware_user1.aclose()
             await middleware_user2.aclose()
+
+    @pytest.mark.asyncio
+    async def test_multi_turn_recall(self, redis_url: str) -> None:
+        """Test that middleware stores and retrieves messages across turns."""
+        import uuid
+
+        unique_name = f"memory_recall_test_{uuid.uuid4().hex[:8]}"
+        config = ConversationMemoryConfig(
+            redis_url=redis_url,
+            name=unique_name,
+            session_tag="recall_test_session",
+            top_k=5,
+            distance_threshold=0.9,
+        )
+
+        async with ConversationMemoryMiddleware(config) as middleware:
+            injected_context: list = []
+
+            async def mock_llm(request: dict) -> ModelResponse:
+                msgs = request.get("messages", [])
+                # Track injected context messages (beyond the user's own message)
+                injected_context.clear()
+                injected_context.extend(msgs)
+                return ModelResponse(result=[AIMessage(content="Got it, thanks!")])
+
+            # Turn 1: talk about Python programming
+            request1 = {
+                "messages": [
+                    HumanMessage(
+                        content="I really enjoy Python programming and data science"
+                    )
+                ]
+            }
+            await middleware.awrap_model_call(request1, mock_llm)
+
+            # Turn 2: ask about Python programming - semantically very similar
+            request2 = {
+                "messages": [
+                    HumanMessage(
+                        content="Tell me more about Python programming and data science"
+                    )
+                ]
+            }
+            await middleware.awrap_model_call(request2, mock_llm)
+
+            # The middleware should have injected context from Turn 1
+            # Total messages should be more than just the 1 user message
+            assert len(injected_context) > 1, (
+                "Expected context injection from Turn 1 but got only the "
+                f"user message. Messages: {injected_context}"
+            )
 
 
 @requires_sentence_transformers

@@ -4,6 +4,8 @@ These tests simulate real agent workflow patterns.
 """
 
 import pytest
+from langchain.agents.middleware.types import ModelResponse
+from langchain_core.messages import AIMessage
 from testcontainers.redis import RedisContainer
 
 from langgraph.middleware.redis import (
@@ -132,28 +134,34 @@ class TestMultiTurnConversation:
 
         async with ConversationMemoryMiddleware(config) as middleware:
             # Simulate multi-turn conversation
-            async def mock_llm(request: dict) -> dict:
+            async def mock_llm(request: dict) -> ModelResponse:
                 messages = request.get("messages", [])
                 user_msg = ""
                 for m in reversed(messages):
                     if isinstance(m, dict) and m.get("role") == "user":
                         user_msg = m.get("content", "")
                         break
+                    elif hasattr(m, "type") and m.type == "human":
+                        user_msg = m.content
+                        break
 
-                return {"content": f"I received: {user_msg}"}
+                return ModelResponse(
+                    result=[AIMessage(content=f"I received: {user_msg}")]
+                )
 
             # Turn 1
             request1 = {"messages": [{"role": "user", "content": "Hello, I'm Alice."}]}
             response1 = await middleware.awrap_model_call(request1, mock_llm)
-            assert "Alice" in response1["content"]
+            assert "Alice" in response1.result[0].content
 
             # Turn 2
             request2 = {
                 "messages": [{"role": "user", "content": "What's my name again?"}]
             }
             response2 = await middleware.awrap_model_call(request2, mock_llm)
-            # The middleware should have injected context
-            assert "content" in response2
+            # The middleware should have injected context and returned a ModelResponse
+            assert hasattr(response2, "result")
+            assert len(response2.result) > 0
 
 
 @requires_sentence_transformers
