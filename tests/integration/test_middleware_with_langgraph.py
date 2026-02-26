@@ -85,7 +85,7 @@ class TestSemanticCacheIntegration:
         config = SemanticCacheConfig(
             redis_url=redis_url,
             name="test_llm_cache_diff",
-            distance_threshold=0.95,  # High similarity threshold - only near-exact matches
+            distance_threshold=0.05,  # Low distance threshold - only near-exact matches
             ttl_seconds=60,
         )
 
