@@ -3,6 +3,8 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from langchain.agents.middleware.types import ModelResponse
+from langchain_core.messages import AIMessage
 
 from langgraph.middleware.redis.types import ConversationMemoryConfig
 
@@ -88,11 +90,11 @@ class TestConversationMemoryMiddleware:
             middleware = ConversationMemoryMiddleware(config)
             await middleware._ensure_initialized_async()
 
-            async def mock_handler(request: dict) -> dict:
+            async def mock_handler(request: dict) -> ModelResponse:
                 # Check that context was added (messages captured for potential assertions)
                 _messages = request.get("messages", [])  # noqa: F841
                 # Should have injected context
-                return {"content": "Response"}
+                return ModelResponse(result=[AIMessage(content="Response")])
 
             request = {"messages": [{"role": "user", "content": "New question"}]}
             await middleware.awrap_model_call(request, mock_handler)
@@ -120,14 +122,22 @@ class TestConversationMemoryMiddleware:
             middleware = ConversationMemoryMiddleware(config)
             await middleware._ensure_initialized_async()
 
-            async def mock_handler(request: dict) -> dict:
-                return {"content": "Model response"}
+            async def mock_handler(request: dict) -> ModelResponse:
+                return ModelResponse(result=[AIMessage(content="Model response")])
 
             request = {"messages": [{"role": "user", "content": "User question"}]}
             await middleware.awrap_model_call(request, mock_handler)
 
             # Should have stored both user message and assistant response
-            assert mock_history.add_messages.called
+            assert mock_history.add_messages.call_count == 2
+            # First call: user message
+            user_call = mock_history.add_messages.call_args_list[0]
+            assert user_call[0][0][0]["role"] == "user"
+            assert user_call[0][0][0]["content"] == "User question"
+            # Second call: assistant message with "llm" role for redisvl
+            llm_call = mock_history.add_messages.call_args_list[1]
+            assert llm_call[0][0][0]["role"] == "llm"
+            assert llm_call[0][0][0]["content"] == "Model response"
 
     @pytest.mark.asyncio
     async def test_uses_session_tag(self) -> None:
@@ -201,13 +211,14 @@ class TestConversationMemoryMiddleware:
             middleware = ConversationMemoryMiddleware(config)
             await middleware._ensure_initialized_async()
 
-            async def mock_handler(request: dict) -> dict:
-                return {"content": "Handler response"}
+            async def mock_handler(request: dict) -> ModelResponse:
+                return ModelResponse(result=[AIMessage(content="Handler response")])
 
             request = {"messages": [{"role": "user", "content": "Test"}]}
             result = await middleware.awrap_model_call(request, mock_handler)
 
-            assert result == {"content": "Handler response"}
+            assert hasattr(result, "result")
+            assert result.result[0].content == "Handler response"
 
     @pytest.mark.asyncio
     async def test_raises_on_history_error_without_graceful_degradation(self) -> None:
@@ -231,8 +242,8 @@ class TestConversationMemoryMiddleware:
             middleware = ConversationMemoryMiddleware(config)
             await middleware._ensure_initialized_async()
 
-            async def mock_handler(request: dict) -> dict:
-                return {"content": "Handler response"}
+            async def mock_handler(request: dict) -> ModelResponse:
+                return ModelResponse(result=[AIMessage(content="Handler response")])
 
             request = {"messages": [{"role": "user", "content": "Test"}]}
             with pytest.raises(Exception, match="Redis error"):
@@ -294,15 +305,21 @@ class TestConversationMemoryMiddleware:
 
             seen_messages = []
 
-            async def mock_handler(request: dict) -> dict:
+            async def mock_handler(request: dict) -> ModelResponse:
                 seen_messages.extend(request.get("messages", []))
-                return {"content": "New response"}
+                return ModelResponse(result=[AIMessage(content="New response")])
 
             request = {"messages": [{"role": "user", "content": "Tell me more"}]}
             await middleware.awrap_model_call(request, mock_handler)
 
-            # Context should be injected before the current message
-            assert len(seen_messages) >= 1
+            # Context should be injected before the current message:
+            # SystemMessage (context note) + 2 context messages + 1 user message
+            assert len(seen_messages) == 4
+            # First should be the context note SystemMessage
+            from langchain_core.messages import SystemMessage
+
+            assert isinstance(seen_messages[0], SystemMessage)
+            assert "context from previous" in seen_messages[0].content.lower()
 
     @pytest.mark.asyncio
     async def test_tool_call_passes_through(self) -> None:
@@ -322,6 +339,48 @@ class TestConversationMemoryMiddleware:
         result = await middleware.awrap_tool_call(request, mock_handler)
 
         assert result == {"result": "tool result"}
+
+    @pytest.mark.asyncio
+    async def test_stores_messages_from_model_response(self) -> None:
+        """Test that both user and assistant messages are stored when handler returns ModelResponse."""
+        from langgraph.middleware.redis.conversation_memory import (
+            ConversationMemoryMiddleware,
+        )
+
+        mock_client = AsyncMock()
+        config = ConversationMemoryConfig(redis_client=mock_client)
+
+        with patch(
+            "langgraph.middleware.redis.conversation_memory.SemanticMessageHistory"
+        ) as mock_history_class:
+            mock_history = MagicMock()
+            mock_history.get_relevant = MagicMock(return_value=[])
+            mock_history.add_messages = MagicMock()
+            mock_history_class.return_value = mock_history
+
+            middleware = ConversationMemoryMiddleware(config)
+            await middleware._ensure_initialized_async()
+
+            async def mock_handler(request: dict) -> ModelResponse:
+                return ModelResponse(
+                    result=[AIMessage(content="I'm doing great, thanks!")]
+                )
+
+            request = {"messages": [{"role": "user", "content": "How are you?"}]}
+            result = await middleware.awrap_model_call(request, mock_handler)
+
+            # Verify the response is a ModelResponse with the right content
+            assert hasattr(result, "result")
+            assert result.result[0].content == "I'm doing great, thanks!"
+
+            # Verify both messages were stored
+            assert mock_history.add_messages.call_count == 2
+            user_call = mock_history.add_messages.call_args_list[0]
+            assert user_call[0][0] == [{"role": "user", "content": "How are you?"}]
+            llm_call = mock_history.add_messages.call_args_list[1]
+            assert llm_call[0][0] == [
+                {"role": "llm", "content": "I'm doing great, thanks!"}
+            ]
 
     @pytest.mark.asyncio
     async def test_handles_langchain_messages(self) -> None:
