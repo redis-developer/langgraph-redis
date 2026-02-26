@@ -2709,14 +2709,14 @@ ocsp = ["cryptography (>=36.0.1)", "pyopenssl (>=20.0.1)", "requests (>=2.31.0)"
 
 [[package]]
 name = "redisvl"
-version = "0.11.0"
+version = "0.14.1"
 description = "Python client library and CLI for using Redis as a vector database"
 optional = false
-python-versions = "<3.14,>=3.9.2"
+python-versions = "<3.15,>=3.9.2"
 groups = ["main"]
 files = [
-    {file = "redisvl-0.11.0-py3-none-any.whl", hash = "sha256:7e2029fd5fc73baf5f024415002d91cdce88168e51113afc1dbc4fcd0f8a210a"},
-    {file = "redisvl-0.11.0.tar.gz", hash = "sha256:8bd52e059a805756160320f547b04372fe00517596364431f813107d96c6cbf8"},
+    {file = "redisvl-0.14.1-py3-none-any.whl", hash = "sha256:e5a3dfbb95e85606d9d19ac499d3ad8491346dc594147d3d50870090b6e4b8c1"},
+    {file = "redisvl-0.14.1.tar.gz", hash = "sha256:5b5678d43ff06ee366de09086da7a9c3d4de9bfba1b098bab9199a5acceca099"},
 ]
 
 [package.dependencies]
@@ -2726,17 +2726,20 @@ numpy = ">=1.26.0,<3"
 pydantic = ">=2,<3"
 python-ulid = ">=3.0.0"
 pyyaml = ">=5.4,<7.0"
-redis = ">=5.0,<7.0"
+redis = ">=5.0,<7.2"
 tenacity = ">=8.2.2"
 
 [package.extras]
+all = ["boto3 (>=1.36.0,<2)", "cohere (>=4.44)", "google-cloud-aiplatform (>=1.26,<2.0.0)", "langcache (>=0.11.0)", "mistralai (>=1.0.0)", "nltk (>=3.8.1,<4)", "openai (>=1.1.0)", "pillow (>=11.3.0)", "protobuf (>=5.28.0,<6.0.0)", "sentence-transformers (>=3.4.0,<4)", "sql-redis (>=0.1.1)", "urllib3 (<2.2.0)", "voyageai (>=0.2.2)"]
 bedrock = ["boto3 (>=1.36.0,<2)", "urllib3 (<2.2.0)"]
 cohere = ["cohere (>=4.44)"]
-langcache = ["langcache (>=0.9.0)"]
+langcache = ["langcache (>=0.11.0)"]
 mistralai = ["mistralai (>=1.0.0)"]
 nltk = ["nltk (>=3.8.1,<4)"]
 openai = ["openai (>=1.1.0)"]
+pillow = ["pillow (>=11.3.0)"]
 sentence-transformers = ["sentence-transformers (>=3.4.0,<4)"]
+sql-redis = ["sql-redis (>=0.1.2)"]
 vertexai = ["google-cloud-aiplatform (>=1.26,<2.0.0)", "protobuf (>=5.28.0,<6.0.0)"]
 voyageai = ["voyageai (>=0.2.2)"]
 
@@ -4113,5 +4116,5 @@ cffi = ["cffi (>=1.17,<2.0)", "cffi (>=2.0.0b)"]
 
 [metadata]
 lock-version = "2.1"
-python-versions = ">=3.10,<3.14"
-content-hash = "f4a1e00c3b4edaa0eb4aed2dcc6f7e558f5a4141ee38a5e8458475ab85aeaf72"
+python-versions = ">=3.10,<3.15"
+content-hash = "c2c707f5ca70b9edd73020a6e21ab708a1a5ed166f1b00e673d672898e918abd"
