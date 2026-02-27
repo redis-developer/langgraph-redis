@@ -444,7 +444,7 @@ class TestConversationMemoryNotebookScenario:
             name=unique_name,
             session_tag="recall_test_session",
             top_k=5,
-            distance_threshold=0.9,
+            distance_threshold=0.7,
         )
 
         async with ConversationMemoryMiddleware(config) as middleware:
