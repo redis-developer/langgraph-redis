@@ -13,11 +13,7 @@ from langchain.agents.middleware.types import (
     ModelRequest,
     ModelResponse,
 )
-from langchain_core.messages import (
-    AIMessage,
-    HumanMessage,
-    SystemMessage,
-)
+from langchain_core.messages import SystemMessage
 from langchain_core.messages import ToolMessage as LangChainToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
@@ -50,7 +46,7 @@ class ConversationMemoryMiddleware(AsyncRedisMiddleware):
             redis_url="redis://localhost:6379",
             session_tag="user_123",
             top_k=5,
-            distance_threshold=0.3,
+            distance_threshold=0.7,
         )
 
         middleware = ConversationMemoryMiddleware(config)
@@ -129,29 +125,6 @@ class ConversationMemoryMiddleware(AsyncRedisMiddleware):
 
         return ""
 
-    def _format_context_messages(self, context: List[Dict[str, Any]]) -> List[Any]:
-        """Format retrieved context messages for injection.
-
-        Args:
-            context: List of retrieved context messages.
-
-        Returns:
-            Formatted LangChain message objects ready for injection.
-        """
-        formatted: List[Any] = []
-        for msg in context:
-            role = msg.get("role", "user")
-            content = msg.get("content", "")
-            if role == "system":
-                formatted.append(SystemMessage(content=content))
-            elif role in ("user", "human"):
-                formatted.append(HumanMessage(content=content))
-            elif role in ("llm", "ai", "assistant"):
-                formatted.append(AIMessage(content=content))
-            else:
-                formatted.append(HumanMessage(content=content))
-        return formatted
-
     async def awrap_model_call(
         self,
         request: ModelRequest,
@@ -197,13 +170,30 @@ class ConversationMemoryMiddleware(AsyncRedisMiddleware):
 
         # Inject context into messages if found
         if context_messages:
-            formatted_context = self._format_context_messages(context_messages)
-            # Insert context before the current messages
-            # We add them as a context block
+            # Build a single system message with the retrieved context.
+            # Packaging context into one SystemMessage (rather than injecting
+            # separate HumanMessage/AIMessage objects) avoids confusing the LLM
+            # about which messages belong to the current turn vs. history.
+            context_lines = []
+            for msg in context_messages:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                if role in ("user", "human"):
+                    context_lines.append(f"User: {content}")
+                elif role in ("llm", "ai", "assistant"):
+                    context_lines.append(f"Assistant: {content}")
+                else:
+                    context_lines.append(f"{role.title()}: {content}")
+            context_block = "\n".join(context_lines)
             context_note = SystemMessage(
-                content="Relevant context from previous conversations:"
+                content=(
+                    "The following is relevant context from earlier in this "
+                    "conversation. Use it to inform your response and maintain "
+                    "continuity:\n\n"
+                    f"{context_block}"
+                )
             )
-            enhanced_messages = [context_note] + formatted_context + list(messages)
+            enhanced_messages = [context_note] + list(messages)
             # Support both dict-style and LangChain ModelRequest types
             if isinstance(request, dict):
                 request = {**request, "messages": enhanced_messages}

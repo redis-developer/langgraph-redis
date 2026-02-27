@@ -2,6 +2,12 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## CRITICAL: Integration Tests First, Always
+
+**When fixing bugs or adding features, ALWAYS write and run integration tests with real Redis BEFORE declaring the fix
+complete.** Unit tests with mocks are NOT sufficient — mocks hide real bugs. If a fix only passes mocked unit tests, it
+is NOT verified. Write the integration test first, see it fail, fix the code, then see it pass.
+
 ## How to Write Tests for Coverage
 
 When improving test coverage, follow these principles:

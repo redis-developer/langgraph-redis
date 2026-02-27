@@ -312,14 +312,16 @@ class TestConversationMemoryMiddleware:
             request = {"messages": [{"role": "user", "content": "Tell me more"}]}
             await middleware.awrap_model_call(request, mock_handler)
 
-            # Context should be injected before the current message:
-            # SystemMessage (context note) + 2 context messages + 1 user message
-            assert len(seen_messages) == 4
-            # First should be the context note SystemMessage
+            # Context should be injected as a single SystemMessage + the user message
+            assert len(seen_messages) == 2
             from langchain_core.messages import SystemMessage
 
+            # First message: SystemMessage with consolidated context
             assert isinstance(seen_messages[0], SystemMessage)
-            assert "context from previous" in seen_messages[0].content.lower()
+            assert "earlier in this conversation" in seen_messages[0].content.lower()
+            # Context should contain the retrieved messages
+            assert "What is Python?" in seen_messages[0].content
+            assert "Python is a programming language." in seen_messages[0].content
 
     @pytest.mark.asyncio
     async def test_tool_call_passes_through(self) -> None:

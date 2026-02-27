@@ -145,7 +145,7 @@ class TestConversationMemoryConfig:
         assert config.name == "conversation_memory"
         assert config.session_tag is None
         assert config.top_k == 5
-        assert config.distance_threshold == 0.3
+        assert config.distance_threshold == 0.7
         assert config.ttl_seconds is None
 
     def test_custom_values(self) -> None:

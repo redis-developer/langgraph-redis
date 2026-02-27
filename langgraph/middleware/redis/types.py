@@ -121,7 +121,9 @@ class ConversationMemoryConfig(MiddlewareConfig):
         name: Index name for message history.
         session_tag: Tag to identify the conversation session.
         top_k: Number of relevant messages to retrieve.
-        distance_threshold: Maximum distance for relevant messages.
+        distance_threshold: Maximum cosine distance for relevant messages.
+            Higher values (e.g. 0.9) are more permissive, lower values (e.g. 0.1)
+            require near-exact matches. Default 0.7 works well for typical conversations.
         vectorizer: Optional vectorizer for embeddings.
         ttl_seconds: Time-to-live for messages in seconds.
     """
@@ -129,7 +131,7 @@ class ConversationMemoryConfig(MiddlewareConfig):
     name: str = "conversation_memory"
     session_tag: Optional[str] = None
     top_k: int = 5
-    distance_threshold: float = 0.3
+    distance_threshold: float = 0.7
     vectorizer: Optional[Any] = None
     ttl_seconds: Optional[int] = None
 
