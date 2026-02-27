@@ -2709,14 +2709,14 @@ ocsp = ["cryptography (>=36.0.1)", "pyopenssl (>=20.0.1)", "requests (>=2.31.0)"
 
 [[package]]
 name = "redisvl"
-version = "0.14.1"
+version = "0.15.0"
 description = "Python client library and CLI for using Redis as a vector database"
 optional = false
 python-versions = "<3.15,>=3.9.2"
 groups = ["main"]
 files = [
-    {file = "redisvl-0.14.1-py3-none-any.whl", hash = "sha256:e5a3dfbb95e85606d9d19ac499d3ad8491346dc594147d3d50870090b6e4b8c1"},
-    {file = "redisvl-0.14.1.tar.gz", hash = "sha256:5b5678d43ff06ee366de09086da7a9c3d4de9bfba1b098bab9199a5acceca099"},
+    {file = "redisvl-0.15.0-py3-none-any.whl", hash = "sha256:aff716b9a9c4aef9c81de9a12d9939a0170ff3b3a1fe9d4164e94b131a754290"},
+    {file = "redisvl-0.15.0.tar.gz", hash = "sha256:0e382e9b6cd8378dfe1515b18f92d125cfba905f6f3c5fe9b8904b3ca840d1ca"},
 ]
 
 [package.dependencies]
@@ -4117,4 +4117,4 @@ cffi = ["cffi (>=1.17,<2.0)", "cffi (>=2.0.0b)"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.10,<3.15"
-content-hash = "c2c707f5ca70b9edd73020a6e21ab708a1a5ed166f1b00e673d672898e918abd"
+content-hash = "d1722386e4e27da2738daa3b5beaebc028158cafc7e52bfa3ab1b7cf91156d16"
