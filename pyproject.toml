@@ -63,6 +63,10 @@ filterwarnings = [
     "ignore::DeprecationWarning:testcontainers.redis",
     # Ignore trustcall library's deprecated import (used by langmem)
     "ignore:Importing Send from langgraph.constants is deprecated.*:langgraph.errors.LangGraphDeprecatedSinceV10:trustcall._base",
+    # Ignore PyTorch internal deprecation triggered by sentence-transformers during model loading
+    "ignore::DeprecationWarning:torch.jit._script",
+    # Ignore redisvl internal deprecation in SemanticCache (our code already uses AsyncRedis.from_url directly)
+    "ignore:get_async_redis_connection will become async:DeprecationWarning:redisvl.redis.connection",
 ]
 
 [tool.poetry.scripts]
