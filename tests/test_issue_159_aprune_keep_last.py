@@ -1,10 +1,10 @@
 """Integration tests for issue #159 — aprune() / prune() with keep_last strategy.
 
 Tests cover:
-- keep_latest  (keep 1 checkpoint)
-- keep_last=N  (interrupt-safe window)
-- delete       (remove all)
-- invalid strategy raises ValueError
+- keep_last=1  (keep only the latest checkpoint, default)
+- keep_last=N  (interrupt-safe window for multi-tool chains)
+- keep_last=0  (remove all checkpoints)
+- per-namespace isolation (subgraph chains pruned independently)
 - empty thread is a no-op
 - other threads are untouched
 - associated writes are removed for evicted checkpoints
@@ -22,7 +22,6 @@ from langgraph.checkpoint.redis import RedisSaver
 from langgraph.checkpoint.redis.aio import AsyncRedisSaver
 from redisvl.query import FilterQuery
 from redisvl.query.filter import Tag
-
 
 
 # ---------------------------------------------------------------------------
@@ -65,12 +64,11 @@ def _config(thread_id: str, cp_id: str, ns: str = "") -> RunnableConfig:
 
 
 @pytest.mark.asyncio
-async def test_aprune_keep_latest_removes_older_checkpoints(redis_url: str) -> None:
-    """aprune(keep_latest) retains only the single most-recent checkpoint."""
+async def test_aprune_keep_last_1_removes_older_checkpoints(redis_url: str) -> None:
+    """aprune(keep_last=1) retains only the single most-recent checkpoint."""
     async with AsyncRedisSaver.from_conn_string(redis_url) as saver:
-        thread_id = f"prune-keep-latest-{_make_ulid()}"
+        thread_id = f"prune-keep-1-{_make_ulid()}"
 
-        # Store 3 checkpoints in order
         cp_ids = [_make_ulid() for _ in range(3)]
         for cp_id in cp_ids:
             await saver.aput(
@@ -80,11 +78,10 @@ async def test_aprune_keep_latest_removes_older_checkpoints(redis_url: str) -> N
                 new_versions={"messages": "1"},
             )
 
-        await saver.aprune([thread_id], strategy="keep_latest")
+        await saver.aprune([thread_id], keep_last=1)
 
-        # Only the latest (last ULID = highest) should survive
-        latest_cp_id = cp_ids[-1]
-        result = await saver.aget_tuple(_config(thread_id, latest_cp_id))
+        # Only the latest should survive
+        result = await saver.aget_tuple(_config(thread_id, cp_ids[-1]))
         assert result is not None, "Latest checkpoint must be retained"
 
         # Older two must be gone
@@ -95,9 +92,9 @@ async def test_aprune_keep_latest_removes_older_checkpoints(redis_url: str) -> N
 
 @pytest.mark.asyncio
 async def test_aprune_keep_last_n_retains_window(redis_url: str) -> None:
-    """aprune(keep_last, keep_last=N) retains the N most-recent checkpoints."""
+    """aprune(keep_last=N) retains the N most-recent checkpoints."""
     async with AsyncRedisSaver.from_conn_string(redis_url) as saver:
-        thread_id = f"prune-keep-last-{_make_ulid()}"
+        thread_id = f"prune-keep-n-{_make_ulid()}"
         N = 3
 
         cp_ids = [_make_ulid() for _ in range(5)]
@@ -109,7 +106,7 @@ async def test_aprune_keep_last_n_retains_window(redis_url: str) -> None:
                 new_versions={"messages": "1"},
             )
 
-        await saver.aprune([thread_id], strategy="keep_last", keep_last=N)
+        await saver.aprune([thread_id], keep_last=N)
 
         # Last N should survive
         for cp_id in cp_ids[-N:]:
@@ -123,8 +120,8 @@ async def test_aprune_keep_last_n_retains_window(redis_url: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_aprune_delete_removes_all_checkpoints(redis_url: str) -> None:
-    """aprune(delete) removes every checkpoint for the thread."""
+async def test_aprune_keep_last_0_removes_all_checkpoints(redis_url: str) -> None:
+    """aprune(keep_last=0) removes every checkpoint for the thread."""
     async with AsyncRedisSaver.from_conn_string(redis_url) as saver:
         thread_id = f"prune-delete-{_make_ulid()}"
         cp_ids = [_make_ulid() for _ in range(4)]
@@ -137,7 +134,7 @@ async def test_aprune_delete_removes_all_checkpoints(redis_url: str) -> None:
                 new_versions={"messages": "1"},
             )
 
-        await saver.aprune([thread_id], strategy="delete")
+        await saver.aprune([thread_id], keep_last=0)
 
         for cp_id in cp_ids:
             result = await saver.aget_tuple(_config(thread_id, cp_id))
@@ -145,18 +142,57 @@ async def test_aprune_delete_removes_all_checkpoints(redis_url: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_aprune_invalid_strategy_raises(redis_url: str) -> None:
-    """aprune raises ValueError for unknown strategy names."""
+async def test_aprune_per_namespace_isolation(redis_url: str) -> None:
+    """keep_last is applied independently per namespace, not globally.
+
+    A thread with a root namespace and a subgraph namespace should have
+    keep_last applied to each chain separately — not ranked together.
+    """
     async with AsyncRedisSaver.from_conn_string(redis_url) as saver:
-        with pytest.raises(ValueError, match="Unknown pruning strategy"):
-            await saver.aprune(["any-thread"], strategy="bogus")
+        thread_id = f"prune-ns-{_make_ulid()}"
+        root_ns = ""
+        sub_ns = "subgraph:0"
+
+        # 3 checkpoints in root namespace, 3 in subgraph namespace
+        root_ids = [_make_ulid() for _ in range(3)]
+        sub_ids = [_make_ulid() for _ in range(3)]
+
+        for cp_id in root_ids:
+            await saver.aput(
+                config=_config(thread_id, cp_id, root_ns),
+                checkpoint=_make_checkpoint(cp_id),
+                metadata=CheckpointMetadata(source="input", step=0, writes={}),
+                new_versions={"messages": "1"},
+            )
+        for cp_id in sub_ids:
+            await saver.aput(
+                config=_config(thread_id, cp_id, sub_ns),
+                checkpoint=_make_checkpoint(cp_id),
+                metadata=CheckpointMetadata(source="input", step=0, writes={}),
+                new_versions={"messages": "1"},
+            )
+
+        # Prune to keep_last=1 — should keep the latest in EACH namespace
+        await saver.aprune([thread_id], keep_last=1)
+
+        # Latest in root namespace must survive
+        assert await saver.aget_tuple(_config(thread_id, root_ids[-1], root_ns)) is not None
+        # Older root checkpoints evicted
+        for cp_id in root_ids[:-1]:
+            assert await saver.aget_tuple(_config(thread_id, cp_id, root_ns)) is None
+
+        # Latest in subgraph namespace must also survive
+        assert await saver.aget_tuple(_config(thread_id, sub_ids[-1], sub_ns)) is not None
+        # Older subgraph checkpoints evicted
+        for cp_id in sub_ids[:-1]:
+            assert await saver.aget_tuple(_config(thread_id, cp_id, sub_ns)) is None
 
 
 @pytest.mark.asyncio
 async def test_aprune_empty_thread_is_noop(redis_url: str) -> None:
     """aprune on a thread with no checkpoints completes without error."""
     async with AsyncRedisSaver.from_conn_string(redis_url) as saver:
-        await saver.aprune([f"nonexistent-{_make_ulid()}"], strategy="keep_latest")
+        await saver.aprune([f"nonexistent-{_make_ulid()}"])
 
 
 @pytest.mark.asyncio
@@ -166,7 +202,6 @@ async def test_aprune_does_not_affect_other_threads(redis_url: str) -> None:
         target_thread = f"target-{_make_ulid()}"
         other_thread = f"other-{_make_ulid()}"
 
-        # Both threads get 3 checkpoints
         for thread_id in (target_thread, other_thread):
             for _ in range(3):
                 cp_id = _make_ulid()
@@ -177,10 +212,8 @@ async def test_aprune_does_not_affect_other_threads(redis_url: str) -> None:
                     new_versions={"messages": "1"},
                 )
 
-        # Only prune the target thread
-        await saver.aprune([target_thread], strategy="keep_latest")
+        await saver.aprune([target_thread], keep_last=1)
 
-        # Other thread must be fully intact — alist returns all checkpoints
         other_checkpoints = [
             c
             async for c in saver.alist(
@@ -211,35 +244,36 @@ async def test_aprune_removes_associated_writes(redis_url: str) -> None:
                 task_id=f"task-{i}",
             )
 
-        await saver.aprune([thread_id], strategy="keep_latest")
+        await saver.aprune([thread_id], keep_last=1)
 
-        # Latest checkpoint should still have its writes (pending_writes in tuple)
+        # Latest checkpoint must survive
         latest_tuple = await saver.aget_tuple(_config(thread_id, cp_ids[-1]))
         assert latest_tuple is not None, "Latest checkpoint must survive"
 
-        # Evicted checkpoint should be gone entirely
+        # Evicted checkpoint must be gone
         evicted_tuple = await saver.aget_tuple(_config(thread_id, cp_ids[0]))
         assert evicted_tuple is None, "Evicted checkpoint must be gone"
-        
-        # Evicted checkpoint's writes must be gone 
-        evicted_results = await saver.checkpoint_writes_index.search(FilterQuery(
-            Tag("checkpoint_id") == cp_ids[0]
-        ))
-        assert len(evicted_results.docs) == 0, f"Evicted write must be removed"
 
-        # Retained checkpoint's writes must still be accessible
-        retained_results = await saver.checkpoint_writes_index.search(FilterQuery(
-            Tag("checkpoint_id") == cp_ids[-1]
-        ))
+        # Evicted checkpoint's writes must be gone from the index
+        evicted_results = await saver.checkpoint_writes_index.search(
+            FilterQuery(Tag("checkpoint_id") == cp_ids[0])
+        )
+        assert len(evicted_results.docs) == 0, "Evicted write must be removed"
+
+        # Retained checkpoint's writes must still exist
+        retained_results = await saver.checkpoint_writes_index.search(
+            FilterQuery(Tag("checkpoint_id") == cp_ids[-1])
+        )
         assert len(retained_results.docs) > 0, "Retained writes must still exist"
+
 
 # ---------------------------------------------------------------------------
 # Sync tests
 # ---------------------------------------------------------------------------
 
 
-def test_prune_keep_latest_sync(redis_url: str) -> None:
-    """Sync prune(keep_latest) removes older checkpoints."""
+def test_prune_keep_last_1_sync(redis_url: str) -> None:
+    """Sync prune(keep_last=1) removes older checkpoints."""
     with RedisSaver.from_conn_string(redis_url) as saver:
         saver.setup()
         thread_id = f"sync-prune-{_make_ulid()}"
@@ -253,22 +287,11 @@ def test_prune_keep_latest_sync(redis_url: str) -> None:
                 new_versions={"messages": "1"},
             )
 
-        saver.prune([thread_id], strategy="keep_latest")
+        saver.prune([thread_id], keep_last=1)
 
-        result = saver.get_tuple(_config(thread_id, cp_ids[-1]))
-        assert result is not None, "Latest checkpoint must be retained"
-
+        assert saver.get_tuple(_config(thread_id, cp_ids[-1])) is not None
         for old_cp_id in cp_ids[:-1]:
-            result = saver.get_tuple(_config(thread_id, old_cp_id))
-            assert result is None, f"Checkpoint {old_cp_id} should be pruned"
-
-
-def test_prune_invalid_strategy_raises_sync(redis_url: str) -> None:
-    """Sync prune raises ValueError for unknown strategy."""
-    with RedisSaver.from_conn_string(redis_url) as saver:
-        saver.setup()
-        with pytest.raises(ValueError, match="Unknown pruning strategy"):
-            saver.prune(["any"], strategy="nope")
+            assert saver.get_tuple(_config(thread_id, old_cp_id)) is None
 
 
 def test_prune_keep_last_n_sync(redis_url: str) -> None:
@@ -287,10 +310,31 @@ def test_prune_keep_last_n_sync(redis_url: str) -> None:
                 new_versions={"messages": "1"},
             )
 
-        saver.prune([thread_id], strategy="keep_last", keep_last=N)
+        saver.prune([thread_id], keep_last=N)
 
         for cp_id in cp_ids[-N:]:
             assert saver.get_tuple(_config(thread_id, cp_id)) is not None
 
         for cp_id in cp_ids[:-N]:
+            assert saver.get_tuple(_config(thread_id, cp_id)) is None
+
+
+def test_prune_keep_last_0_sync(redis_url: str) -> None:
+    """Sync prune(keep_last=0) removes all checkpoints."""
+    with RedisSaver.from_conn_string(redis_url) as saver:
+        saver.setup()
+        thread_id = f"sync-delete-{_make_ulid()}"
+        cp_ids = [_make_ulid() for _ in range(3)]
+
+        for cp_id in cp_ids:
+            saver.put(
+                config=_config(thread_id, cp_id),
+                checkpoint=_make_checkpoint(cp_id),
+                metadata=CheckpointMetadata(source="input", step=0, writes={}),
+                new_versions={"messages": "1"},
+            )
+
+        saver.prune([thread_id], keep_last=0)
+
+        for cp_id in cp_ids:
             assert saver.get_tuple(_config(thread_id, cp_id)) is None

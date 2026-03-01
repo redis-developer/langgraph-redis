@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import defaultdict
 from contextlib import contextmanager
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple, Union, cast
 
@@ -1690,46 +1691,33 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
         self,
         thread_ids: Sequence[str],
         *,
-        strategy: str = "keep_latest",
         keep_last: int = 1,
     ) -> None:
-        """Prune old checkpoints for the given threads, keeping only the most recent.
+        """Prune old checkpoints for the given threads per namespace.
 
-        Unlike ``delete_thread``, this method retains the N most recent checkpoints
-        and removes only the older ones (along with their associated write keys and
-        key-registry sorted sets).  Checkpoint blobs are intentionally *not* deleted
-        because they are shared across checkpoints via channel versioning.
+        Retains the ``keep_last`` most-recent checkpoints **per checkpoint
+        namespace** and removes the rest, along with their associated write
+        keys and key-registry sorted sets.
+
+        Each namespace (root ``""`` and any subgraph namespaces) is treated as
+        an independent checkpoint chain, so ``keep_last`` is applied separately
+        within each namespace.  Checkpoint blobs are intentionally *not* deleted
+        because blob keys are shared across checkpoints via channel versioning —
+        the same blob version may be referenced by both kept and evicted
+        checkpoints.
 
         Args:
             thread_ids: Thread IDs whose old checkpoints should be pruned.
-            strategy: Pruning strategy. One of:
-                - ``"keep_latest"``: Keep only the single most-recent checkpoint.
-                - ``"keep_last"``:   Keep the *N* most-recent checkpoints (see
-                  ``keep_last``).  Recommended for multi-tool interrupt chains where
-                  intermediate checkpoints track already-completed tool calls.
-                - ``"delete"``:      Remove *all* checkpoints for the thread.
-            keep_last: Number of recent checkpoints to retain when
-                ``strategy="keep_last"``.  Ignored for other strategies.
-
-        Raises:
-            ValueError: If an unknown strategy is supplied.
+            keep_last: Number of recent checkpoints to retain per namespace.
+                Use ``keep_last=1`` to keep only the latest checkpoint (default).
+                Use ``keep_last=0`` to remove all checkpoints for the thread.
+                For multi-tool interrupt chains, ``max(10, n_tool_calls * 3 + 5)``
+                is a safe heuristic.
         """
-        if strategy == "delete":
-            keep_n = 0
-        elif strategy == "keep_latest":
-            keep_n = 1
-        elif strategy == "keep_last":
-            keep_n = keep_last
-        else:
-            raise ValueError(
-                f"Unknown pruning strategy: {strategy!r}. "
-                "Valid strategies: 'keep_latest', 'keep_last', 'delete'."
-            )
-
         for thread_id in thread_ids:
             storage_safe_thread_id = to_storage_safe_id(thread_id)
 
-            # Fetch all checkpoints for this thread
+            # Fetch all checkpoints for this thread across all namespaces
             checkpoint_query = FilterQuery(
                 filter_expression=Tag("thread_id") == storage_safe_thread_id,
                 return_fields=["checkpoint_ns", "checkpoint_id"],
@@ -1740,15 +1728,24 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
             if not checkpoint_results.docs:
                 continue
 
-            # Sort by checkpoint_id descending — ULIDs are lexicographically
-            # time-ordered, so newest checkpoints sort first with no extra parsing.
-            docs_sorted = sorted(
-                checkpoint_results.docs,
-                key=lambda d: getattr(d, "checkpoint_id", ""),
-                reverse=True,
-            )
+            # Group by namespace — each namespace is an independent checkpoint chain
+            # (root graph vs. subgraph checkpoints must be evicted independently).
+            by_ns: Dict[str, list] = defaultdict(list)
+            for doc in checkpoint_results.docs:
+                ns = getattr(doc, "checkpoint_ns", "")
+                by_ns[ns].append(doc)
 
-            to_evict = docs_sorted[keep_n:]
+            # Within each namespace sort newest-first (ULIDs are lex time-ordered)
+            # and collect checkpoints that fall outside the keep_last window.
+            to_evict = []
+            for ns_docs in by_ns.values():
+                ns_sorted = sorted(
+                    ns_docs,
+                    key=lambda d: getattr(d, "checkpoint_id", ""),
+                    reverse=True,
+                )
+                to_evict.extend(ns_sorted[keep_last:])
+
             if not to_evict:
                 continue
 
