@@ -939,3 +939,26 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         for key in keys_to_delete:
             pipeline.delete(key)
         await pipeline.execute()
+
+    async def aprune(
+        self,
+        thread_ids: Sequence[str],
+        *,
+        keep_last: int = 1,
+    ) -> None:
+        """Prune checkpoints for the given threads.
+
+        ``AsyncShallowRedisSaver`` stores at most one checkpoint per namespace
+        by design, so ``keep_last >= 1`` is always a no-op.  ``keep_last=0``
+        removes all checkpoints for each thread (equivalent to
+        ``adelete_thread``).
+
+        Args:
+            thread_ids: Thread IDs to prune.
+            keep_last: Checkpoints to retain per namespace.  Any value >= 1
+                is a no-op for shallow savers.  Pass ``0`` to delete all.
+        """
+        if keep_last >= 1:
+            return
+        for thread_id in thread_ids:
+            await self.adelete_thread(thread_id)

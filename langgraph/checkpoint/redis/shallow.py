@@ -34,6 +34,7 @@ from langgraph.checkpoint.redis.base import (
     BaseRedisSaver,
 )
 from langgraph.checkpoint.redis.util import (
+    from_storage_safe_str,
     to_storage_safe_id,
     to_storage_safe_str,
 )
@@ -761,9 +762,11 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         checkpoint_results = self.checkpoints_index.search(checkpoint_query)
 
         # Collect namespaces and checkpoint IDs
+        # checkpoint_ns from the index is storage-safe; convert back to raw form
+        # so that key construction matches what put() used when storing.
         checkpoint_data = []
         for doc in checkpoint_results.docs:
-            checkpoint_ns = getattr(doc, "checkpoint_ns", "")
+            checkpoint_ns = from_storage_safe_str(getattr(doc, "checkpoint_ns", ""))
             checkpoint_id = getattr(doc, "checkpoint_id", "")
             checkpoint_data.append((checkpoint_ns, checkpoint_id))
 
@@ -804,6 +807,29 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
 
                 # Execute all deletions
                 pipeline.execute()
+
+    def prune(
+        self,
+        thread_ids: Sequence[str],
+        *,
+        keep_last: int = 1,
+    ) -> None:
+        """Prune checkpoints for the given threads.
+
+        ``ShallowRedisSaver`` stores at most one checkpoint per namespace by
+        design, so ``keep_last >= 1`` is always a no-op.  ``keep_last=0``
+        removes all checkpoints for each thread (equivalent to
+        ``delete_thread``).
+
+        Args:
+            thread_ids: Thread IDs to prune.
+            keep_last: Checkpoints to retain per namespace.  Any value >= 1
+                is a no-op for shallow savers.  Pass ``0`` to delete all.
+        """
+        if keep_last >= 1:
+            return
+        for thread_id in thread_ids:
+            self.delete_thread(thread_id)
 
     def _extract_fallback_timestamp(self, checkpoint: Checkpoint) -> float:
         """Extract timestamp from checkpoint's ts field or use current time.

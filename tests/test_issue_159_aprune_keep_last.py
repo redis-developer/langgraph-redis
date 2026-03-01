@@ -9,6 +9,7 @@ Tests cover:
 - other threads are untouched
 - associated writes are removed for evicted checkpoints
 - sync (RedisSaver.prune) and async (AsyncRedisSaver.aprune) variants
+- shallow savers: keep_last>=1 is no-op, keep_last=0 deletes all
 """
 
 import time
@@ -20,6 +21,8 @@ from ulid import ULID
 
 from langgraph.checkpoint.redis import RedisSaver
 from langgraph.checkpoint.redis.aio import AsyncRedisSaver
+from langgraph.checkpoint.redis.ashallow import AsyncShallowRedisSaver
+from langgraph.checkpoint.redis.shallow import ShallowRedisSaver
 from redisvl.query import FilterQuery
 from redisvl.query.filter import Tag
 
@@ -338,3 +341,89 @@ def test_prune_keep_last_0_sync(redis_url: str) -> None:
 
         for cp_id in cp_ids:
             assert saver.get_tuple(_config(thread_id, cp_id)) is None
+
+
+# ---------------------------------------------------------------------------
+# Shallow saver tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_ashallow_aprune_keep_last_1_is_noop(redis_url: str) -> None:
+    """aprune(keep_last>=1) is a no-op for AsyncShallowRedisSaver."""
+    async with AsyncShallowRedisSaver.from_conn_string(redis_url) as saver:
+        thread_id = f"shallow-noop-{_make_ulid()}"
+        cp_id = _make_ulid()
+
+        await saver.aput(
+            config=_config(thread_id, cp_id),
+            checkpoint=_make_checkpoint(cp_id),
+            metadata=CheckpointMetadata(source="input", step=0, writes={}),
+            new_versions={"messages": "1"},
+        )
+
+        await saver.aprune([thread_id], keep_last=1)
+
+        # Checkpoint must still be there
+        result = await saver.aget_tuple(_config(thread_id, cp_id))
+        assert result is not None, "Shallow checkpoint must survive keep_last=1"
+
+
+@pytest.mark.asyncio
+async def test_ashallow_aprune_keep_last_0_deletes_all(redis_url: str) -> None:
+    """aprune(keep_last=0) removes all checkpoints for AsyncShallowRedisSaver."""
+    async with AsyncShallowRedisSaver.from_conn_string(redis_url) as saver:
+        thread_id = f"shallow-delete-{_make_ulid()}"
+        cp_id = _make_ulid()
+
+        await saver.aput(
+            config=_config(thread_id, cp_id),
+            checkpoint=_make_checkpoint(cp_id),
+            metadata=CheckpointMetadata(source="input", step=0, writes={}),
+            new_versions={"messages": "1"},
+        )
+
+        await saver.aprune([thread_id], keep_last=0)
+
+        result = await saver.aget_tuple(_config(thread_id, cp_id))
+        assert result is None, "Shallow checkpoint must be deleted with keep_last=0"
+
+
+def test_shallow_prune_keep_last_1_is_noop(redis_url: str) -> None:
+    """prune(keep_last>=1) is a no-op for ShallowRedisSaver."""
+    with ShallowRedisSaver.from_conn_string(redis_url) as saver:
+        saver.setup()
+        thread_id = f"sync-shallow-noop-{_make_ulid()}"
+        cp_id = _make_ulid()
+
+        saver.put(
+            config=_config(thread_id, cp_id),
+            checkpoint=_make_checkpoint(cp_id),
+            metadata=CheckpointMetadata(source="input", step=0, writes={}),
+            new_versions={"messages": "1"},
+        )
+
+        saver.prune([thread_id], keep_last=1)
+
+        result = saver.get_tuple(_config(thread_id, cp_id))
+        assert result is not None, "Shallow checkpoint must survive keep_last=1"
+
+
+def test_shallow_prune_keep_last_0_deletes_all(redis_url: str) -> None:
+    """prune(keep_last=0) removes all checkpoints for ShallowRedisSaver."""
+    with ShallowRedisSaver.from_conn_string(redis_url) as saver:
+        saver.setup()
+        thread_id = f"sync-shallow-delete-{_make_ulid()}"
+        cp_id = _make_ulid()
+
+        saver.put(
+            config=_config(thread_id, cp_id),
+            checkpoint=_make_checkpoint(cp_id),
+            metadata=CheckpointMetadata(source="input", step=0, writes={}),
+            new_versions={"messages": "1"},
+        )
+
+        saver.prune([thread_id], keep_last=0)
+
+        result = saver.get_tuple(_config(thread_id, cp_id))
+        assert result is None, "Shallow checkpoint must be deleted with keep_last=0"
