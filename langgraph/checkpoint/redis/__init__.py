@@ -1686,6 +1686,122 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
                 pipeline.delete(key)
             pipeline.execute()
 
+    def prune(
+        self,
+        thread_ids: Sequence[str],
+        *,
+        strategy: str = "keep_latest",
+        keep_last: int = 1,
+    ) -> None:
+        """Prune old checkpoints for the given threads, keeping only the most recent.
+
+        Unlike ``delete_thread``, this method retains the N most recent checkpoints
+        and removes only the older ones (along with their associated write keys and
+        key-registry sorted sets).  Checkpoint blobs are intentionally *not* deleted
+        because they are shared across checkpoints via channel versioning.
+
+        Args:
+            thread_ids: Thread IDs whose old checkpoints should be pruned.
+            strategy: Pruning strategy. One of:
+                - ``"keep_latest"``: Keep only the single most-recent checkpoint.
+                - ``"keep_last"``:   Keep the *N* most-recent checkpoints (see
+                  ``keep_last``).  Recommended for multi-tool interrupt chains where
+                  intermediate checkpoints track already-completed tool calls.
+                - ``"delete"``:      Remove *all* checkpoints for the thread.
+            keep_last: Number of recent checkpoints to retain when
+                ``strategy="keep_last"``.  Ignored for other strategies.
+
+        Raises:
+            ValueError: If an unknown strategy is supplied.
+        """
+        if strategy == "delete":
+            keep_n = 0
+        elif strategy == "keep_latest":
+            keep_n = 1
+        elif strategy == "keep_last":
+            keep_n = keep_last
+        else:
+            raise ValueError(
+                f"Unknown pruning strategy: {strategy!r}. "
+                "Valid strategies: 'keep_latest', 'keep_last', 'delete'."
+            )
+
+        for thread_id in thread_ids:
+            storage_safe_thread_id = to_storage_safe_id(thread_id)
+
+            # Fetch all checkpoints for this thread
+            checkpoint_query = FilterQuery(
+                filter_expression=Tag("thread_id") == storage_safe_thread_id,
+                return_fields=["checkpoint_ns", "checkpoint_id"],
+                num_results=10000,
+            )
+            checkpoint_results = self.checkpoints_index.search(checkpoint_query)
+
+            if not checkpoint_results.docs:
+                continue
+
+            # Sort by checkpoint_id descending — ULIDs are lexicographically
+            # time-ordered, so newest checkpoints sort first with no extra parsing.
+            docs_sorted = sorted(
+                checkpoint_results.docs,
+                key=lambda d: getattr(d, "checkpoint_id", ""),
+                reverse=True,
+            )
+
+            to_evict = docs_sorted[keep_n:]
+            if not to_evict:
+                continue
+
+            keys_to_delete = []
+            for doc in to_evict:
+                checkpoint_ns = getattr(doc, "checkpoint_ns", "")
+                checkpoint_id = getattr(doc, "checkpoint_id", "")
+
+                # Evict checkpoint document
+                keys_to_delete.append(
+                    self._make_redis_checkpoint_key_cached(
+                        thread_id, checkpoint_ns, checkpoint_id
+                    )
+                )
+
+                # Evict all write documents for this checkpoint
+                writes_query = FilterQuery(
+                    filter_expression=(
+                        (Tag("thread_id") == storage_safe_thread_id)
+                        & (Tag("checkpoint_id") == checkpoint_id)
+                    ),
+                    return_fields=["checkpoint_ns", "checkpoint_id", "task_id", "idx"],
+                    num_results=10000,
+                )
+                writes_results = self.checkpoint_writes_index.search(writes_query)
+                for wdoc in writes_results.docs:
+                    keys_to_delete.append(
+                        self._make_redis_checkpoint_writes_key(
+                            storage_safe_thread_id,
+                            getattr(wdoc, "checkpoint_ns", ""),
+                            getattr(wdoc, "checkpoint_id", ""),
+                            getattr(wdoc, "task_id", ""),
+                            int(getattr(wdoc, "idx", 0)),
+                        )
+                    )
+
+                # Evict key-registry sorted set for this checkpoint
+                if self._key_registry:
+                    keys_to_delete.append(
+                        self._key_registry.make_write_keys_zset_key(
+                            thread_id, checkpoint_ns, checkpoint_id
+                        )
+                    )
+
+            if self.cluster_mode:
+                for key in keys_to_delete:
+                    self._redis.delete(key)
+            else:
+                pipeline = self._redis.pipeline()
+                for key in keys_to_delete:
+                    pipeline.delete(key)
+                pipeline.execute()
+
 
 __all__ = [
     "__version__",
