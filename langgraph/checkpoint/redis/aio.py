@@ -2082,6 +2082,7 @@ class AsyncRedisSaver(
         thread_ids: Sequence[str],
         *,
         keep_last: int = 1,
+        max_results: int = 10000,
     ) -> None:
         """Prune old checkpoints for the given threads per namespace.
 
@@ -2103,7 +2104,20 @@ class AsyncRedisSaver(
                 Use ``keep_last=0`` to remove all checkpoints for the thread.
                 For multi-tool interrupt chains, ``max(10, n_tool_calls * 3 + 5)``
                 is a safe heuristic.
+            max_results: Maximum number of checkpoints fetched from the index
+                per thread in a single query.  Threads with more checkpoints
+                than this limit will only have the first ``max_results`` entries
+                considered for pruning.  Raise this value for very long-lived
+                threads.  Defaults to 10 000.
         """
+        # Validate inputs
+        if not thread_ids:
+            raise ValueError("``thread_ids`` must be a non-empty sequence")
+        if keep_last < 0:
+            raise ValueError(f"``keep_last`` must be >= 0, got {keep_last}")
+        if max_results < 1:
+            raise ValueError(f"``max_results`` must be >= 1, got {max_results}")
+        
         for thread_id in thread_ids:
             storage_safe_thread_id = to_storage_safe_id(thread_id)
 
@@ -2111,7 +2125,7 @@ class AsyncRedisSaver(
             checkpoint_query = FilterQuery(
                 filter_expression=Tag("thread_id") == storage_safe_thread_id,
                 return_fields=["checkpoint_ns", "checkpoint_id"],
-                num_results=10000,
+                num_results=max_results,
             )
             checkpoint_results = await self.checkpoints_index.search(checkpoint_query)
 
@@ -2127,14 +2141,20 @@ class AsyncRedisSaver(
 
             # Within each namespace sort newest-first (ULIDs are lex time-ordered)
             # and collect checkpoints that fall outside the keep_last window.
+            # Track namespaces where every checkpoint is evicted so we can clean
+            # up the checkpoint_latest:{thread}:{ns} pointer key too
             to_evict = []
-            for ns_docs in by_ns.values():
+            fully_evicted_ns: set = set()
+            for ns, ns_docs in by_ns.items():
                 ns_sorted = sorted(
                     ns_docs,
                     key=lambda d: getattr(d, "checkpoint_id", ""),
                     reverse=True,
                 )
-                to_evict.extend(ns_sorted[keep_last:])
+                ns_evicted = ns_sorted[keep_last:]
+                to_evict.extend(ns_evicted)
+                if len(ns_evicted) == len(ns_docs): # nothing left in this namespace
+                    fully_evicted_ns.add(ns)
 
             if not to_evict:
                 continue
@@ -2158,7 +2178,7 @@ class AsyncRedisSaver(
                         & (Tag("checkpoint_id") == checkpoint_id)
                     ),
                     return_fields=["checkpoint_ns", "checkpoint_id", "task_id", "idx"],
-                    num_results=10000,
+                    num_results=max_results,
                 )
                 writes_results = await self.checkpoint_writes_index.search(
                     writes_query
@@ -2181,6 +2201,12 @@ class AsyncRedisSaver(
                             thread_id, checkpoint_ns, checkpoint_id
                         )
                     )
+            
+            for ns in fully_evicted_ns:
+                keys_to_delete.append(
+                    f"checkpoint_latest:{storage_safe_thread_id}:{ns}"
+                )
+            
 
             if self.cluster_mode:
                 for key in keys_to_delete:

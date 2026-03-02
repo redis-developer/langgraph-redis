@@ -762,28 +762,31 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         checkpoint_results = self.checkpoints_index.search(checkpoint_query)
 
         # Collect namespaces and checkpoint IDs
-        # checkpoint_ns from the index is storage-safe; convert back to raw form
-        # so that key construction matches what put() used when storing.
+        # The index stores checkpoint_ns in storage-safe form ("" -> "__empty__").
+        # _make_shallow_redis_checkpoint_key_cached() does its own to_storage_safe_str conversion
+        # internally, so it needs the raw namespace.
+        # The wrote_registry / current_checkpoint keys are raw f-strings, so they
+        # need the storage-safe form that was used when those keys were originally written.
         checkpoint_data = []
         for doc in checkpoint_results.docs:
-            checkpoint_ns = from_storage_safe_str(getattr(doc, "checkpoint_ns", ""))
+            safe_ns = getattr(doc, "checkpoint_ns", "") # storage-safe: for f-strings
+            raw_ns = from_storage_safe_str(safe_ns) # raw: for key builder method
             checkpoint_id = getattr(doc, "checkpoint_id", "")
-            checkpoint_data.append((checkpoint_ns, checkpoint_id))
+            checkpoint_data.append((raw_ns, safe_ns, checkpoint_id))
 
         # Delete all checkpoints and related data
         if checkpoint_data:
             with self._redis.pipeline(transaction=False) as pipeline:
-                for checkpoint_ns, checkpoint_id in checkpoint_data:
-                    # Delete the main checkpoint key
+                for raw_ns, safe_ns, checkpoint_id in checkpoint_data:
+                    # Key builder converts internally - pass raw namespace
                     checkpoint_key = self._make_shallow_redis_checkpoint_key_cached(
-                        thread_id, checkpoint_ns
+                        thread_id, raw_ns
                     )
                     pipeline.delete(checkpoint_key)
 
-                    # Delete thread-level write registry and its writes
-                    # Each namespace has its own thread-level registry
+                    # write_registry key was stored with storage-safe ns - use safe_ns here
                     thread_write_registry_key = (
-                        f"write_registry:{thread_id}:{checkpoint_ns}:shallow"
+                        f"write_registry:{thread_id}:{safe_ns}:shallow"
                     )
 
                     # Get all write keys from the thread registry before deleting
@@ -799,13 +802,12 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
                     # Delete the registry itself
                     pipeline.delete(thread_write_registry_key)
 
-                    # Delete the current checkpoint tracker
+                    # Delete the current checkpoint tracker - use safe_ns here
                     current_checkpoint_key = (
-                        f"current_checkpoint:{thread_id}:{checkpoint_ns}:shallow"
+                        f"current_checkpoint:{thread_id}:{safe_ns}:shallow"
                     )
                     pipeline.delete(current_checkpoint_key)
 
-                # Execute all deletions
                 pipeline.execute()
 
     def prune(
@@ -826,6 +828,13 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
             keep_last: Checkpoints to retain per namespace.  Any value >= 1
                 is a no-op for shallow savers.  Pass ``0`` to delete all.
         """
+        # Validate input 
+        if not thread_ids:
+            raise ValueError(f"``thread_ids`` must be a non-empty sequence")
+        
+        if keep_last < 0:
+            raise ValueError(f"``keep_last`` must be >= 0, got {keep_last}")
+        
         if keep_last >= 1:
             return
         for thread_id in thread_ids:
