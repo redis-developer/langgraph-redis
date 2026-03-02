@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import defaultdict
 from contextlib import contextmanager
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple, Union, cast
 
@@ -1685,6 +1686,147 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
             for key in keys_to_delete:
                 pipeline.delete(key)
             pipeline.execute()
+
+    def prune(
+        self,
+        thread_ids: Sequence[str],
+        *,
+        keep_last: int = 1,
+        max_results: int = 10000,
+    ) -> None:
+        """Prune old checkpoints for the given threads per namespace.
+
+        Retains the ``keep_last`` most-recent checkpoints **per checkpoint
+        namespace** and removes the rest, along with their associated write
+        keys and key-registry sorted sets.
+
+        Each namespace (root ``""`` and any subgraph namespaces) is treated as
+        an independent checkpoint chain, so ``keep_last`` is applied separately
+        within each namespace.  Checkpoint blobs are intentionally *not* deleted
+        because blob keys are shared across checkpoints via channel versioning —
+        the same blob version may be referenced by both kept and evicted
+        checkpoints.
+
+        Args:
+            thread_ids: Thread IDs whose old checkpoints should be pruned.
+            keep_last: Number of recent checkpoints to retain per namespace.
+                Use ``keep_last=1`` to keep only the latest checkpoint (default).
+                Use ``keep_last=0`` to remove all checkpoints for the thread.
+                For multi-tool interrupt chains, ``max(10, n_tool_calls * 3 + 5)``
+                is a safe heuristic.
+            max_results: Maximum number of checkpoints fetched from the index
+                per thread in a single query.  Threads with more checkpoints
+                than this limit will only have the first ``max_results`` entries
+                considered for pruning.  Raise this value for very long-lived
+                threads.  Defaults to 10 000.
+        """
+        # Validate input
+        if not thread_ids:
+            raise ValueError("``thread_ids`` must be a non-empty sequence")
+        if keep_last < 0:
+            raise ValueError(f"``keep_last`` must be >= 0, got {keep_last}")
+        if max_results < 1:
+            raise ValueError(f"``max_results`` must be >= 1, got {max_results}")
+        
+        
+        for thread_id in thread_ids:
+            storage_safe_thread_id = to_storage_safe_id(thread_id)
+
+            # Fetch all checkpoints for this thread across all namespaces
+            checkpoint_query = FilterQuery(
+                filter_expression=Tag("thread_id") == storage_safe_thread_id,
+                return_fields=["checkpoint_ns", "checkpoint_id"],
+                num_results=max_results,
+            )
+            checkpoint_results = self.checkpoints_index.search(checkpoint_query)
+
+            if not checkpoint_results.docs:
+                continue
+
+            # Group by namespace — each namespace is an independent checkpoint chain
+            # (root graph vs. subgraph checkpoints must be evicted independently).
+            by_ns: Dict[str, list] = defaultdict(list)
+            for doc in checkpoint_results.docs:
+                ns = getattr(doc, "checkpoint_ns", "")
+                by_ns[ns].append(doc)
+
+            # Within each namespace sort newest-first (ULIDs are lex time-ordered)
+            # and collect checkpoints that fall outside the keep_last window.
+            to_evict = []
+            # Track namespaces where every checkpoint is evicted so we can clean
+            # up the checkpoint_latest:{thread}:{ns} pointer key too.
+            fully_evicted_ns: set = set()
+            for ns, ns_docs in by_ns.items():
+                ns_sorted = sorted(
+                    ns_docs,
+                    key=lambda d: getattr(d, "checkpoint_id", ""),
+                    reverse=True,
+                )
+                ns_evicted = ns_sorted[keep_last:]
+                to_evict.extend(ns_evicted)
+                if len(ns_evicted) == len(ns_docs): # nothing left in this namespace
+                    fully_evicted_ns.add(ns)
+                    
+            if not to_evict:
+                continue
+
+            keys_to_delete = []
+            for doc in to_evict:
+                checkpoint_ns = getattr(doc, "checkpoint_ns", "")
+                checkpoint_id = getattr(doc, "checkpoint_id", "")
+
+                # Evict checkpoint document
+                keys_to_delete.append(
+                    self._make_redis_checkpoint_key_cached(
+                        thread_id, checkpoint_ns, checkpoint_id
+                    )
+                )
+
+                # Evict all write documents for this checkpoint
+                writes_query = FilterQuery(
+                    filter_expression=(
+                        (Tag("thread_id") == storage_safe_thread_id)
+                        & (Tag("checkpoint_id") == checkpoint_id)
+                    ),
+                    return_fields=["checkpoint_ns", "checkpoint_id", "task_id", "idx"],
+                    num_results=max_results,
+                )
+                writes_results = self.checkpoint_writes_index.search(writes_query)
+                for wdoc in writes_results.docs:
+                    keys_to_delete.append(
+                        self._make_redis_checkpoint_writes_key(
+                            storage_safe_thread_id,
+                            getattr(wdoc, "checkpoint_ns", ""),
+                            getattr(wdoc, "checkpoint_id", ""),
+                            getattr(wdoc, "task_id", ""),
+                            int(getattr(wdoc, "idx", 0)),
+                        )
+                    )
+
+                # Evict key-registry sorted set for this checkpoint
+                if self._key_registry:
+                    keys_to_delete.append(
+                        self._key_registry.make_write_keys_zset_key(
+                            thread_id, checkpoint_ns, checkpoint_id
+                        )
+                    )
+
+            # Delete checkpoint_latest pointers for fully_evicted namespaces.
+            # ns values here come from the index and are already storage-safe,
+            # matching the format written by put(): checkpoint-latest:{tid}:{safe_ns}
+            for ns in fully_evicted_ns:
+                keys_to_delete.append(
+                    f"checkpoint_latest:{storage_safe_thread_id}:{ns}"
+                )
+            
+            if self.cluster_mode:
+                for key in keys_to_delete:
+                    self._redis.delete(key)
+            else:
+                pipeline = self._redis.pipeline()
+                for key in keys_to_delete:
+                    pipeline.delete(key)
+                pipeline.execute()
 
 
 __all__ = [
