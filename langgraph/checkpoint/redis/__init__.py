@@ -1727,8 +1727,7 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
             raise ValueError(f"``keep_last`` must be >= 0, got {keep_last}")
         if max_results < 1:
             raise ValueError(f"``max_results`` must be >= 1, got {max_results}")
-        
-        
+
         for thread_id in thread_ids:
             storage_safe_thread_id = to_storage_safe_id(thread_id)
 
@@ -1764,9 +1763,9 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
                 )
                 ns_evicted = ns_sorted[keep_last:]
                 to_evict.extend(ns_evicted)
-                if len(ns_evicted) == len(ns_docs): # nothing left in this namespace
+                if len(ns_evicted) == len(ns_docs):  # nothing left in this namespace
                     fully_evicted_ns.add(ns)
-                    
+
             if not to_evict:
                 continue
 
@@ -1818,7 +1817,7 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
                 keys_to_delete.append(
                     f"checkpoint_latest:{storage_safe_thread_id}:{ns}"
                 )
-            
+
             if self.cluster_mode:
                 for key in keys_to_delete:
                     self._redis.delete(key)

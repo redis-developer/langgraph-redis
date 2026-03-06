@@ -1,7 +1,7 @@
 """Type definitions and configuration dataclasses for Redis middleware."""
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, TypeVar, Union
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, TypeVar, Union
 
 from redis import Redis
 from redis.asyncio import Redis as AsyncRedis
@@ -66,16 +66,28 @@ class SemanticCacheConfig(MiddlewareConfig):
 class ToolCacheConfig(MiddlewareConfig):
     """Configuration for ToolResultCacheMiddleware.
 
-    Uses SemanticCache with tool_name filtering for tool result caching.
+    Uses exact-match Redis GET/SET for deterministic tool result caching.
+    The cache key is ``{name}:{tool_name}:{sorted_json_args}``.
 
     Attributes:
-        name: Index name for the tool cache.
-        distance_threshold: Maximum distance for cache hits.
+        name: Key prefix for the tool cache.
+        distance_threshold: Deprecated -- ignored. Kept for backward
+            compatibility. Tool cache uses exact-match, not vector similarity.
         ttl_seconds: Time-to-live for cache entries in seconds.
-        vectorizer: Optional vectorizer for embeddings.
+        vectorizer: Deprecated -- ignored. Kept for backward compatibility.
+            Tool cache does not use vector embeddings.
         cacheable_tools: List of tool names to cache. If None, all tools
             except excluded_tools are cached.
         excluded_tools: List of tool names to never cache.
+        volatile_arg_names: Set of argument names whose presence prevents
+            caching (e.g. {"timestamp", "now", "date"}). Checked recursively
+            at any nesting depth. None disables the check.
+        ignored_arg_names: Set of argument names to strip from the cache key
+            before serialization (e.g. {"request_id", "trace_id"}). Stripped
+            at the top level only. None disables stripping.
+        side_effect_prefixes: Tuple of tool-name prefixes that indicate
+            side-effecting tools which should never be cached
+            (e.g. ("send_", "delete_", "create_")). None disables the check.
     """
 
     name: str = "toolcache"
@@ -84,6 +96,9 @@ class ToolCacheConfig(MiddlewareConfig):
     vectorizer: Optional[Any] = None
     cacheable_tools: Optional[List[str]] = None
     excluded_tools: List[str] = field(default_factory=list)
+    volatile_arg_names: Optional[Set[str]] = None
+    ignored_arg_names: Optional[Set[str]] = None
+    side_effect_prefixes: Optional[Tuple[str, ...]] = None
 
 
 @dataclass

@@ -1,13 +1,16 @@
 """Tool result cache middleware.
 
 This module provides a middleware that caches tool call results
-based on semantic similarity using Redis and vector embeddings.
+using exact-match key-value lookup in Redis. Tool caching is
+deterministic: same tool + same args = same result. This uses
+direct Redis GET/SET instead of vector similarity.
+
 Compatible with LangChain's AgentMiddleware protocol for use with create_agent.
 """
 
 import json
 import logging
-from typing import Any, Awaitable, Callable, Union
+from typing import Any, Awaitable, Callable, Dict, Set, Tuple, Union
 
 from langchain.agents.middleware.types import (
     ModelCallResult,
@@ -17,21 +20,43 @@ from langchain.agents.middleware.types import (
 from langchain_core.messages import ToolMessage as LangChainToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
-from redisvl.extensions.cache.llm import SemanticCache
 
 from .aio import AsyncRedisMiddleware
 from .types import ToolCacheConfig
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_VOLATILE_ARG_NAMES: frozenset[str] = frozenset(
+    {
+        "timestamp",
+        "current_time",
+        "now",
+        "date",
+        "today",
+        "current_date",
+        "current_timestamp",
+    }
+)
+
+DEFAULT_SIDE_EFFECT_PREFIXES: Tuple[str, ...] = (
+    "send_",
+    "delete_",
+    "create_",
+    "update_",
+    "remove_",
+    "write_",
+    "post_",
+    "put_",
+    "patch_",
+)
+
 
 class ToolResultCacheMiddleware(AsyncRedisMiddleware):
-    """Middleware that caches tool call results based on semantic similarity.
+    """Middleware that caches tool call results using exact-match lookup.
 
-    Uses redisvl.extensions.cache.llm.SemanticCache to store and retrieve
-    cached tool results. When a tool call is semantically similar to a previous
-    call (within the distance threshold), the cached result is returned
-    without executing the tool.
+    Uses direct Redis GET/SET for deterministic tool result caching.
+    When a tool is called with the same arguments as a previous call,
+    the cached result is returned without executing the tool.
 
     Tool caching is especially useful for expensive operations like:
     - API calls to external services
@@ -64,7 +89,6 @@ class ToolResultCacheMiddleware(AsyncRedisMiddleware):
         ```
     """
 
-    _cache: SemanticCache
     _config: ToolCacheConfig
 
     def __init__(self, config: ToolCacheConfig) -> None:
@@ -77,31 +101,12 @@ class ToolResultCacheMiddleware(AsyncRedisMiddleware):
         self._config = config
 
     async def _setup_async(self) -> None:
-        """Set up the SemanticCache instance for tool results.
+        """Set up the tool cache.
 
-        Note: SemanticCache from redisvl uses synchronous Redis operations
-        internally, so we must provide redis_url and let it manage its own
-        sync connection rather than passing our async client.
+        No additional setup needed — the tool cache uses the async Redis
+        client from the base class directly for GET/SET operations.
         """
-        cache_kwargs: dict[str, Any] = {
-            "name": self._config.name,
-            "distance_threshold": self._config.distance_threshold,
-        }
-
-        # SemanticCache requires a sync Redis connection
-        # Use redis_url to let it create its own connection
-        if self._config.redis_url:
-            cache_kwargs["redis_url"] = self._config.redis_url
-        elif self._config.connection_args:
-            cache_kwargs["connection_kwargs"] = self._config.connection_args
-
-        if self._config.vectorizer is not None:
-            cache_kwargs["vectorizer"] = self._config.vectorizer
-
-        if self._config.ttl_seconds is not None:
-            cache_kwargs["ttl"] = self._config.ttl_seconds
-
-        self._cache = SemanticCache(**cache_kwargs)
+        pass
 
     def _is_tool_cacheable_by_config(self, tool_name: str) -> bool:
         """Check if a tool's results should be cached based on config.
@@ -119,14 +124,86 @@ class ToolResultCacheMiddleware(AsyncRedisMiddleware):
         # Otherwise, cache all tools except excluded ones
         return tool_name not in self._config.excluded_tools
 
+    def _has_volatile_args(self, args: Dict[str, Any]) -> bool:
+        """Check if args contain volatile argument names at any nesting depth.
+
+        Args:
+            args: The tool arguments dict.
+
+        Returns:
+            True if any key in args (recursively) matches a configured
+            volatile arg name, False otherwise.
+        """
+        volatile_names = self._config.volatile_arg_names
+        if not volatile_names:
+            return False
+        for key, value in args.items():
+            if key in volatile_names:
+                return True
+            if isinstance(value, dict):
+                if self._has_volatile_args(value):
+                    return True
+        return False
+
+    def _has_side_effect_prefix(self, tool_name: str) -> bool:
+        """Check if tool name starts with a configured side-effect prefix.
+
+        Args:
+            tool_name: The name of the tool.
+
+        Returns:
+            True if the tool name matches a side-effect prefix.
+        """
+        prefixes = self._config.side_effect_prefixes
+        if not prefixes:
+            return False
+        return tool_name.startswith(prefixes)
+
+    def _strip_ignored_args(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Return a copy of args with ignored names removed (top-level only).
+
+        Args:
+            args: The tool arguments dict.
+
+        Returns:
+            A new dict without the ignored keys, or the original if nothing
+            to strip.
+        """
+        ignored = self._config.ignored_arg_names
+        if not ignored:
+            return args
+        return {k: v for k, v in args.items() if k not in ignored}
+
+    @staticmethod
+    def _extract_args(request: ToolCallRequest) -> Dict[str, Any]:
+        """Extract args dict from a request (dict or ToolCallRequest).
+
+        Args:
+            request: The tool call request.
+
+        Returns:
+            The arguments dict.
+        """
+        if isinstance(request, dict):
+            return request.get("args", {})
+        tool_call = getattr(request, "tool_call", None)
+        if isinstance(tool_call, dict):
+            return tool_call.get("args", {})
+        return {}
+
     def _is_tool_cacheable(self, request: ToolCallRequest) -> bool:
         """Check if a tool's results should be cached.
 
-        Checks both tool metadata (LangChain standard) and middleware config.
-        Tool metadata takes precedence over config.
+        Uses a priority chain inspired by SQL function volatility and
+        MCP ToolAnnotations:
 
-        The tool's metadata can specify {"cacheable": True/False} to override
-        the middleware config. This follows LangChain's pattern for tool metadata.
+        1. ``metadata["cacheable"]`` — explicit override (highest priority)
+        2. ``metadata["destructive"]`` — never cache destructive tools
+        3. ``metadata["volatile"]`` — never cache volatile tools
+        4. ``metadata["read_only"] and metadata["idempotent"]`` — cache
+        5. Side-effect prefix match — never cache
+        6. Volatile arg name in call args — never cache
+        7. Config whitelist / blacklist — existing fallback
 
         Args:
             request: The tool call request containing the tool object.
@@ -143,26 +220,49 @@ class ToolResultCacheMiddleware(AsyncRedisMiddleware):
             tool_name = tool_call.get("name", "") if isinstance(tool_call, dict) else ""
             tool = getattr(request, "tool", None)
 
-        # Check tool metadata first (LangChain standard pattern)
+        # --- Priority 1: explicit cacheable flag (highest) ---
+        metadata: Dict[str, Any] = {}
         if tool is not None:
             metadata = getattr(tool, "metadata", None) or {}
             if "cacheable" in metadata:
                 return bool(metadata["cacheable"])
 
-        # Fall back to config-based check
+        # --- Priority 2: destructive metadata → never cache ---
+        if metadata.get("destructive") is True:
+            return False
+
+        # --- Priority 3: volatile metadata → never cache ---
+        if metadata.get("volatile") is True:
+            return False
+
+        # --- Priority 4: read_only + idempotent → cache ---
+        if metadata.get("read_only") is True and metadata.get("idempotent") is True:
+            return True
+
+        # --- Priority 5: side-effect prefix → never cache ---
+        if self._has_side_effect_prefix(tool_name):
+            return False
+
+        # --- Priority 6: volatile arg names → never cache ---
+        args = self._extract_args(request)
+        if self._has_volatile_args(args):
+            return False
+
+        # --- Priority 7: config whitelist / blacklist ---
         return self._is_tool_cacheable_by_config(tool_name)
 
     def _build_cache_key(self, request: ToolCallRequest) -> str:
-        """Build a cache key from the tool request.
+        """Build a deterministic cache key from the tool request.
 
-        Creates a string representation of the tool call that can be
-        used for semantic similarity matching.
+        Creates an exact-match Redis key from the tool name and sorted
+        JSON arguments. This ensures that identical tool calls always
+        produce the same key, and different calls always produce different keys.
 
         Args:
             request: The tool call request (dict or LangChain type).
 
         Returns:
-            A string key for caching.
+            A deterministic string key for Redis GET/SET.
         """
         # Support both dict-style and LangChain ToolCallRequest types
         if isinstance(request, dict):
@@ -177,9 +277,12 @@ class ToolResultCacheMiddleware(AsyncRedisMiddleware):
                 tool_name = ""
                 args = {}
 
-        # Create a human-readable representation for semantic matching
-        args_str = json.dumps(args, sort_keys=True)
-        return f"tool:{tool_name} args:{args_str}"
+        # Strip ignored args before building the key
+        effective_args = self._strip_ignored_args(args)
+
+        # Deterministic key: config name + tool name + sorted JSON args
+        args_str = json.dumps(effective_args, sort_keys=True)
+        return f"{self._config.name}:{tool_name}:{args_str}"
 
     def _serialize_tool_result(self, value: Any) -> str:
         """Serialize a tool result to a JSON string for caching.
@@ -253,10 +356,10 @@ class ToolResultCacheMiddleware(AsyncRedisMiddleware):
             [ToolCallRequest], Awaitable[Union[LangChainToolMessage, Command]]
         ],
     ) -> Union[LangChainToolMessage, Command]:
-        """Wrap a tool call with caching.
+        """Wrap a tool call with exact-match caching.
 
         This method is part of the LangChain AgentMiddleware protocol.
-        Checks the cache for a semantically similar tool call. If found,
+        Checks the cache for an exact tool+args match. If found,
         returns the cached result. Otherwise, calls the handler and
         caches the result.
 
@@ -291,16 +394,17 @@ class ToolResultCacheMiddleware(AsyncRedisMiddleware):
 
         cache_key = self._build_cache_key(request)
 
-        # Try to get from cache using async method
+        # Try to get from cache using exact-match Redis GET
         try:
-            cached = await self._cache.acheck(prompt=cache_key)
-            if cached:
-                # Cache hit - return cached result
-                cached_response = cached[0].get("response")
-                if cached_response:
-                    return self._deserialize_tool_result(
-                        cached_response, tool_name, tool_call_id
-                    )
+            cached_response = await self._redis.get(cache_key)
+            if cached_response is not None:
+                # Decode bytes to string if needed
+                if isinstance(cached_response, bytes):
+                    cached_response = cached_response.decode("utf-8")
+                logger.debug(f"Tool cache hit for key: {cache_key[:80]}")
+                return self._deserialize_tool_result(
+                    cached_response, tool_name, tool_call_id
+                )
         except Exception as e:
             if not self._graceful_degradation:
                 raise
@@ -309,10 +413,16 @@ class ToolResultCacheMiddleware(AsyncRedisMiddleware):
         # Cache miss - call handler
         result = await handler(request)
 
-        # Store in cache using async method
+        # Store in cache using Redis SET with optional TTL
         try:
             result_str = self._serialize_tool_result(result)
-            await self._cache.astore(prompt=cache_key, response=result_str)
+            if self._config.ttl_seconds is not None:
+                await self._redis.set(
+                    cache_key, result_str, ex=self._config.ttl_seconds
+                )
+            else:
+                await self._redis.set(cache_key, result_str)
+            logger.debug(f"Tool cache stored for key: {cache_key[:80]}")
         except Exception as e:
             if not self._graceful_degradation:
                 raise
