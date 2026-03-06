@@ -769,8 +769,8 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         # need the storage-safe form that was used when those keys were originally written.
         checkpoint_data = []
         for doc in checkpoint_results.docs:
-            safe_ns = getattr(doc, "checkpoint_ns", "") # storage-safe: for f-strings
-            raw_ns = from_storage_safe_str(safe_ns) # raw: for key builder method
+            safe_ns = getattr(doc, "checkpoint_ns", "")  # storage-safe: for f-strings
+            raw_ns = from_storage_safe_str(safe_ns)  # raw: for key builder method
             checkpoint_id = getattr(doc, "checkpoint_id", "")
             checkpoint_data.append((raw_ns, safe_ns, checkpoint_id))
 
@@ -828,13 +828,13 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
             keep_last: Checkpoints to retain per namespace.  Any value >= 1
                 is a no-op for shallow savers.  Pass ``0`` to delete all.
         """
-        # Validate input 
+        # Validate input
         if not thread_ids:
             raise ValueError(f"``thread_ids`` must be a non-empty sequence")
-        
+
         if keep_last < 0:
             raise ValueError(f"``keep_last`` must be >= 0, got {keep_last}")
-        
+
         if keep_last >= 1:
             return
         for thread_id in thread_ids:

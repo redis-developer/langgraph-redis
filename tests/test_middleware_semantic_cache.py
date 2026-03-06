@@ -124,7 +124,11 @@ class TestSemanticCacheMiddleware:
             # Cached response is stored as JSON, so we simulate that format
             mock_cache.acheck = AsyncMock(
                 return_value=[
-                    {"response": '{"content": "Cached answer"}', "metadata": {}}
+                    {
+                        "prompt": "What is Python?",
+                        "response": '{"content": "Cached answer"}',
+                        "metadata": {},
+                    }
                 ]
             )
             mock_cache_class.return_value = mock_cache
@@ -391,3 +395,57 @@ class TestSemanticCacheMiddleware:
             # Verify SemanticCache was created with distance_threshold
             call_kwargs = mock_cache_class.call_args.kwargs
             assert call_kwargs.get("distance_threshold") == 0.2
+
+    @pytest.mark.asyncio
+    async def test_similar_prompt_returns_cached_response(self) -> None:
+        """Test that semantically similar (but not identical) prompts return cache hits.
+
+        The semantic cache relies on distance_threshold to control matching.
+        There is no exact-match guard — if the vector search returns a hit
+        within the threshold, the cached response is returned.
+        """
+        from langgraph.middleware.redis.semantic_cache import SemanticCacheMiddleware
+
+        mock_client = AsyncMock()
+        config = SemanticCacheConfig(redis_client=mock_client)
+
+        with patch(
+            "langgraph.middleware.redis.semantic_cache.SemanticCache"
+        ) as mock_cache_class:
+            mock_cache = MagicMock()
+            # Simulate a semantic hit: the stored prompt differs from the query
+            # but is within distance_threshold
+            mock_cache.acheck = AsyncMock(
+                return_value=[
+                    {
+                        "prompt": "What is the Python programming language?",
+                        "response": '{"content": "Python is a language."}',
+                        "metadata": {},
+                    }
+                ]
+            )
+            mock_cache_class.return_value = mock_cache
+
+            middleware = SemanticCacheMiddleware(config)
+            await middleware._ensure_initialized_async()
+
+            handler_called = []
+
+            async def mock_handler(request: dict) -> dict:
+                handler_called.append(True)
+                return {"content": "New answer"}
+
+            # Query with a different but semantically similar prompt
+            request = {
+                "messages": [{"role": "user", "content": "Tell me about Python"}]
+            }
+            result = await middleware.awrap_model_call(request, mock_handler)
+
+            from langchain.agents.middleware.types import ModelResponse
+
+            assert isinstance(result, ModelResponse)
+            assert result.result[0].content == "Python is a language."
+            assert len(handler_called) == 0, (
+                "Handler should NOT be called — semantic similarity "
+                "within threshold should return cached response"
+            )

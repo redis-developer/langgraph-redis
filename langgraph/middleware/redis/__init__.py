@@ -18,7 +18,11 @@ from langgraph.middleware.redis.composition import (
 from langgraph.middleware.redis.conversation_memory import ConversationMemoryMiddleware
 from langgraph.middleware.redis.semantic_cache import SemanticCacheMiddleware
 from langgraph.middleware.redis.semantic_router import SemanticRouterMiddleware
-from langgraph.middleware.redis.tool_cache import ToolResultCacheMiddleware
+from langgraph.middleware.redis.tool_cache import (
+    DEFAULT_SIDE_EFFECT_PREFIXES,
+    DEFAULT_VOLATILE_ARG_NAMES,
+    ToolResultCacheMiddleware,
+)
 from langgraph.middleware.redis.types import (
     ConversationMemoryConfig,
     MiddlewareConfig,
@@ -53,6 +57,9 @@ __all__ = [
     "from_configs",
     "create_caching_stack",
     "IntegratedRedisMiddleware",
+    # Cache key constants
+    "DEFAULT_VOLATILE_ARG_NAMES",
+    "DEFAULT_SIDE_EFFECT_PREFIXES",
     # Vectorizer utilities
     "AsyncEmbeddingVectorizer",
     "LangChainVectorizer",
