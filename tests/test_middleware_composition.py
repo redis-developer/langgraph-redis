@@ -208,10 +208,7 @@ class TestFromConfigs:
 
         mock_client = AsyncMock()
 
-        with (
-            patch("langgraph.middleware.redis.semantic_cache.SemanticCache"),
-            patch("langgraph.middleware.redis.tool_cache.SemanticCache"),
-        ):
+        with patch("langgraph.middleware.redis.semantic_cache.SemanticCache"):
             stack = from_configs(
                 redis_client=mock_client,
                 configs=[
@@ -251,10 +248,7 @@ class TestCreateCachingStack:
 
         mock_client = AsyncMock()
 
-        with (
-            patch("langgraph.middleware.redis.semantic_cache.SemanticCache"),
-            patch("langgraph.middleware.redis.tool_cache.SemanticCache"),
-        ):
+        with patch("langgraph.middleware.redis.semantic_cache.SemanticCache"):
             stack = create_caching_stack(
                 redis_client=mock_client,
                 semantic_cache_ttl=3600,
@@ -271,10 +265,7 @@ class TestCreateCachingStack:
 
         mock_client = AsyncMock()
 
-        with (
-            patch("langgraph.middleware.redis.semantic_cache.SemanticCache"),
-            patch("langgraph.middleware.redis.tool_cache.SemanticCache"),
-        ):
+        with patch("langgraph.middleware.redis.semantic_cache.SemanticCache"):
             stack = create_caching_stack(
                 redis_client=mock_client,
                 cacheable_tools=["search", "calculate"],

@@ -2117,7 +2117,7 @@ class AsyncRedisSaver(
             raise ValueError(f"``keep_last`` must be >= 0, got {keep_last}")
         if max_results < 1:
             raise ValueError(f"``max_results`` must be >= 1, got {max_results}")
-        
+
         for thread_id in thread_ids:
             storage_safe_thread_id = to_storage_safe_id(thread_id)
 
@@ -2153,7 +2153,7 @@ class AsyncRedisSaver(
                 )
                 ns_evicted = ns_sorted[keep_last:]
                 to_evict.extend(ns_evicted)
-                if len(ns_evicted) == len(ns_docs): # nothing left in this namespace
+                if len(ns_evicted) == len(ns_docs):  # nothing left in this namespace
                     fully_evicted_ns.add(ns)
 
             if not to_evict:
@@ -2180,9 +2180,7 @@ class AsyncRedisSaver(
                     return_fields=["checkpoint_ns", "checkpoint_id", "task_id", "idx"],
                     num_results=max_results,
                 )
-                writes_results = await self.checkpoint_writes_index.search(
-                    writes_query
-                )
+                writes_results = await self.checkpoint_writes_index.search(writes_query)
                 for wdoc in writes_results.docs:
                     keys_to_delete.append(
                         self._make_redis_checkpoint_writes_key(
@@ -2201,12 +2199,11 @@ class AsyncRedisSaver(
                             thread_id, checkpoint_ns, checkpoint_id
                         )
                     )
-            
+
             for ns in fully_evicted_ns:
                 keys_to_delete.append(
                     f"checkpoint_latest:{storage_safe_thread_id}:{ns}"
                 )
-            
 
             if self.cluster_mode:
                 for key in keys_to_delete:

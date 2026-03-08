@@ -404,7 +404,6 @@ class SemanticCacheMiddleware(AsyncRedisMiddleware):
         try:
             cached = await self._cache.acheck(prompt=prompt)
             if cached:
-                # Cache hit - return cached response
                 cached_response = cached[0].get("response")
                 if cached_response:
                     logger.debug(f"Cache hit for prompt: {prompt[:50]}...")
