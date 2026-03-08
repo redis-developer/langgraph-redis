@@ -22,6 +22,22 @@ def redis_container():
     container.stop()
 
 
+@pytest.fixture(scope="module")
+def default_vectorizer():
+    """Pre-load and keep the default HuggingFace vectorizer alive for the module.
+
+    redisvl's SemanticCache uses a HuggingFace SentenceTransformer whose
+    initialization relies on a global httpx.Client in huggingface_hub.  When
+    many SentenceTransformer instances are created and garbage-collected across
+    tests (especially in the full test suite), the global client can be closed
+    before a subsequent test tries to use it.  Keeping a single vectorizer
+    reference alive for the module prevents this.
+    """
+    from redisvl.utils.vectorize import HFTextVectorizer
+
+    return HFTextVectorizer()
+
+
 @pytest.fixture
 def redis_url(redis_container):
     """Get Redis URL from container."""
@@ -37,7 +53,9 @@ class TestCreateAgentWithMiddleware:
         not os.environ.get("OPENAI_API_KEY"), reason="OPENAI_API_KEY not set"
     )
     @pytest.mark.asyncio
-    async def test_semantic_cache_with_real_agent(self, redis_url: str):
+    async def test_semantic_cache_with_real_agent(
+        self, redis_url: str, default_vectorizer
+    ):
         """Test SemanticCacheMiddleware with a real LangChain agent."""
         from langchain.agents import create_agent
         from langchain_core.messages import HumanMessage
@@ -64,6 +82,7 @@ class TestCreateAgentWithMiddleware:
                 name=cache_name,
                 ttl_seconds=60,
                 distance_threshold=0.1,
+                vectorizer=default_vectorizer,
             )
         )
 
@@ -219,7 +238,7 @@ class TestCreateAgentWithMiddleware:
             await middleware.aclose()
 
     @pytest.mark.asyncio
-    async def test_cache_miss_handler_return(self, redis_url: str):
+    async def test_cache_miss_handler_return(self, redis_url: str, default_vectorizer):
         """Test what the handler returns on cache miss.
 
         This verifies the handler return type that our middleware must handle.
@@ -241,6 +260,7 @@ class TestCreateAgentWithMiddleware:
                 redis_url=redis_url,
                 name=cache_name,
                 ttl_seconds=60,
+                vectorizer=default_vectorizer,
             )
         )
 
@@ -374,7 +394,9 @@ class TestCreateAgentWithMiddleware:
             await middleware.aclose()
 
     @pytest.mark.asyncio
-    async def test_multiple_middleware_cache_miss(self, redis_url: str):
+    async def test_multiple_middleware_cache_miss(
+        self, redis_url: str, default_vectorizer
+    ):
         """Test multiple middleware together - simulating notebook scenario.
 
         This is the exact pattern used in middleware_composition.ipynb
@@ -400,6 +422,7 @@ class TestCreateAgentWithMiddleware:
                 redis_url=redis_url,
                 name=cache_name,
                 ttl_seconds=60,
+                vectorizer=default_vectorizer,
             )
         )
 
@@ -459,7 +482,9 @@ class TestCreateAgentWithMiddleware:
             await tool_cache.aclose()
 
     @pytest.mark.asyncio
-    async def test_multiple_middleware_with_tool_calls(self, redis_url: str):
+    async def test_multiple_middleware_with_tool_calls(
+        self, redis_url: str, default_vectorizer
+    ):
         """Test middleware with a response that HAS tool_calls.
 
         The routing issue happens when the model wants to call a tool.
@@ -482,6 +507,7 @@ class TestCreateAgentWithMiddleware:
                 name=cache_name,
                 ttl_seconds=60,
                 cache_final_only=True,  # Should NOT cache tool call responses
+                vectorizer=default_vectorizer,
             )
         )
 
@@ -638,7 +664,9 @@ class TestCreateAgentWithMiddleware:
             await middleware.aclose()
 
     @pytest.mark.asyncio
-    async def test_tool_calling_flow_skips_cache_on_tool_results(self, redis_url: str):
+    async def test_tool_calling_flow_skips_cache_on_tool_results(
+        self, redis_url: str, default_vectorizer
+    ):
         """Test that cache is skipped when request contains tool results.
 
         This is the bug that caused KeyError: 'model' in notebooks.
@@ -661,6 +689,7 @@ class TestCreateAgentWithMiddleware:
                 name=cache_name,
                 ttl_seconds=60,
                 cache_final_only=True,
+                vectorizer=default_vectorizer,
             )
         )
 

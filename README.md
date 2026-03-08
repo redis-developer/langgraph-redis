@@ -444,10 +444,24 @@ result = await agent.ainvoke({"messages": [HumanMessage(content="Calculate 25 * 
 
 ### Tool Cacheability
 
-Control which tools are cached using LangChain's native metadata:
+The tool cache uses a priority chain (inspired by SQL function volatility and MCP `ToolAnnotations`) to decide whether a tool call should be cached. The checks are evaluated in order — the first match wins:
+
+| Priority | Check | Result |
+|----------|-------|--------|
+| 1 | `metadata["cacheable"]` is set | Use its boolean value (highest priority) |
+| 2 | `metadata["destructive"] == True` | Never cache |
+| 3 | `metadata["volatile"] == True` | Never cache |
+| 4 | `metadata["read_only"] and metadata["idempotent"]` | Cache |
+| 5 | Tool name matches a side-effect prefix | Never cache |
+| 6 | Call args contain a volatile arg name | Never cache |
+| 7 | Config whitelist / blacklist | Existing fallback |
+
+#### Tool Metadata
+
+Control cacheability per-tool using LangChain's native metadata:
 
 ```python
-# Option 1: Set metadata after @tool decoration
+# Explicit cacheable flag (priority 1 — overrides everything)
 @tool
 def search(query: str) -> str:
     """Search the web."""
@@ -455,7 +469,29 @@ def search(query: str) -> str:
 
 search.metadata = {"cacheable": True}
 
-# Option 2: Use StructuredTool with metadata
+# MCP-style annotations (priorities 2–4)
+@tool
+def send_email(to: str, body: str) -> str:
+    """Send an email."""
+    return smtp_send(to, body)
+
+send_email.metadata = {"destructive": True}  # Never cached
+
+@tool
+def get_exchange_rate(pair: str) -> str:
+    """Get live exchange rate."""
+    return fetch_rate(pair)
+
+get_exchange_rate.metadata = {"volatile": True}  # Never cached
+
+@tool
+def lookup_zip(code: str) -> str:
+    """Look up a ZIP code."""
+    return zip_db.get(code)
+
+lookup_zip.metadata = {"read_only": True, "idempotent": True}  # Cached
+
+# StructuredTool with metadata
 from langchain_core.tools import StructuredTool
 
 get_weather = StructuredTool.from_function(
@@ -465,6 +501,56 @@ get_weather = StructuredTool.from_function(
     metadata={"cacheable": False},  # Real-time data
 )
 ```
+
+#### Advanced Cache Key Configuration
+
+`ToolCacheConfig` supports three opt-in fields for fine-grained cache key control. All default to `None` (disabled), so existing behavior is unchanged.
+
+```python
+from langgraph.middleware.redis import (
+    ToolResultCacheMiddleware,
+    ToolCacheConfig,
+    DEFAULT_VOLATILE_ARG_NAMES,
+    DEFAULT_SIDE_EFFECT_PREFIXES,
+)
+
+tool_cache = ToolResultCacheMiddleware(
+    ToolCacheConfig(
+        redis_url="redis://localhost:6379",
+        name="tool_cache",
+        ttl_seconds=1800,
+
+        # --- Volatile arg names (priority 6) ---
+        # Tool calls containing these arg names at any nesting depth
+        # are never cached. Useful for temporal arguments.
+        # Use the built-in defaults or provide your own set.
+        volatile_arg_names=DEFAULT_VOLATILE_ARG_NAMES,
+        # DEFAULT_VOLATILE_ARG_NAMES includes:
+        #   "timestamp", "current_time", "now", "date",
+        #   "today", "current_date", "current_timestamp"
+
+        # --- Ignored arg names ---
+        # These arg names are stripped from the cache key before
+        # serialization. Two calls differing only in ignored args
+        # will share the same cache entry.
+        ignored_arg_names={"request_id", "trace_id", "correlation_id"},
+
+        # --- Side-effect prefixes (priority 5) ---
+        # Tool names starting with these prefixes are never cached.
+        # Use the built-in defaults or provide your own tuple.
+        side_effect_prefixes=DEFAULT_SIDE_EFFECT_PREFIXES,
+        # DEFAULT_SIDE_EFFECT_PREFIXES includes:
+        #   "send_", "delete_", "create_", "update_", "remove_",
+        #   "write_", "post_", "put_", "patch_"
+    )
+)
+```
+
+**Volatile arg names** — When a tool call's arguments contain a key matching one of these names (checked recursively at any nesting depth), the call is never cached. This prevents stale results for time-dependent queries like `{"query": "weather", "timestamp": 1709827200}`.
+
+**Ignored arg names** — Per-request noise like `request_id` or `trace_id` inflates cache misses without affecting the tool's output. Stripping them from the cache key means two otherwise-identical calls will share a cache entry regardless of their tracking IDs.
+
+**Side-effect prefixes** — Tools whose names start with mutating prefixes (e.g., `send_email`, `delete_record`, `create_user`) are never cached, since their results represent actions that should always execute. This can be overridden per-tool with `metadata["cacheable"] = True`.
 
 ### Middleware Composition
 
