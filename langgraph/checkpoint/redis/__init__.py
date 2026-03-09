@@ -1660,34 +1660,39 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
         self,
         thread_ids: Sequence[str],
         *,
-        keep_last: int = 1,
+        strategy: str = "keep_latest",
+        keep_last: Optional[int] = None,
         max_results: int = 10000,
     ) -> None:
         """Prune old checkpoints for the given threads per namespace.
 
-        Retains the ``keep_last`` most-recent checkpoints **per checkpoint
-        namespace** and removes the rest, along with their associated write
-        keys and key-registry sorted sets.
+        Retains the most-recent checkpoints **per checkpoint namespace** and
+        removes the rest, along with their associated write keys and
+        key-registry sorted sets.
 
         Each namespace (root ``""`` and any subgraph namespaces) is treated as
-        an independent checkpoint chain, so ``keep_last`` is applied separately
-        within each namespace.  Channel values are stored inline within each
-        checkpoint document, so they are automatically removed when the
-        checkpoint document is deleted.
+        an independent checkpoint chain.  Channel values are stored inline
+        within each checkpoint document, so they are automatically removed
+        when the checkpoint document is deleted.
 
         Args:
             thread_ids: Thread IDs whose old checkpoints should be pruned.
-            keep_last: Number of recent checkpoints to retain per namespace.
-                Use ``keep_last=1`` to keep only the latest checkpoint (default).
-                Use ``keep_last=0`` to remove all checkpoints for the thread.
-                For multi-tool interrupt chains, ``max(10, n_tool_calls * 3 + 5)``
-                is a safe heuristic.
+            strategy: Pruning strategy.  ``"keep_latest"`` retains only the
+                most recent checkpoint per namespace (default).  ``"delete"``
+                removes all checkpoints for the thread.
+            keep_last: Optional override — number of recent checkpoints to
+                retain per namespace.  When provided, takes precedence over
+                ``strategy``.  Use ``keep_last=0`` to remove all checkpoints.
             max_results: Maximum number of checkpoints fetched from the index
-                per thread in a single query.  Threads with more checkpoints
-                than this limit will only have the first ``max_results`` entries
-                considered for pruning.  Raise this value for very long-lived
-                threads.  Defaults to 10 000.
+                per thread in a single query.  Defaults to 10 000.
         """
+        # Resolve keep_last from strategy if not explicitly provided
+        if keep_last is None:
+            if strategy == "delete":
+                keep_last = 0
+            else:
+                keep_last = 1
+
         # Validate input
         if not thread_ids:
             raise ValueError("``thread_ids`` must be a non-empty sequence")
