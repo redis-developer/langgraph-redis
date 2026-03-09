@@ -901,23 +901,33 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         self,
         thread_ids: Sequence[str],
         *,
-        keep_last: int = 1,
+        strategy: str = "keep_latest",
+        keep_last: Optional[int] = None,
     ) -> None:
         """Prune checkpoints for the given threads.
 
         ``AsyncShallowRedisSaver`` stores at most one checkpoint per namespace
-        by design, so ``keep_last >= 1`` is always a no-op.  ``keep_last=0``
-        removes all checkpoints for each thread (equivalent to
-        ``adelete_thread``).
+        by design, so ``strategy="keep_latest"`` (or ``keep_last >= 1``) is
+        always a no-op.  ``strategy="delete"`` (or ``keep_last=0``) removes
+        all checkpoints for each thread (equivalent to ``adelete_thread``).
 
         Args:
             thread_ids: Thread IDs to prune.
-            keep_last: Checkpoints to retain per namespace.  Any value >= 1
-                is a no-op for shallow savers.  Pass ``0`` to delete all.
+            strategy: Pruning strategy.  ``"keep_latest"`` is a no-op for
+                shallow savers (default).  ``"delete"`` removes all.
+            keep_last: Optional override.  Any value >= 1 is a no-op.
+                Pass ``0`` to delete all.
         """
+        # Resolve keep_last from strategy if not explicitly provided
+        if keep_last is None:
+            if strategy == "delete":
+                keep_last = 0
+            else:
+                keep_last = 1
+
         # Validate input
         if not thread_ids:
-            raise ValueError(f"``thread_ids`` must be a non-empty sequence")
+            raise ValueError("``thread_ids`` must be a non-empty sequence")
 
         if keep_last < 0:
             raise ValueError(f"``keep_last`` must be >= 0, got {keep_last}")
