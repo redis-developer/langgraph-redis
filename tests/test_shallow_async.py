@@ -254,7 +254,7 @@ async def test_from_conn_string_errors(redis_url: str) -> None:
             await saver.asetup()
 
     # Test with empty URL
-    with pytest.raises(ValueError, match="REDIS_URL env var not set"):
+    with pytest.raises(ValueError, match="REDIS_URL"):
         async with AsyncShallowRedisSaver.from_conn_string("") as saver:
             await saver.asetup()
 

@@ -1,7 +1,7 @@
 version: "3.9"
 services:
   redis:
-    image: "${REDIS_IMAGE}"
+    image: "${REDIS_IMAGE:-redis:8}"
     ports:
       - target: 6379
         published: 0

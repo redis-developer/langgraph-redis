@@ -46,7 +46,11 @@ logger = logging.getLogger(__name__)
 
 
 class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
-    """Redis implementation that only stores the most recent checkpoint."""
+    """Redis implementation that only stores the most recent checkpoint.
+
+    Supports standard Redis URLs (redis://), SSL (rediss://), and
+    Sentinel URLs (redis+sentinel://host:26379/service_name/db).
+    """
 
     # Default cache size limits
     DEFAULT_KEY_CACHE_MAX_SIZE = 1000

@@ -1,0 +1,29 @@
+services:
+  redis-master:
+    image: "redis:8"
+    ports:
+      - "6399:6379"
+    command: >
+      redis-server
+      --save ''
+      --appendonly no
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+
+  redis-sentinel:
+    image: "redis:8"
+    ports:
+      - "26399:26379"
+    depends_on:
+      - redis-master
+    command: |
+      sh -c '
+      printf "port 26379\nsentinel resolve-hostnames yes\nsentinel monitor mymaster redis-master 6379 1\nsentinel down-after-milliseconds mymaster 5000\nsentinel failover-timeout mymaster 10000\n" > /tmp/sentinel.conf
+      redis-sentinel /tmp/sentinel.conf
+      '
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure

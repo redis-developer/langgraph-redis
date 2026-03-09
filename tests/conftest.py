@@ -30,8 +30,8 @@ def redis_container(request):
 
     # Set the Compose project name so containers do not clash across workers
     os.environ["COMPOSE_PROJECT_NAME"] = f"redis_test_{worker_id}"
-    os.environ.setdefault("REDIS_VERSION", "latest")
-    os.environ.setdefault("REDIS_IMAGE", "redis/redis-stack-server:latest")
+    os.environ.setdefault("REDIS_VERSION", "8")
+    os.environ.setdefault("REDIS_IMAGE", "redis:8")
 
     compose = DockerCompose(
         context="tests",
@@ -110,6 +110,85 @@ async def clear_redis(redis_url: str) -> None:
         pass
 
 
+@pytest.fixture(scope="session")
+def sentinel_container(request):
+    """Start Redis master + Sentinel via Docker Compose for sentinel tests."""
+    if not request.config.getoption("--run-sentinel-tests"):
+        pytest.skip("Sentinel tests require --run-sentinel-tests flag")
+
+    compose = DockerCompose(
+        context="tests/sentinel",
+        compose_file_name="docker-compose.yml",
+        pull=True,
+    )
+    try:
+        compose.start()
+    except Exception as exc:
+        pytest.fail(f"Failed to start Sentinel containers: {exc}")
+
+    yield compose
+
+    try:
+        compose.stop()
+    except Exception:
+        pass
+
+
+@pytest.fixture(scope="session")
+def sentinel_master_url(sentinel_container):
+    """Direct connection URL to the Sentinel-monitored Redis master."""
+    # The master is exposed on fixed port 6399
+    host = "localhost"
+    port = 6399
+
+    deadline = time.time() + 15
+    while True:
+        try:
+            with socket.create_connection((host, port), timeout=1):
+                break
+        except OSError:
+            if time.time() > deadline:
+                pytest.skip("Redis master for Sentinel tests failed to become ready.")
+            time.sleep(0.5)
+
+    return f"redis://{host}:{port}"
+
+
+@pytest.fixture(scope="session")
+def sentinel_info(sentinel_container):
+    """Return sentinel host/port after waiting for readiness.
+
+    Returns a tuple of (sentinel_host, sentinel_port, master_host, master_port)
+    where master_host/port are the host-reachable mapped ports.
+    """
+    sentinel_host = "localhost"
+    sentinel_port = 26399
+    # The master is port-mapped to localhost:6399
+    master_host = "127.0.0.1"
+    master_port = 6399
+
+    # Poll sentinel until it has discovered the master
+    from redis import Redis as SyncRedis
+
+    deadline = time.time() + 30
+    while True:
+        try:
+            client = SyncRedis(host=sentinel_host, port=sentinel_port)
+            result = client.execute_command(
+                "SENTINEL", "get-master-addr-by-name", "mymaster"
+            )
+            client.close()
+            if result is not None:
+                break
+        except Exception:
+            pass
+        if time.time() > deadline:
+            pytest.skip("Redis Sentinel failed to discover master.")
+        time.sleep(0.5)
+
+    return sentinel_host, sentinel_port, master_host, master_port
+
+
 def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addoption(
         "--run-api-tests",
@@ -117,22 +196,38 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=False,
         help="Run tests that require API keys",
     )
+    parser.addoption(
+        "--run-sentinel-tests",
+        action="store_true",
+        default=False,
+        help="Run tests that require Redis Sentinel (extra containers)",
+    )
 
 
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
         "markers", "requires_api_keys: mark test as requiring API keys"
     )
+    config.addinivalue_line(
+        "markers", "sentinel: mark test as requiring Redis Sentinel"
+    )
 
 
 def pytest_collection_modifyitems(
     config: pytest.Config, items: list[pytest.Item]
 ) -> None:
-    if config.getoption("--run-api-tests"):
-        return
-    skip_api = pytest.mark.skip(
-        reason="Skipping test because API keys are not provided. Use --run-api-tests to run these tests."
-    )
-    for item in items:
-        if item.get_closest_marker("requires_api_keys"):
-            item.add_marker(skip_api)
+    if not config.getoption("--run-api-tests"):
+        skip_api = pytest.mark.skip(
+            reason="Skipping test because API keys are not provided. Use --run-api-tests to run these tests."
+        )
+        for item in items:
+            if item.get_closest_marker("requires_api_keys"):
+                item.add_marker(skip_api)
+
+    if not config.getoption("--run-sentinel-tests"):
+        skip_sentinel = pytest.mark.skip(
+            reason="Skipping sentinel test. Use --run-sentinel-tests to run."
+        )
+        for item in items:
+            if item.get_closest_marker("sentinel"):
+                item.add_marker(skip_sentinel)

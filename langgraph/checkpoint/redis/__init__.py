@@ -54,7 +54,11 @@ logger = logging.getLogger(__name__)
 
 
 class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
-    """Standard Redis implementation for checkpoint saving."""
+    """Standard Redis implementation for checkpoint saving.
+
+    Supports standard Redis URLs (redis://), SSL (rediss://), and
+    Sentinel URLs (redis+sentinel://host:26379/service_name/db).
+    """
 
     _redis: Union[Redis, RedisCluster]  # Support both standalone and cluster clients
     # Whether to assume the Redis server is a cluster; None triggers auto-detection
@@ -94,7 +98,11 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
         redis_client: Optional[Union[Redis, RedisCluster]] = None,
         connection_args: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Configure the Redis client."""
+        """Configure the Redis client.
+
+        Supports standard Redis URLs (redis://), SSL (rediss://), and
+        Sentinel URLs (redis+sentinel://host:26379/service_name/db).
+        """
         from redis.exceptions import ResponseError
 
         from langgraph.checkpoint.redis.version import __full_lib_name__

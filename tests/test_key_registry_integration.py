@@ -13,27 +13,11 @@ from uuid import uuid4
 import pytest
 from redis import Redis
 from redis.asyncio import Redis as AsyncRedis
-from testcontainers.redis import RedisContainer
 
 from langgraph.checkpoint.redis.key_registry import (
     AsyncCheckpointKeyRegistry,
     SyncCheckpointKeyRegistry,
 )
-
-
-@pytest.fixture
-def redis_container() -> Generator[RedisContainer, None, None]:
-    """Redis container with all required modules."""
-    with RedisContainer("redis:8") as container:
-        yield container
-
-
-@pytest.fixture
-def redis_url(redis_container: RedisContainer) -> str:
-    """Get Redis URL from container."""
-    host = redis_container.get_container_host_ip()
-    port = redis_container.get_exposed_port(6379)
-    return f"redis://{host}:{port}"
 
 
 @contextmanager
@@ -215,7 +199,7 @@ def test_apply_ttl(redis_url: str) -> None:
         assert registry.get_write_count(thread_id, checkpoint_ns, checkpoint_id) == 0
 
 
-def test_key_generation(redis_url: str) -> None:
+def test_key_generation() -> None:
     """Test the key generation for sorted sets."""
     # Test static method
     key = SyncCheckpointKeyRegistry.make_write_keys_zset_key(
