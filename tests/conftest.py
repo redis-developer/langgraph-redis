@@ -123,8 +123,8 @@ def sentinel_container(request):
     )
     try:
         compose.start()
-    except Exception:
-        pass
+    except Exception as exc:
+        pytest.fail(f"Failed to start Sentinel containers: {exc}")
 
     yield compose
 
@@ -167,19 +167,24 @@ def sentinel_info(sentinel_container):
     master_host = "127.0.0.1"
     master_port = 6399
 
-    # Wait for sentinel to be reachable
-    deadline = time.time() + 15
+    # Poll sentinel until it has discovered the master
+    from redis import Redis as SyncRedis
+
+    deadline = time.time() + 30
     while True:
         try:
-            with socket.create_connection((sentinel_host, sentinel_port), timeout=1):
+            client = SyncRedis(host=sentinel_host, port=sentinel_port)
+            result = client.execute_command(
+                "SENTINEL", "get-master-addr-by-name", "mymaster"
+            )
+            client.close()
+            if result is not None:
                 break
-        except OSError:
-            if time.time() > deadline:
-                pytest.skip("Redis Sentinel failed to become ready.")
-            time.sleep(0.5)
-
-    # Wait for sentinel to discover the master
-    time.sleep(3)
+        except Exception:
+            pass
+        if time.time() > deadline:
+            pytest.skip("Redis Sentinel failed to discover master.")
+        time.sleep(0.5)
 
     return sentinel_host, sentinel_port, master_host, master_port
 
