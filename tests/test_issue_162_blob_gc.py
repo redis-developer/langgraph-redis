@@ -72,6 +72,7 @@ def _saver(redis_url: str):
 @asynccontextmanager
 async def _async_saver(redis_url: str):
     async with AsyncRedisSaver.from_conn_string(redis_url) as saver:
+        await saver.asetup()
         yield saver
 
 
