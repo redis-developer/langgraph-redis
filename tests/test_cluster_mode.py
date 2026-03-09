@@ -388,11 +388,6 @@ def checkpoint_saver(request):
     saver.checkpoints_index.search = MagicMock(return_value=MagicMock(docs=[]))
     saver.checkpoints_index.load = MagicMock()
 
-    saver.checkpoint_blobs_index = MagicMock()
-    saver.checkpoint_blobs_index.create = MagicMock()
-    saver.checkpoint_blobs_index.search = MagicMock(return_value=MagicMock(docs=[]))
-    saver.checkpoint_blobs_index.load = MagicMock()
-
     saver.checkpoint_writes_index = MagicMock()
     saver.checkpoint_writes_index.create = MagicMock()
     saver.checkpoint_writes_index.search = MagicMock(return_value=MagicMock(docs=[]))
@@ -455,11 +450,6 @@ def test_checkpoint_saver_delete_thread_behavior(checkpoint_saver):
     mock_checkpoint_doc.checkpoint_ns = "test_ns"
     mock_checkpoint_doc.checkpoint_id = "test_checkpoint"
 
-    mock_blob_doc = MagicMock()
-    mock_blob_doc.checkpoint_ns = "test_ns"
-    mock_blob_doc.channel = "test_channel"
-    mock_blob_doc.version = "1"
-
     mock_write_doc = MagicMock()
     mock_write_doc.checkpoint_ns = "test_ns"
     mock_write_doc.checkpoint_id = "test_checkpoint"
@@ -468,9 +458,6 @@ def test_checkpoint_saver_delete_thread_behavior(checkpoint_saver):
 
     checkpoint_saver.checkpoints_index.search.return_value = MagicMock(
         docs=[mock_checkpoint_doc]
-    )
-    checkpoint_saver.checkpoint_blobs_index.search.return_value = MagicMock(
-        docs=[mock_blob_doc]
     )
     checkpoint_saver.checkpoint_writes_index.search.return_value = MagicMock(
         docs=[mock_write_doc]

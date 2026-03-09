@@ -13,7 +13,6 @@ from redis import Redis
 from redis.exceptions import ConnectionError as RedisConnectionError
 
 from langgraph.checkpoint.redis.base import (
-    CHECKPOINT_BLOB_PREFIX,
     CHECKPOINT_WRITE_PREFIX,
 )
 from langgraph.checkpoint.redis.shallow import ShallowRedisSaver
@@ -361,35 +360,9 @@ def test_key_generation_inconsistency(redis_url: str) -> None:
     """
     thread_id = "test_thread"
     checkpoint_ns = ""  # Empty namespace - the problematic case
-    channel = "test_channel"
-    version = "1"
 
     # Create a saver instance to test key generation
     with _saver(redis_url) as saver:
-        # Test blob key generation
-        base_blob_key = saver._make_redis_checkpoint_blob_key(
-            thread_id, checkpoint_ns, channel, version
-        )
-        shallow_blob_pattern = (
-            ShallowRedisSaver._make_shallow_redis_checkpoint_blob_key_pattern(
-                thread_id, checkpoint_ns
-            )
-        )
-
-        # The base key uses storage-safe transformations
-        expected_base_key = (
-            f"{CHECKPOINT_BLOB_PREFIX}:test_thread:__empty__:test_channel:1"
-        )
-        assert base_blob_key == expected_base_key
-
-        # The shallow pattern now uses storage-safe transformations (fixed!)
-        expected_pattern = f"{CHECKPOINT_BLOB_PREFIX}:test_thread:__empty__:*"
-        assert shallow_blob_pattern == expected_pattern
-
-        # Both base key and pattern now consistently use "__empty__" (fix confirmed!)
-        assert "__empty__" in base_blob_key
-        assert "__empty__" in shallow_blob_pattern
-
         # Test writes key generation
         checkpoint_id = "test_checkpoint"
         task_id = "test_task"
@@ -425,7 +398,6 @@ def test_shallow_saver_inline_storage(redis_url: str) -> None:
     import uuid
 
     from langgraph.checkpoint.redis.base import (
-        CHECKPOINT_BLOB_PREFIX,
         CHECKPOINT_PREFIX,
     )
 
@@ -476,7 +448,7 @@ def test_shallow_saver_inline_storage(redis_url: str) -> None:
             all_keys = redis_client.keys("*")
             test_keys = [k for k in all_keys if thread_id in k]
             blob_keys_after_first = [
-                k for k in test_keys if k.startswith(CHECKPOINT_BLOB_PREFIX)
+                k for k in test_keys if k.startswith("checkpoint_blob")
             ]
 
             # Should have exactly one checkpoint key and no blob keys
@@ -520,7 +492,7 @@ def test_shallow_saver_inline_storage(redis_url: str) -> None:
             all_keys = redis_client.keys("*")
             test_keys = [k for k in all_keys if thread_id in k]
             blob_keys_after_second = [
-                k for k in test_keys if k.startswith(CHECKPOINT_BLOB_PREFIX)
+                k for k in test_keys if k.startswith("checkpoint_blob")
             ]
 
             # Still should have exactly one checkpoint key (overwritten) and no blob keys

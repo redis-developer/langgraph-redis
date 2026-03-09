@@ -356,7 +356,6 @@ async def test_shallow_redis_saver_inline_storage(redis_url: str) -> None:
 
     from langgraph.checkpoint.redis.ashallow import AsyncShallowRedisSaver
     from langgraph.checkpoint.redis.base import (
-        CHECKPOINT_BLOB_PREFIX,
         CHECKPOINT_WRITE_PREFIX,
     )
 
@@ -430,7 +429,7 @@ async def test_shallow_redis_saver_inline_storage(redis_url: str) -> None:
 
             # Count the number of blobs and writes in Redis
             # For blobs
-            blob_keys_pattern = f"{CHECKPOINT_BLOB_PREFIX}:*"
+            blob_keys_pattern = "checkpoint_blob:*"
             blob_keys = await redis_client.keys(blob_keys_pattern)
             blob_count = len(blob_keys)
 
