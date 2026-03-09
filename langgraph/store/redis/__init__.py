@@ -73,6 +73,9 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
 
     Provides synchronous operations for storing and retrieving data with optional
     vector similarity search support.
+
+    Supports standard Redis URLs (redis://), SSL (rediss://), and
+    Sentinel URLs (redis+sentinel://host:26379/service_name/db).
     """
 
     # Enable TTL support

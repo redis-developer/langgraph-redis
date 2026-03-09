@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from types import TracebackType
@@ -26,6 +25,7 @@ from redis.asyncio import Redis as AsyncRedis
 from redis.commands.search.query import Query
 from redisvl.index import AsyncSearchIndex
 from redisvl.query import FilterQuery, VectorQuery
+from redisvl.redis.connection import RedisConnectionFactory
 from redisvl.utils.token_escaper import TokenEscaper
 from ulid import ULID
 
@@ -54,7 +54,11 @@ from redis.asyncio.cluster import RedisCluster as AsyncRedisCluster
 class AsyncRedisStore(
     BaseRedisStore[AsyncRedis, AsyncSearchIndex], AsyncBatchedBaseStore
 ):
-    """Async Redis store with optional vector search."""
+    """Async Redis store with optional vector search.
+
+    Supports standard Redis URLs (redis://), SSL (rediss://), and
+    Sentinel URLs (redis+sentinel://host:26379/service_name/db).
+    """
 
     store_index: AsyncSearchIndex
     vector_index: AsyncSearchIndex
@@ -193,16 +197,17 @@ class AsyncRedisStore(
         redis_client: Optional[AsyncRedis] = None,
         connection_args: Optional[dict[str, Any]] = None,
     ) -> None:
-        """Configure the Redis client."""
+        """Configure the Redis client.
+
+        Supports standard Redis URLs (redis://), SSL (rediss://), and
+        Sentinel URLs (redis+sentinel://host:26379/service_name/db).
+        """
         self._owns_its_client = redis_client is None
 
-        # Use direct AsyncRedis.from_url to avoid the deprecated get_async_redis_connection
         if redis_client is None:
-            if not redis_url:
-                redis_url = os.environ.get("REDIS_URL")
-                if not redis_url:
-                    raise ValueError("REDIS_URL env var not set")
-            self._redis = AsyncRedis.from_url(redis_url, **(connection_args or {}))
+            self._redis = RedisConnectionFactory.get_async_redis_connection(
+                redis_url, **(connection_args or {})
+            )
         else:
             self._redis = redis_client
 
