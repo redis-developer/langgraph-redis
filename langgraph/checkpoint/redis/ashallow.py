@@ -29,7 +29,6 @@ from redisvl.query.filter import Num, Tag
 from ulid import ULID
 
 from langgraph.checkpoint.redis.base import (
-    CHECKPOINT_BLOB_PREFIX,
     CHECKPOINT_PREFIX,
     CHECKPOINT_WRITE_PREFIX,
     REDIS_KEY_SEPARATOR,
@@ -49,7 +48,6 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
 
     _redis_url: str
     checkpoints_index: AsyncSearchIndex
-    checkpoint_blobs_index: AsyncSearchIndex
     checkpoint_writes_index: AsyncSearchIndex
 
     _redis: AsyncRedis  # Override the type from the base class
@@ -62,7 +60,6 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         connection_args: Optional[dict[str, Any]] = None,
         ttl: Optional[dict[str, Any]] = None,
         checkpoint_prefix: str = CHECKPOINT_PREFIX,
-        checkpoint_blob_prefix: str = CHECKPOINT_BLOB_PREFIX,
         checkpoint_write_prefix: str = CHECKPOINT_WRITE_PREFIX,
     ) -> None:
         super().__init__(
@@ -71,7 +68,6 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             connection_args=connection_args,
             ttl=ttl,
             checkpoint_prefix=checkpoint_prefix,
-            checkpoint_blob_prefix=checkpoint_blob_prefix,
             checkpoint_write_prefix=checkpoint_write_prefix,
         )
         self.loop = asyncio.get_running_loop()
@@ -109,7 +105,6 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             # Prevent RedisVL from attempting to close the client
             # on an event loop in a separate thread.
             self.checkpoints_index._redis_client = None
-            self.checkpoint_blobs_index._redis_client = None
             self.checkpoint_writes_index._redis_client = None
 
     @classmethod
@@ -122,7 +117,6 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         connection_args: Optional[dict[str, Any]] = None,
         ttl: Optional[dict[str, Any]] = None,
         checkpoint_prefix: str = CHECKPOINT_PREFIX,
-        checkpoint_blob_prefix: str = CHECKPOINT_BLOB_PREFIX,
         checkpoint_write_prefix: str = CHECKPOINT_WRITE_PREFIX,
     ) -> AsyncIterator[AsyncShallowRedisSaver]:
         """Create a new AsyncShallowRedisSaver instance."""
@@ -132,16 +126,13 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             connection_args=connection_args,
             ttl=ttl,
             checkpoint_prefix=checkpoint_prefix,
-            checkpoint_blob_prefix=checkpoint_blob_prefix,
             checkpoint_write_prefix=checkpoint_write_prefix,
         ) as saver:
             yield saver
 
     async def asetup(self) -> None:
-        """Initialize Redis indexes asynchronously (skip blob index for shallow implementation)."""
-        # Create only the indexes we actually use
+        """Initialize Redis indexes asynchronously."""
         await self.checkpoints_index.create(overwrite=False)
-        # Skip creating blob index since shallow doesn't use separate blobs
         await self.checkpoint_writes_index.create(overwrite=False)
 
     async def setup(self) -> None:  # type: ignore[override]
@@ -700,10 +691,6 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         self.checkpoints_index = AsyncSearchIndex.from_dict(
             self.checkpoints_schema, redis_client=self._redis
         )
-        # Shallow implementation doesn't use blobs, but base class requires the attribute
-        self.checkpoint_blobs_index = AsyncSearchIndex.from_dict(
-            self.blobs_schema, redis_client=self._redis
-        )
         self.checkpoint_writes_index = AsyncSearchIndex.from_dict(
             self.writes_schema, redis_client=self._redis
         )
@@ -821,36 +808,6 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             )
             + ":*"
         )
-
-    @staticmethod
-    def _make_shallow_redis_checkpoint_blob_key_pattern(
-        thread_id: str, checkpoint_ns: str
-    ) -> str:
-        """Create a pattern to match all blob keys for a thread and namespace."""
-        return (
-            REDIS_KEY_SEPARATOR.join(
-                [
-                    CHECKPOINT_BLOB_PREFIX,
-                    str(to_storage_safe_id(thread_id)),
-                    to_storage_safe_str(checkpoint_ns),
-                ]
-            )
-            + ":*"
-        )
-
-    def _make_shallow_redis_checkpoint_blob_key_cached(
-        self, thread_id: str, checkpoint_ns: str, channel: str, version: str
-    ) -> str:
-        """Create a cached key for checkpoint blobs."""
-        cache_key = f"shallow_blob:{thread_id}:{checkpoint_ns}:{channel}:{version}"
-        if cache_key not in self._key_cache:
-            if len(self._key_cache) >= self._key_cache_max_size:
-                # Remove oldest entry when cache is full
-                self._key_cache.pop(next(iter(self._key_cache)))
-            self._key_cache[cache_key] = self._make_redis_checkpoint_blob_key(
-                thread_id, checkpoint_ns, channel, version
-            )
-        return self._key_cache[cache_key]
 
     def _extract_fallback_timestamp(self, checkpoint: Checkpoint) -> float:
         """Extract timestamp from checkpoint's ts field or use current time.

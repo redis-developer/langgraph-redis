@@ -29,7 +29,6 @@ from ulid import ULID
 from langgraph.checkpoint.redis.aio import AsyncRedisSaver
 from langgraph.checkpoint.redis.ashallow import AsyncShallowRedisSaver
 from langgraph.checkpoint.redis.base import (
-    CHECKPOINT_BLOB_PREFIX,
     CHECKPOINT_PREFIX,
     CHECKPOINT_WRITE_PREFIX,
     REDIS_KEY_SEPARATOR,
@@ -69,7 +68,6 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
         connection_args: Optional[Dict[str, Any]] = None,
         ttl: Optional[Dict[str, Any]] = None,
         checkpoint_prefix: str = CHECKPOINT_PREFIX,
-        checkpoint_blob_prefix: str = CHECKPOINT_BLOB_PREFIX,
         checkpoint_write_prefix: str = CHECKPOINT_WRITE_PREFIX,
     ) -> None:
         super().__init__(
@@ -78,7 +76,6 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
             connection_args=connection_args,
             ttl=ttl,
             checkpoint_prefix=checkpoint_prefix,
-            checkpoint_blob_prefix=checkpoint_blob_prefix,
             checkpoint_write_prefix=checkpoint_write_prefix,
         )
         # Prefixes are now set in BaseRedisSaver.__init__
@@ -121,9 +118,6 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
     def create_indexes(self) -> None:
         self.checkpoints_index = SearchIndex.from_dict(
             self.checkpoints_schema, redis_client=self._redis
-        )
-        self.checkpoint_blobs_index = SearchIndex.from_dict(
-            self.blobs_schema, redis_client=self._redis
         )
         self.checkpoint_writes_index = SearchIndex.from_dict(
             self.writes_schema, redis_client=self._redis
@@ -480,7 +474,7 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
         metadata: CheckpointMetadata,
         new_versions: ChannelVersions,
     ) -> RunnableConfig:
-        """Store a checkpoint to Redis with separate blob storage."""
+        """Store a checkpoint to Redis with inline channel value storage."""
         configurable = config["configurable"].copy()
 
         run_id = configurable.pop("run_id", metadata.get("run_id"))
@@ -975,12 +969,6 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
             # TTL states: -2 = key doesn't exist, -1 = key exists but no TTL, 0 = expired, >0 = seconds remaining
             if current_ttl > 0:
                 # Note: We don't refresh TTL for keys with no expiry (TTL = -1)
-                # Get all blob keys related to this checkpoint
-                from langgraph.checkpoint.redis.base import (
-                    CHECKPOINT_BLOB_PREFIX,
-                    CHECKPOINT_WRITE_PREFIX,
-                )
-
                 # Get write keys - use key registry if available, otherwise fall back to search
                 write_keys = []
 
@@ -1132,7 +1120,6 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
         connection_args: Optional[Dict[str, Any]] = None,
         ttl: Optional[Dict[str, Any]] = None,
         checkpoint_prefix: str = CHECKPOINT_PREFIX,
-        checkpoint_blob_prefix: str = CHECKPOINT_BLOB_PREFIX,
         checkpoint_write_prefix: str = CHECKPOINT_WRITE_PREFIX,
     ) -> Iterator[RedisSaver]:
         """Create a new RedisSaver instance."""
@@ -1144,7 +1131,6 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
                 connection_args=connection_args,
                 ttl=ttl,
                 checkpoint_prefix=checkpoint_prefix,
-                checkpoint_blob_prefix=checkpoint_blob_prefix,
                 checkpoint_write_prefix=checkpoint_write_prefix,
             )
 
@@ -1619,24 +1605,7 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
             latest_pointer_key = f"checkpoint_latest:{storage_safe_thread_id}:{to_storage_safe_str(checkpoint_ns)}"
             keys_to_delete.append(latest_pointer_key)
 
-        # Delete all blobs for this thread
-        blob_query = FilterQuery(
-            filter_expression=Tag("thread_id") == storage_safe_thread_id,
-            return_fields=["checkpoint_ns", "channel", "version"],
-            num_results=10000,
-        )
-
-        blob_results = self.checkpoint_blobs_index.search(blob_query)
-
-        for doc in blob_results.docs:
-            checkpoint_ns = getattr(doc, "checkpoint_ns", "")
-            channel = getattr(doc, "channel", "")
-            version = getattr(doc, "version", "")
-
-            blob_key = self._make_redis_checkpoint_blob_key(
-                storage_safe_thread_id, checkpoint_ns, channel, version
-            )
-            keys_to_delete.append(blob_key)
+        # Channel values are stored inline — no separate blob keys to clean up.
 
         # Delete all writes for this thread
         writes_query = FilterQuery(
@@ -1702,10 +1671,9 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
 
         Each namespace (root ``""`` and any subgraph namespaces) is treated as
         an independent checkpoint chain, so ``keep_last`` is applied separately
-        within each namespace.  Checkpoint blobs are intentionally *not* deleted
-        because blob keys are shared across checkpoints via channel versioning —
-        the same blob version may be referenced by both kept and evicted
-        checkpoints.
+        within each namespace.  Channel values are stored inline within each
+        checkpoint document, so they are automatically removed when the
+        checkpoint document is deleted.
 
         Args:
             thread_ids: Thread IDs whose old checkpoints should be pruned.

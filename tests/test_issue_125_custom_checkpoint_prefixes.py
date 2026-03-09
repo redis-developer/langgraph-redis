@@ -2,9 +2,8 @@
 
 Issue: https://github.com/redis-developer/langgraph-redis/issues/125
 
-Feature request to allow customization of checkpoint_prefix, checkpoint_blob_prefix,
-and checkpoint_write_prefix to enable multiple isolated checkpoint savers in the same
-Redis instance.
+Feature request to allow customization of checkpoint_prefix and checkpoint_write_prefix
+to enable multiple isolated checkpoint savers in the same Redis instance.
 """
 
 from uuid import uuid4
@@ -71,7 +70,6 @@ def test_default_checkpoint_prefix_is_checkpoint(
         saver.setup()
 
         assert saver._checkpoint_prefix == "checkpoint"
-        assert saver._checkpoint_blob_prefix == "checkpoint_blob"
         assert saver._checkpoint_write_prefix == "checkpoint_write"
 
         saver.put(config, simple_checkpoint, simple_metadata, {})
@@ -108,21 +106,18 @@ def test_custom_checkpoint_prefix_sync_all_components(
     thread_id: str,
     checkpoint_id: str,
 ) -> None:
-    """Test RedisSaver with custom checkpoint, blob, and write prefixes."""
+    """Test RedisSaver with custom checkpoint and write prefixes."""
     custom_checkpoint_prefix = "myapp_checkpoint"
-    custom_blob_prefix = "myapp_checkpoint_blob"
     custom_write_prefix = "myapp_checkpoint_write"
 
     with RedisSaver.from_conn_string(
         redis_url,
         checkpoint_prefix=custom_checkpoint_prefix,
-        checkpoint_blob_prefix=custom_blob_prefix,
         checkpoint_write_prefix=custom_write_prefix,
     ) as saver:
         saver.setup()
 
         assert saver._checkpoint_prefix == custom_checkpoint_prefix
-        assert saver._checkpoint_blob_prefix == custom_blob_prefix
         assert saver._checkpoint_write_prefix == custom_write_prefix
 
         saver.put(config, simple_checkpoint, simple_metadata, {})
@@ -152,12 +147,6 @@ def test_custom_checkpoint_prefix_sync_all_components(
         for key in write_keys:
             key_str = key.decode()
             assert key_str.startswith(custom_write_prefix)
-
-        # Verify blob key generation
-        blob_key = saver._make_redis_checkpoint_blob_key(
-            thread_id, "", "test_channel", "v1"
-        )
-        assert blob_key.startswith(custom_blob_prefix)
 
         # Verify data can be retrieved
         retrieved = saver.get_tuple(config)
@@ -360,21 +349,18 @@ async def test_custom_checkpoint_prefix_async_all_components(
     thread_id: str,
     checkpoint_id: str,
 ) -> None:
-    """Test AsyncRedisSaver with custom checkpoint, blob, and write prefixes."""
+    """Test AsyncRedisSaver with custom checkpoint and write prefixes."""
     custom_checkpoint_prefix = "async_myapp_checkpoint"
-    custom_blob_prefix = "async_myapp_checkpoint_blob"
     custom_write_prefix = "async_myapp_checkpoint_write"
 
     async with AsyncRedisSaver.from_conn_string(
         redis_url,
         checkpoint_prefix=custom_checkpoint_prefix,
-        checkpoint_blob_prefix=custom_blob_prefix,
         checkpoint_write_prefix=custom_write_prefix,
     ) as saver:
         await saver.setup()
 
         assert saver._checkpoint_prefix == custom_checkpoint_prefix
-        assert saver._checkpoint_blob_prefix == custom_blob_prefix
         assert saver._checkpoint_write_prefix == custom_write_prefix
 
         await saver.aput(config, simple_checkpoint, simple_metadata, {})
@@ -404,12 +390,6 @@ async def test_custom_checkpoint_prefix_async_all_components(
         for key in write_keys:
             key_str = key.decode()
             assert key_str.startswith(custom_write_prefix)
-
-        # Verify blob key generation
-        blob_key = saver._make_redis_checkpoint_blob_key(
-            thread_id, "", "test_channel", "v1"
-        )
-        assert blob_key.startswith(custom_blob_prefix)
 
         # Verify data can be retrieved
         retrieved = await saver.aget_tuple(config)

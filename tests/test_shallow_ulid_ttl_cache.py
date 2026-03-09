@@ -188,12 +188,6 @@ def test_cache_management_key_cache(redis_url: str) -> None:
             assert cache_key in saver._key_cache
             assert saver._key_cache[cache_key] == f"checkpoint:{thread_id}:"
 
-        # Test blob key caching
-        blob_key = saver._make_shallow_redis_checkpoint_blob_key_cached(
-            "thread1", "ns1", "channel1", "v1"
-        )
-        assert "shallow_blob:thread1:ns1:channel1:v1" in saver._key_cache
-
         # Test write key caching
         write_key = saver._make_redis_checkpoint_writes_key_cached(
             "thread1", "ns1", "checkpoint1", "task1", 0

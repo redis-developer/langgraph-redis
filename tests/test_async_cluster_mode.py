@@ -265,11 +265,6 @@ async def async_checkpoint_saver(request):
     saver.checkpoints_index.search = AsyncMock(return_value=MagicMock(docs=[]))
     saver.checkpoints_index.load = AsyncMock()
 
-    saver.checkpoint_blobs_index = AsyncMock()
-    saver.checkpoint_blobs_index.create = AsyncMock()
-    saver.checkpoint_blobs_index.search = AsyncMock(return_value=MagicMock(docs=[]))
-    saver.checkpoint_blobs_index.load = AsyncMock()
-
     saver.checkpoint_writes_index = AsyncMock()
     saver.checkpoint_writes_index.create = AsyncMock()
     saver.checkpoint_writes_index.search = AsyncMock(return_value=MagicMock(docs=[]))
@@ -343,11 +338,6 @@ async def test_async_checkpoint_saver_delete_thread_behavior(async_checkpoint_sa
     mock_checkpoint_doc.checkpoint_ns = "test_ns"
     mock_checkpoint_doc.checkpoint_id = "test_checkpoint"
 
-    mock_blob_doc = MagicMock()
-    mock_blob_doc.checkpoint_ns = "test_ns"
-    mock_blob_doc.channel = "test_channel"
-    mock_blob_doc.version = "1"
-
     mock_write_doc = MagicMock()
     mock_write_doc.checkpoint_ns = "test_ns"
     mock_write_doc.checkpoint_id = "test_checkpoint"
@@ -356,9 +346,6 @@ async def test_async_checkpoint_saver_delete_thread_behavior(async_checkpoint_sa
 
     async_checkpoint_saver.checkpoints_index.search.return_value = MagicMock(
         docs=[mock_checkpoint_doc]
-    )
-    async_checkpoint_saver.checkpoint_blobs_index.search.return_value = MagicMock(
-        docs=[]
     )
     async_checkpoint_saver.checkpoint_writes_index.search.return_value = MagicMock(
         docs=[]

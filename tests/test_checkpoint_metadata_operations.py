@@ -37,42 +37,6 @@ def _saver(redis_url: str):
         pass
 
 
-def test_load_blobs_method(redis_url: str) -> None:
-    """Test _load_blobs method with various scenarios.
-
-    This covers lines 297-299 in base.py
-    """
-    with _saver(redis_url) as saver:
-        # Test 1: Empty blob_values
-        result = saver._load_blobs({})
-        assert result == {}
-
-        # Test 2: None blob_values
-        result = saver._load_blobs(None)  # type: ignore
-        assert result == {}
-
-        # Test 3: Blob values with different types
-        test_data = {"key": "value", "number": 42, "list": [1, 2, 3]}
-        blob_values = {}
-
-        for key, value in test_data.items():
-            type_, blob = saver.serde.dumps_typed(value)
-            blob_values[key] = {"type": type_, "blob": blob}
-
-        # Add an "empty" type that should be filtered out
-        blob_values["empty_key"] = {"type": "empty", "blob": b""}
-
-        # Load blobs
-        loaded = saver._load_blobs(blob_values)
-
-        # Verify all non-empty values are loaded correctly
-        assert len(loaded) == 3  # Should not include empty_key
-        assert loaded["key"] == "value"
-        assert loaded["number"] == 42
-        assert loaded["list"] == [1, 2, 3]
-        assert "empty_key" not in loaded
-
-
 def test_metadata_conversion_methods(redis_url: str) -> None:
     """Test _load_metadata and _dump_metadata methods.
 
