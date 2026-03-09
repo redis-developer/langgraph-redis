@@ -1,4 +1,4 @@
-.PHONY: install format lint test test-all clean redis-start redis-stop check-types check
+.PHONY: install format lint test test-all test-sentinel clean redis-start redis-stop check-types check
 
 install:
 	poetry install --all-extras
@@ -23,6 +23,9 @@ test:
 
 test-all:
 	poetry run test-verbose --run-api-tests
+
+test-sentinel:
+	poetry run python -m pytest tests/test_sentinel_integration.py -vv -s --run-sentinel-tests
 
 test-coverage:
 	poetry run test-coverage
