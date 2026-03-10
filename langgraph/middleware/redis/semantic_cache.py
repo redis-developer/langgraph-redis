@@ -101,10 +101,8 @@ def _deserialize_response(cached_str: str) -> ModelResponse:
                     cached_message = revived.model_copy(
                         update={
                             "id": new_message_id,
-                            "additional_kwargs": {
-                                **getattr(revived, "additional_kwargs", {}),
-                                "cached": True,
-                            },
+                            "additional_kwargs": {"cached": True},
+                            "response_metadata": {},
                         }
                     )
                     return ModelResponse(
