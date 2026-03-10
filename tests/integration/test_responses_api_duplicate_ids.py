@@ -18,6 +18,7 @@ These tests verify:
 """
 
 import json
+import os
 import uuid
 
 import pytest
@@ -705,3 +706,280 @@ class TestMultiTurnResponsesAPIConversation:
                     assert len(ids) == 0, f"Stale block IDs reached LLM handler: {ids}"
         finally:
             await stack.aclose()
+
+
+# -- Test: ConversationMemory handles Responses API content -------------------
+
+
+class TestConversationMemoryResponsesApi:
+    """Verify ConversationMemoryMiddleware stores Responses API content correctly.
+
+    When use_responses_api=True, AIMessage.content is a list of blocks like:
+        [{"type": "text", "text": "Hello!", "id": "rs_abc123"}]
+    SemanticMessageHistory.add_messages() requires content to be a plain string.
+    The middleware must convert list content to string before storage.
+    """
+
+    @pytest.mark.asyncio
+    async def test_stores_list_content_as_string(self, redis_url: str):
+        """ConversationMemory stores Responses API list content without error."""
+        import uuid as uuid_mod
+
+        from langgraph.middleware.redis import (
+            ConversationMemoryConfig,
+            ConversationMemoryMiddleware,
+        )
+
+        memory_name = f"test_memory_responses_{uuid_mod.uuid4().hex[:8]}"
+        middleware = ConversationMemoryMiddleware(
+            ConversationMemoryConfig(
+                redis_url=redis_url,
+                name=memory_name,
+                session_tag="test_responses_api",
+                top_k=3,
+                distance_threshold=0.7,
+            )
+        )
+
+        try:
+            # Create a mock response with Responses API list content
+            ai_msg = _make_responses_api_aimessage(
+                text="Hello! I'm an assistant.",
+                block_id="rs_test_memory_001",
+            )
+            response = ModelResponse(result=[ai_msg])
+
+            # Create a request with a user message
+            request = {"messages": [HumanMessage(content="Hi there!")]}
+
+            call_count = [0]
+
+            async def mock_handler(req):
+                call_count[0] += 1
+                return response
+
+            # This should NOT raise — the middleware must convert list
+            # content to string before passing to SemanticMessageHistory
+            result = await middleware.awrap_model_call(request, mock_handler)
+
+            assert call_count[0] == 1
+            assert result == response
+
+            # Verify the message was actually stored by retrieving it
+            stored = middleware._history.get_recent(top_k=5)
+            assert len(stored) >= 2  # user + llm messages
+
+            # Verify the stored content is a string, not a list
+            for msg in stored:
+                assert isinstance(
+                    msg["content"], str
+                ), f"Stored content is {type(msg['content'])}, expected str"
+
+            # Verify the text was preserved
+            llm_messages = [m for m in stored if m["role"] == "llm"]
+            assert any(
+                "Hello! I'm an assistant." in m["content"] for m in llm_messages
+            ), f"Expected assistant text in stored messages: {llm_messages}"
+
+        finally:
+            await middleware.aclose()
+
+    @pytest.mark.asyncio
+    async def test_stores_plain_string_content(self, redis_url: str):
+        """ConversationMemory still works with plain string content."""
+        import uuid as uuid_mod
+
+        from langgraph.middleware.redis import (
+            ConversationMemoryConfig,
+            ConversationMemoryMiddleware,
+        )
+
+        memory_name = f"test_memory_string_{uuid_mod.uuid4().hex[:8]}"
+        middleware = ConversationMemoryMiddleware(
+            ConversationMemoryConfig(
+                redis_url=redis_url,
+                name=memory_name,
+                session_tag="test_string_content",
+                top_k=3,
+                distance_threshold=0.7,
+            )
+        )
+
+        try:
+            # Plain string content (Chat Completions API)
+            ai_msg = AIMessage(content="Hello! I'm an assistant.")
+            response = ModelResponse(result=[ai_msg])
+            request = {"messages": [HumanMessage(content="Hi there!")]}
+
+            async def mock_handler(req):
+                return response
+
+            result = await middleware.awrap_model_call(request, mock_handler)
+            assert result == response
+
+            stored = middleware._history.get_recent(top_k=5)
+            assert len(stored) >= 2
+            llm_messages = [m for m in stored if m["role"] == "llm"]
+            assert any("Hello! I'm an assistant." in m["content"] for m in llm_messages)
+
+        finally:
+            await middleware.aclose()
+
+    @pytest.mark.asyncio
+    async def test_multi_turn_with_list_content(self, redis_url: str):
+        """ConversationMemory handles multi-turn with Responses API content."""
+        import uuid as uuid_mod
+
+        from langgraph.middleware.redis import (
+            ConversationMemoryConfig,
+            ConversationMemoryMiddleware,
+        )
+
+        memory_name = f"test_memory_multi_{uuid_mod.uuid4().hex[:8]}"
+        middleware = ConversationMemoryMiddleware(
+            ConversationMemoryConfig(
+                redis_url=redis_url,
+                name=memory_name,
+                session_tag="test_multi_turn",
+                top_k=3,
+                distance_threshold=0.7,
+            )
+        )
+
+        try:
+            # Turn 1
+            ai_msg1 = _make_responses_api_aimessage(
+                text="I'm Carol, nice to meet you!",
+                block_id="rs_turn1",
+            )
+            response1 = ModelResponse(result=[ai_msg1])
+
+            async def handler1(req):
+                return response1
+
+            await middleware.awrap_model_call(
+                {"messages": [HumanMessage(content="Hi, I'm Carol")]},
+                handler1,
+            )
+
+            # Turn 2
+            ai_msg2 = _make_responses_api_aimessage(
+                text="You work with C and Rust, great languages!",
+                block_id="rs_turn2",
+            )
+            response2 = ModelResponse(result=[ai_msg2])
+
+            async def handler2(req):
+                return response2
+
+            await middleware.awrap_model_call(
+                {"messages": [HumanMessage(content="I work with C and Rust")]},
+                handler2,
+            )
+
+            # Turn 3: recall — check that context retrieval works
+            ai_msg3 = _make_responses_api_aimessage(
+                text="Your name is Carol and you use C and Rust.",
+                block_id="rs_turn3",
+            )
+            response3 = ModelResponse(result=[ai_msg3])
+
+            captured_requests = []
+
+            async def handler3(req):
+                captured_requests.append(req)
+                return response3
+
+            await middleware.awrap_model_call(
+                {
+                    "messages": [
+                        HumanMessage(
+                            content="What's my name and what languages do I use?"
+                        )
+                    ]
+                },
+                handler3,
+            )
+
+            # Verify context was injected (should have a SystemMessage)
+            assert len(captured_requests) == 1
+            req = captured_requests[0]
+            msgs = req["messages"] if isinstance(req, dict) else req.messages
+            system_msgs = [m for m in msgs if hasattr(m, "type") and m.type == "system"]
+            assert len(system_msgs) > 0, "Expected context SystemMessage to be injected"
+
+            # Verify all 3 turns stored successfully
+            stored = middleware._history.get_recent(top_k=10)
+            assert len(stored) >= 6  # 3 user + 3 llm messages
+
+        finally:
+            await middleware.aclose()
+
+    @pytest.mark.skipif(
+        not os.environ.get("OPENAI_API_KEY"),
+        reason="OPENAI_API_KEY not set",
+    )
+    @pytest.mark.asyncio
+    async def test_full_agent_conversation_memory_responses_api(self, redis_url: str):
+        """End-to-end: ConversationMemory + create_agent + Responses API."""
+        import uuid as uuid_mod
+
+        from langchain.agents import create_agent
+        from langchain_core.tools import tool
+        from langchain_openai import ChatOpenAI
+
+        from langgraph.middleware.redis import (
+            ConversationMemoryConfig,
+            ConversationMemoryMiddleware,
+        )
+
+        model = ChatOpenAI(model="gpt-4o-mini", use_responses_api=True)
+
+        @tool
+        def noop(x: str) -> str:
+            """Do nothing."""
+            return x
+
+        memory_name = f"test_e2e_memory_{uuid_mod.uuid4().hex[:8]}"
+        middleware = ConversationMemoryMiddleware(
+            ConversationMemoryConfig(
+                redis_url=redis_url,
+                name=memory_name,
+                session_tag="test_e2e_responses",
+                top_k=3,
+                distance_threshold=0.7,
+            )
+        )
+
+        try:
+            agent = create_agent(
+                model=model,
+                tools=[noop],
+                middleware=[middleware],
+            )
+
+            # Turn 1
+            result1 = await agent.ainvoke(
+                {
+                    "messages": [
+                        HumanMessage(content="My name is TestUser and I like Rust.")
+                    ]
+                }
+            )
+            assert "messages" in result1
+
+            # Turn 2: recall
+            result2 = await agent.ainvoke(
+                {"messages": [HumanMessage(content="What is my name?")]}
+            )
+            assert "messages" in result2
+
+            # Verify stored messages are strings
+            stored = middleware._history.get_recent(top_k=10)
+            for msg in stored:
+                assert isinstance(
+                    msg["content"], str
+                ), f"Stored content is {type(msg['content'])}: {msg['content'][:100]}"
+
+        finally:
+            await middleware.aclose()
