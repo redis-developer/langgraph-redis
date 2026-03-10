@@ -75,6 +75,7 @@ def _assert_clean_cached_message(msg: AIMessage) -> None:
     - response_metadata == {} (no provider metadata)
     - A valid UUID as the message ID
     - Content preserved from the original
+    - No 'id' fields inside content blocks (Responses API format)
     """
     # Must be marked as cached with NO other keys
     assert msg.additional_kwargs == {"cached": True}, (
@@ -90,6 +91,15 @@ def _assert_clean_cached_message(msg: AIMessage) -> None:
     # Must have a valid UUID
     assert msg.id is not None, "Message must have an ID"
     uuid.UUID(msg.id)  # raises ValueError if not valid UUID
+
+    # Content blocks must not contain provider IDs
+    if isinstance(msg.content, list):
+        for block in msg.content:
+            if isinstance(block, dict):
+                assert "id" not in block, (
+                    f"Content block must not contain 'id' field, "
+                    f"got block with keys: {list(block.keys())}"
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +206,222 @@ class TestOpenAIResponsesAPIMetadata:
 
             msg = result.result[0]
             assert msg.content == "The answer is 42."
+            _assert_clean_cached_message(msg)
+
+
+# ---------------------------------------------------------------------------
+# Path 1b: OpenAI Responses API with LIST CONTENT containing block IDs
+# This is the ACTUAL root cause of the customer's "Duplicate item found" error.
+# The rs_ IDs live INSIDE content blocks, not just in metadata fields.
+# ---------------------------------------------------------------------------
+
+
+class TestResponsesAPIContentBlockIds:
+    """Test stripping of rs_ IDs from Responses API content blocks.
+
+    When use_responses_api=True, AIMessage.content is a list of blocks:
+    [{"type": "text", "text": "...", "id": "rs_abc123", "annotations": []}, ...]
+    These embedded IDs must be stripped on cache deserialization.
+    """
+
+    def test_strips_content_block_ids_from_text_block(self):
+        """Content block with rs_ ID in text block must be stripped."""
+        cached_str = json.dumps(
+            {
+                "lc": 1,
+                "type": "constructor",
+                "id": ["langchain", "schema", "messages", "AIMessage"],
+                "kwargs": {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Paris is the capital of France.",
+                            "id": "rs_0ae41c16891c342b0069b03ac28e508197af7e9ecae0be58cb",
+                            "annotations": [],
+                        }
+                    ],
+                    "type": "ai",
+                    "id": "msg-original-id",
+                    "tool_calls": [],
+                    "additional_kwargs": {},
+                    "response_metadata": {
+                        "id": "rs_resp_abc123",
+                        "model": "gpt-4o-2024-05-13",
+                    },
+                },
+            }
+        )
+
+        result = _deserialize_response(cached_str)
+        msg = result.result[0]
+        assert isinstance(msg, AIMessage)
+        assert isinstance(msg.content, list)
+        assert len(msg.content) == 1
+        assert msg.content[0]["text"] == "Paris is the capital of France."
+        assert "id" not in msg.content[0]
+        _assert_clean_cached_message(msg)
+
+    def test_strips_content_block_ids_from_reasoning_block(self):
+        """Reasoning blocks also carry rs_ IDs that must be stripped."""
+        cached_str = json.dumps(
+            {
+                "lc": 1,
+                "type": "constructor",
+                "id": ["langchain", "schema", "messages", "AIMessage"],
+                "kwargs": {
+                    "content": [
+                        {
+                            "type": "reasoning",
+                            "id": "rs_reasoning_001",
+                            "summary": [
+                                {"type": "summary_text", "text": "Thinking..."}
+                            ],
+                        },
+                        {
+                            "type": "text",
+                            "text": "The answer is 42.",
+                            "id": "rs_text_001",
+                            "annotations": [],
+                        },
+                    ],
+                    "type": "ai",
+                    "id": "msg-reasoning-id",
+                    "tool_calls": [],
+                    "additional_kwargs": {},
+                    "response_metadata": {},
+                },
+            }
+        )
+
+        result = _deserialize_response(cached_str)
+        msg = result.result[0]
+        assert isinstance(msg.content, list)
+        assert len(msg.content) == 2
+        # Both blocks must have IDs stripped
+        for block in msg.content:
+            assert "id" not in block
+        # Text content preserved
+        assert msg.content[1]["text"] == "The answer is 42."
+        assert msg.content[0]["summary"][0]["text"] == "Thinking..."
+        _assert_clean_cached_message(msg)
+
+    def test_preserves_string_content_unchanged(self):
+        """String content (Chat Completions format) passes through unchanged."""
+        cached_str = json.dumps(
+            {
+                "lc": 1,
+                "type": "constructor",
+                "id": ["langchain", "schema", "messages", "AIMessage"],
+                "kwargs": {
+                    "content": "Plain string content.",
+                    "type": "ai",
+                    "tool_calls": [],
+                },
+            }
+        )
+
+        result = _deserialize_response(cached_str)
+        msg = result.result[0]
+        assert msg.content == "Plain string content."
+        _assert_clean_cached_message(msg)
+
+    def test_round_trip_responses_api_format(self):
+        """Serialize Responses API AIMessage -> cache -> deserialize -> verify clean."""
+        original = AIMessage(
+            content=[
+                {
+                    "type": "text",
+                    "text": "Round-trip Responses API test.",
+                    "id": "rs_roundtrip_001",
+                    "annotations": [],
+                },
+            ],
+            id="msg-roundtrip",
+            additional_kwargs={
+                "response_id": "rs_resp_roundtrip",
+            },
+            response_metadata={
+                "id": "rs_resp_roundtrip",
+                "model": "gpt-4o",
+            },
+        )
+        response = ModelResponse(result=[original], structured_response=None)
+
+        serialized = _serialize_response(response)
+        deserialized = _deserialize_response(serialized)
+        msg = deserialized.result[0]
+
+        assert isinstance(msg.content, list)
+        assert len(msg.content) == 1
+        assert msg.content[0]["text"] == "Round-trip Responses API test."
+        assert "id" not in msg.content[0]
+        _assert_clean_cached_message(msg)
+
+    @pytest.mark.asyncio
+    async def test_responses_api_content_blocks_via_middleware(
+        self, redis_url: str, vectorizer: HFTextVectorizer
+    ):
+        """End-to-end: Responses API content blocks through middleware."""
+        cache_name = f"resp_api_blocks_{uuid.uuid4().hex[:8]}"
+
+        cache = SemanticCache(
+            name=cache_name,
+            redis_url=redis_url,
+            vectorizer=vectorizer,
+            distance_threshold=0.1,
+        )
+
+        # Pre-populate with Responses API format (list content with block IDs)
+        cached_response = json.dumps(
+            {
+                "lc": 1,
+                "type": "constructor",
+                "id": ["langchain", "schema", "messages", "AIMessage"],
+                "kwargs": {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "The answer is 42.",
+                            "id": "rs_cached_block_001",
+                            "annotations": [],
+                        }
+                    ],
+                    "type": "ai",
+                    "id": "msg-cached",
+                    "tool_calls": [],
+                    "additional_kwargs": {},
+                    "response_metadata": {
+                        "id": "rs_resp_cached",
+                        "model": "gpt-4o",
+                    },
+                },
+            }
+        )
+        cache.store(
+            prompt="What is the answer to everything?",
+            response=cached_response,
+        )
+
+        config = SemanticCacheConfig(
+            redis_url=redis_url,
+            name=cache_name,
+            distance_threshold=0.1,
+            vectorizer=vectorizer,
+        )
+
+        async def should_not_be_called(request):
+            raise AssertionError("Handler should not be called on cache hit")
+
+        async with SemanticCacheMiddleware(config) as middleware:
+            request = {
+                "messages": [HumanMessage(content="What is the answer to everything?")]
+            }
+            result = await middleware.awrap_model_call(request, should_not_be_called)
+
+            msg = result.result[0]
+            assert isinstance(msg.content, list)
+            assert msg.content[0]["text"] == "The answer is 42."
+            assert "id" not in msg.content[0]
             _assert_clean_cached_message(msg)
 
 
