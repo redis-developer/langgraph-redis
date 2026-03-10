@@ -844,7 +844,7 @@ class TestConversationMemoryNotebook:
                 # Responses API: extract text from blocks
                 text_parts = []
                 for block in response_content:
-                    if isinstance(block, dict) and block.get("type") == "output_text":
+                    if isinstance(block, dict) and "text" in block:
                         text_parts.append(block.get("text", ""))
                     elif isinstance(block, str):
                         text_parts.append(block)
