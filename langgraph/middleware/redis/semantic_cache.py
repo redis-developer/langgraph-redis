@@ -29,6 +29,24 @@ logger = logging.getLogger(__name__)
 _serializer = JsonPlusRedisSerializer()
 
 
+def _strip_content_ids(content: Any) -> Any:
+    """Strip provider-specific IDs from content blocks.
+
+    When using the OpenAI Responses API, content is a list of blocks with
+    embedded item IDs (rs_, msg_ prefixes). These must be removed from cached
+    messages to prevent duplicate ID errors.
+    """
+    if not isinstance(content, list):
+        return content
+    stripped = []
+    for block in content:
+        if isinstance(block, dict) and "id" in block:
+            stripped.append({k: v for k, v in block.items() if k != "id"})
+        else:
+            stripped.append(block)
+    return stripped
+
+
 def _serialize_response(response: Any) -> str:
     """Serialize a model response for cache storage.
 
@@ -101,6 +119,7 @@ def _deserialize_response(cached_str: str) -> ModelResponse:
                     cached_message = revived.model_copy(
                         update={
                             "id": new_message_id,
+                            "content": _strip_content_ids(revived.content),
                             "additional_kwargs": {"cached": True},
                             "response_metadata": {},
                         }

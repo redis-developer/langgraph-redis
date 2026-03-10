@@ -15,6 +15,7 @@ from langchain.agents.middleware.types import (
     ModelRequest,
     ModelResponse,
 )
+from langchain_core.messages import AIMessage
 from langchain_core.messages import ToolMessage as LangChainToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
@@ -22,7 +23,7 @@ from redis.asyncio import Redis as AsyncRedis
 
 from .aio import AsyncRedisMiddleware
 from .conversation_memory import ConversationMemoryMiddleware
-from .semantic_cache import SemanticCacheMiddleware
+from .semantic_cache import SemanticCacheMiddleware, _strip_content_ids
 from .semantic_router import SemanticRouterMiddleware
 from .tool_cache import ToolResultCacheMiddleware
 from .types import (
@@ -34,6 +35,61 @@ from .types import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _sanitize_request(request: ModelRequest) -> ModelRequest:
+    """Strip provider-specific IDs from AIMessages before sending to LLM.
+
+    This is a safety net for stale checkpoint data: messages stored before
+    the cache-deserialization fix may still carry provider IDs (rs_, msg_
+    prefixes) in content blocks, additional_kwargs, or response_metadata.
+    Cleaning them here prevents "Duplicate item found" errors from the
+    OpenAI Responses API.
+    """
+    if isinstance(request, dict):
+        messages = request.get("messages")
+    else:
+        messages = getattr(request, "messages", None)
+
+    if not messages:
+        return request
+
+    cleaned = []
+    changed = False
+    for msg in messages:
+        if isinstance(msg, AIMessage):
+            new_content = _strip_content_ids(msg.content)
+            content_changed = new_content is not msg.content
+            has_extra_kwargs = (
+                msg.additional_kwargs
+                and msg.additional_kwargs != {"cached": True}
+                and set(msg.additional_kwargs.keys()) != {"cached"}
+            )
+            has_metadata = bool(msg.response_metadata)
+
+            if content_changed or has_extra_kwargs or has_metadata:
+                # Preserve the cached marker if present
+                new_kwargs = (
+                    {"cached": True} if msg.additional_kwargs.get("cached") else {}
+                )
+                msg = msg.model_copy(
+                    update={
+                        "content": new_content,
+                        "additional_kwargs": new_kwargs,
+                        "response_metadata": {},
+                    }
+                )
+                changed = True
+        cleaned.append(msg)
+
+    if not changed:
+        return request
+
+    if isinstance(request, dict):
+        return {**request, "messages": cleaned}
+    else:
+        # ModelRequest is a dataclass — use its override() method
+        return request.override(messages=cleaned)
 
 
 class MiddlewareStack(AgentMiddleware):
@@ -99,8 +155,14 @@ class MiddlewareStack(AgentMiddleware):
             return await handler(request)
 
         # Build the chain from inside out
-        # Start with the final handler
-        current_handler = handler
+        # Wrap the final handler with request sanitization to strip
+        # provider-specific IDs from AIMessages before they reach the LLM
+        async def sanitized_handler(req: ModelRequest) -> ModelCallResult:
+            return await handler(_sanitize_request(req))
+
+        current_handler: Callable[[ModelRequest], Awaitable[ModelResponse]] = (
+            sanitized_handler
+        )
 
         # Wrap from last to first middleware
         for middleware in reversed(self._middlewares):
