@@ -25,6 +25,35 @@ from .types import ConversationMemoryConfig
 logger = logging.getLogger(__name__)
 
 
+def _content_to_str(content: Any) -> str:
+    """Convert message content to a plain string for storage.
+
+    When using the OpenAI Responses API, AIMessage.content is a list of
+    content blocks (dicts with 'type' and 'text' keys) rather than a plain
+    string. SemanticMessageHistory requires string content, so we extract
+    and join the text from all blocks.
+
+    Args:
+        content: Message content — either a string or a list of content blocks.
+
+    Returns:
+        A plain string suitable for storage and embedding.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict):
+                text = block.get("text", "")
+                if text:
+                    parts.append(text)
+            elif isinstance(block, str):
+                parts.append(block)
+        return " ".join(parts) if parts else ""
+    return str(content) if content else ""
+
+
 class ConversationMemoryMiddleware(AsyncRedisMiddleware):
     """Middleware that injects relevant past messages into context.
 
@@ -208,17 +237,21 @@ class ConversationMemoryMiddleware(AsyncRedisMiddleware):
             # Get the user message
             user_content = query
             # Get the assistant response (support ModelResponse, dict, and
-            # other LangChain types)
+            # other LangChain types).
+            # Note: content may be a list of blocks (Responses API) or a
+            # plain string (Chat Completions). We normalize to string for
+            # SemanticMessageHistory which requires string content.
             if hasattr(response, "result") and isinstance(response.result, list):
                 # ModelResponse: result is list[BaseMessage]
                 if response.result:
-                    assistant_content = getattr(response.result[-1], "content", "")
+                    raw_content = getattr(response.result[-1], "content", "")
+                    assistant_content = _content_to_str(raw_content)
                 else:
                     assistant_content = ""
             elif isinstance(response, dict):
-                assistant_content = response.get("content", "")
+                assistant_content = _content_to_str(response.get("content", ""))
             else:
-                assistant_content = getattr(response, "content", "")
+                assistant_content = _content_to_str(getattr(response, "content", ""))
 
             if user_content:
                 self._history.add_messages(

@@ -45,11 +45,15 @@ class TestSemanticCacheNotebook:
         from langchain.agents import create_agent
         from langchain_core.messages import HumanMessage
         from langchain_core.tools import tool
+        from langchain_openai import ChatOpenAI
 
         from langgraph.middleware.redis import (
             SemanticCacheConfig,
             SemanticCacheMiddleware,
         )
+
+        # === Cell: two-model-setup ===
+        model_default = ChatOpenAI(model="gpt-4o-mini")
 
         # === Cell: define-tools ===
         @tool
@@ -58,16 +62,16 @@ class TestSemanticCacheNotebook:
             return f"Weather in {city}: Sunny, 72°F"
 
         @tool
-        def search(query: str) -> str:
-            """Search the web."""
-            return f"Search results for: {query}"
+        def calculate(expression: str) -> str:
+            """Calculate a math expression."""
+            return f"{expression} = 42"
 
-        tools = [get_weather, search]
+        tools = [get_weather, calculate]
 
         # === Cell: create-middleware ===
         import uuid
 
-        cache_name = f"demo_semantic_cache_{uuid.uuid4().hex[:8]}"
+        cache_name = f"demo_semantic_cache_default_{uuid.uuid4().hex[:8]}"
 
         cache_middleware = SemanticCacheMiddleware(
             SemanticCacheConfig(
@@ -76,6 +80,7 @@ class TestSemanticCacheNotebook:
                 distance_threshold=0.15,
                 ttl_seconds=3600,
                 cache_final_only=True,
+                deterministic_tools=["calculate"],
             )
         )
 
@@ -84,7 +89,7 @@ class TestSemanticCacheNotebook:
         try:
             # === Cell: create-agent ===
             agent = create_agent(
-                model="gpt-4o-mini",
+                model=model_default,
                 tools=tools,
                 middleware=[cache_middleware],
             )
@@ -121,7 +126,6 @@ class TestSemanticCacheNotebook:
             print(f"Time: {elapsed2:.2f}s (expected: cache hit - much faster!)")
 
             assert "messages" in result2
-            # Cache hit should be faster (but not guaranteed, so no assertion)
 
             # === Cell: third-query ===
             print("\nQuery 3: 'What is the capital of Germany?'")
@@ -140,6 +144,138 @@ class TestSemanticCacheNotebook:
 
             print("\n" + "=" * 50)
             print("SUCCESS! middleware_semantic_cache.ipynb replica passed!")
+
+        finally:
+            await cache_middleware.aclose()
+
+    @pytest.mark.skipif(
+        not os.environ.get("OPENAI_API_KEY"),
+        reason="OPENAI_API_KEY not set - skipping real LLM test",
+    )
+    @pytest.mark.asyncio
+    async def test_semantic_cache_responses_api_mode(self, redis_url: str):
+        """Test semantic cache with Responses API mode."""
+        import uuid
+
+        from langchain.agents import create_agent
+        from langchain_core.messages import HumanMessage
+        from langchain_core.tools import tool
+        from langchain_openai import ChatOpenAI
+
+        from langgraph.middleware.redis import (
+            SemanticCacheConfig,
+            SemanticCacheMiddleware,
+        )
+
+        model_responses_api = ChatOpenAI(model="gpt-4o-mini", use_responses_api=True)
+
+        @tool
+        def get_weather(city: str) -> str:
+            """Get weather for a city."""
+            return f"Weather in {city}: Sunny, 72°F"
+
+        tools = [get_weather]
+
+        cache_name = f"demo_semantic_cache_responses_{uuid.uuid4().hex[:8]}"
+
+        cache_middleware = SemanticCacheMiddleware(
+            SemanticCacheConfig(
+                redis_url=redis_url,
+                name=cache_name,
+                distance_threshold=0.15,
+                ttl_seconds=3600,
+                cache_final_only=True,
+            )
+        )
+
+        try:
+            agent = create_agent(
+                model=model_responses_api,
+                tools=tools,
+                middleware=[cache_middleware],
+            )
+
+            # Cache miss
+            result1 = await agent.ainvoke(
+                {"messages": [HumanMessage(content="What is the capital of Japan?")]}
+            )
+            assert "messages" in result1
+            assert len(result1["messages"]) >= 2
+
+            # Cache hit
+            result2 = await agent.ainvoke(
+                {"messages": [HumanMessage(content="Tell me Japan's capital city")]}
+            )
+            assert "messages" in result2
+
+            print("SUCCESS! Responses API semantic cache test passed!")
+
+        finally:
+            await cache_middleware.aclose()
+
+    @pytest.mark.skipif(
+        not os.environ.get("OPENAI_API_KEY"),
+        reason="OPENAI_API_KEY not set - skipping real LLM test",
+    )
+    @pytest.mark.asyncio
+    async def test_semantic_cache_responses_api_clean_blocks(self, redis_url: str):
+        """Test that cached Responses API content blocks have no provider IDs."""
+        import uuid
+
+        from langchain.agents import create_agent
+        from langchain_core.messages import HumanMessage
+        from langchain_core.tools import tool
+        from langchain_openai import ChatOpenAI
+
+        from langgraph.middleware.redis import (
+            SemanticCacheConfig,
+            SemanticCacheMiddleware,
+        )
+
+        model_responses_api = ChatOpenAI(model="gpt-4o-mini", use_responses_api=True)
+
+        @tool
+        def noop(x: str) -> str:
+            """Do nothing."""
+            return x
+
+        cache_name = f"demo_clean_blocks_{uuid.uuid4().hex[:8]}"
+
+        cache_middleware = SemanticCacheMiddleware(
+            SemanticCacheConfig(
+                redis_url=redis_url,
+                name=cache_name,
+                distance_threshold=0.15,
+                ttl_seconds=3600,
+                cache_final_only=True,
+            )
+        )
+
+        try:
+            agent = create_agent(
+                model=model_responses_api,
+                tools=[noop],
+                middleware=[cache_middleware],
+            )
+
+            # Populate cache
+            await agent.ainvoke({"messages": [HumanMessage(content="Say hello")]})
+
+            # Cache hit
+            result = await agent.ainvoke(
+                {"messages": [HumanMessage(content="Say hello please")]}
+            )
+
+            ai_msg = result["messages"][-1]
+            if isinstance(ai_msg.content, list):
+                for block in ai_msg.content:
+                    if isinstance(block, dict):
+                        assert (
+                            "id" not in block
+                        ), f"Cached block has provider ID: {block}"
+                print("Cached content blocks are clean -- no provider IDs!")
+
+            print("SUCCESS! Responses API clean blocks verification passed!")
 
         finally:
             await cache_middleware.aclose()
@@ -163,6 +299,7 @@ class TestCompositionNotebook:
         from langchain.agents import create_agent
         from langchain_core.messages import HumanMessage
         from langchain_core.tools import tool
+        from langchain_openai import ChatOpenAI
 
         from langgraph.middleware.redis import (
             SemanticCacheConfig,
@@ -170,6 +307,8 @@ class TestCompositionNotebook:
             ToolCacheConfig,
             ToolResultCacheMiddleware,
         )
+
+        model_default = ChatOpenAI(model="gpt-4o-mini")
 
         # Safe math evaluator
         safe_ops = {
@@ -221,6 +360,7 @@ class TestCompositionNotebook:
                 redis_url=redis_url,
                 name=llm_cache_name,
                 ttl_seconds=3600,
+                deterministic_tools=["search", "calculate"],
             )
         )
 
@@ -240,7 +380,7 @@ class TestCompositionNotebook:
         try:
             # === Cell: create-agent-multiple ===
             agent = create_agent(
-                model="gpt-4o-mini",
+                model=model_default,
                 tools=tools,
                 middleware=[semantic_cache, tool_cache],
             )
@@ -271,6 +411,178 @@ class TestCompositionNotebook:
             await semantic_cache.aclose()
             await tool_cache.aclose()
 
+    @pytest.mark.skipif(
+        not os.environ.get("OPENAI_API_KEY"),
+        reason="OPENAI_API_KEY not set - skipping real LLM test",
+    )
+    @pytest.mark.asyncio
+    async def test_middleware_stack_responses_api_sanitization(self, redis_url: str):
+        """Test MiddlewareStack sanitizes Responses API content blocks."""
+        import uuid
+
+        from langchain.agents import create_agent
+        from langchain_core.messages import HumanMessage
+        from langchain_core.tools import tool
+        from langchain_openai import ChatOpenAI
+
+        from langgraph.middleware.redis import (
+            ConversationMemoryConfig,
+            ConversationMemoryMiddleware,
+            MiddlewareStack,
+            SemanticCacheConfig,
+            SemanticCacheMiddleware,
+        )
+
+        model_responses_api = ChatOpenAI(model="gpt-4o-mini", use_responses_api=True)
+
+        @tool
+        def search(query: str) -> str:
+            """Search for information."""
+            return f"Results for: {query}"
+
+        cache_name = f"resp_stack_cache_{uuid.uuid4().hex[:8]}"
+        memory_name = f"resp_stack_memory_{uuid.uuid4().hex[:8]}"
+
+        responses_stack = MiddlewareStack(
+            [
+                SemanticCacheMiddleware(
+                    SemanticCacheConfig(
+                        redis_url=redis_url,
+                        name=cache_name,
+                        ttl_seconds=3600,
+                    )
+                ),
+                ConversationMemoryMiddleware(
+                    ConversationMemoryConfig(
+                        redis_url=redis_url,
+                        name=memory_name,
+                        session_tag="responses_demo",
+                        top_k=3,
+                    )
+                ),
+            ]
+        )
+
+        try:
+            agent = create_agent(
+                model=model_responses_api,
+                tools=[search],
+                middleware=[responses_stack],
+            )
+
+            # Turn 1
+            result1 = await agent.ainvoke(
+                {"messages": [HumanMessage(content="Hello, I like Python programming")]}
+            )
+            assert "messages" in result1
+
+            # Turn 2
+            result2 = await agent.ainvoke(
+                {"messages": [HumanMessage(content="What language did I mention?")]}
+            )
+            assert "messages" in result2
+
+            # Verify no duplicate IDs
+            all_ids = set()
+            for label, result in [("Turn 1", result1), ("Turn 2", result2)]:
+                ai_msg = result["messages"][-1]
+                if isinstance(ai_msg.content, list):
+                    for block in ai_msg.content:
+                        if isinstance(block, dict) and "id" in block:
+                            block_id = block["id"]
+                            assert (
+                                block_id not in all_ids
+                            ), f"Duplicate ID in {label}: {block_id}"
+                            all_ids.add(block_id)
+
+            print("SUCCESS! MiddlewareStack Responses API sanitization passed!")
+
+        finally:
+            await responses_stack.aclose()
+
+    @pytest.mark.skipif(
+        not os.environ.get("OPENAI_API_KEY"),
+        reason="OPENAI_API_KEY not set - skipping real LLM test",
+    )
+    @pytest.mark.asyncio
+    async def test_multi_turn_checkpointer_responses_api(self, redis_url: str):
+        """Test multi-turn with checkpointer + Responses API."""
+        import uuid
+
+        from langchain.agents import create_agent
+        from langchain_core.messages import HumanMessage
+        from langchain_core.tools import tool
+        from langchain_openai import ChatOpenAI
+
+        from langgraph.checkpoint.redis.aio import AsyncRedisSaver
+        from langgraph.middleware.redis import (
+            IntegratedRedisMiddleware,
+            SemanticCacheConfig,
+        )
+
+        model_responses_api = ChatOpenAI(model="gpt-4o-mini", use_responses_api=True)
+
+        @tool
+        def search(query: str) -> str:
+            """Search for information."""
+            return f"Results for: {query}"
+
+        async_checkpointer = AsyncRedisSaver(redis_url=redis_url)
+        await async_checkpointer.asetup()
+
+        cache_name = f"integrated_cache_{uuid.uuid4().hex[:8]}"
+
+        integrated_stack = IntegratedRedisMiddleware.from_saver(
+            async_checkpointer,
+            configs=[
+                SemanticCacheConfig(name=cache_name, ttl_seconds=3600),
+            ],
+        )
+
+        try:
+            agent = create_agent(
+                model=model_responses_api,
+                tools=[search],
+                checkpointer=async_checkpointer,
+                middleware=[integrated_stack],
+            )
+
+            thread_id = f"integrated_{uuid.uuid4().hex[:8]}"
+            config = {"configurable": {"thread_id": thread_id}}
+
+            # Turn 1
+            result1 = await agent.ainvoke(
+                {
+                    "messages": [
+                        HumanMessage(content="What is the population of Tokyo?")
+                    ]
+                },
+                config=config,
+            )
+            assert "messages" in result1
+
+            # Turn 2
+            result2 = await agent.ainvoke(
+                {"messages": [HumanMessage(content="And what about New York?")]},
+                config=config,
+            )
+            assert "messages" in result2
+
+            # Turn 3
+            result3 = await agent.ainvoke(
+                {"messages": [HumanMessage(content="Which one is larger?")]},
+                config=config,
+            )
+            assert "messages" in result3
+
+            print("SUCCESS! Multi-turn checkpointer + Responses API test passed!")
+
+        finally:
+            try:
+                await async_checkpointer.aclose()
+            except Exception:
+                pass
+
 
 class TestMiddlewareStack:
     """Test MiddlewareStack composition."""
@@ -287,6 +599,7 @@ class TestMiddlewareStack:
         from langchain.agents import create_agent
         from langchain_core.messages import HumanMessage
         from langchain_core.tools import tool
+        from langchain_openai import ChatOpenAI
 
         from langgraph.middleware.redis import (
             ConversationMemoryConfig,
@@ -295,6 +608,8 @@ class TestMiddlewareStack:
             SemanticCacheConfig,
             SemanticCacheMiddleware,
         )
+
+        model_default = ChatOpenAI(model="gpt-4o-mini")
 
         @tool
         def search(query: str) -> str:
@@ -328,7 +643,7 @@ class TestMiddlewareStack:
         try:
             # Create agent with stack
             agent = create_agent(
-                model="gpt-4o-mini",
+                model=model_default,
                 tools=[search],
                 middleware=[stack],
             )
@@ -350,6 +665,201 @@ class TestMiddlewareStack:
 
         finally:
             await stack.aclose()
+
+
+class TestToolCacheNotebook:
+    """Test tool caching with both API modes."""
+
+    @pytest.mark.skipif(
+        not os.environ.get("OPENAI_API_KEY"),
+        reason="OPENAI_API_KEY not set - skipping real LLM test",
+    )
+    @pytest.mark.asyncio
+    async def test_tool_cache_responses_api_mode(self, redis_url: str):
+        """Test tool caching works identically with Responses API."""
+        import ast
+        import operator as op
+        import uuid
+
+        from langchain.agents import create_agent
+        from langchain_core.messages import HumanMessage
+        from langchain_core.tools import tool
+        from langchain_openai import ChatOpenAI
+
+        from langgraph.middleware.redis import (
+            ToolCacheConfig,
+            ToolResultCacheMiddleware,
+        )
+
+        model_responses_api = ChatOpenAI(model="gpt-4o-mini", use_responses_api=True)
+
+        # Safe math evaluator
+        safe_ops = {
+            ast.Add: op.add,
+            ast.Sub: op.sub,
+            ast.Mult: op.mul,
+            ast.Div: op.truediv,
+        }
+
+        def _eval_node(node):
+            if isinstance(node, ast.Constant):
+                return node.value
+            elif isinstance(node, ast.BinOp) and type(node.op) in safe_ops:
+                return safe_ops[type(node.op)](
+                    _eval_node(node.left), _eval_node(node.right)
+                )
+            raise ValueError("Unsupported expression")
+
+        def safe_eval(expr: str) -> float:
+            return _eval_node(ast.parse(expr, mode="eval").body)
+
+        exec_count = {"calculate": 0}
+
+        @tool
+        def calculate(expression: str) -> str:
+            """Evaluate a mathematical expression."""
+            exec_count["calculate"] += 1
+            return str(safe_eval(expression))
+
+        calculate.metadata = {"cacheable": True}
+
+        cache_name = f"demo_tool_cache_responses_{uuid.uuid4().hex[:8]}"
+
+        tool_cache = ToolResultCacheMiddleware(
+            ToolCacheConfig(
+                redis_url=redis_url,
+                name=cache_name,
+                distance_threshold=0.1,
+                ttl_seconds=1800,
+            )
+        )
+
+        try:
+            agent = create_agent(
+                model=model_responses_api,
+                tools=[calculate],
+                middleware=[tool_cache],
+            )
+
+            # First call
+            result1 = await agent.ainvoke(
+                {"messages": [HumanMessage(content="What is 15 * 8 + 20?")]}
+            )
+            assert "messages" in result1
+            assert len(result1["messages"]) >= 2
+
+            print("SUCCESS! Tool cache with Responses API mode passed!")
+
+        finally:
+            await tool_cache.aclose()
+
+
+class TestConversationMemoryNotebook:
+    """Test conversation memory with both API modes."""
+
+    @pytest.mark.skipif(
+        not os.environ.get("OPENAI_API_KEY"),
+        reason="OPENAI_API_KEY not set - skipping real LLM test",
+    )
+    @pytest.mark.asyncio
+    async def test_memory_responses_api_recall(self, redis_url: str):
+        """Test memory recall works with Responses API (Carol persona)."""
+        import uuid
+
+        from langchain.agents import create_agent
+        from langchain_core.messages import HumanMessage
+        from langchain_core.tools import tool
+        from langchain_openai import ChatOpenAI
+
+        from langgraph.middleware.redis import (
+            ConversationMemoryConfig,
+            ConversationMemoryMiddleware,
+        )
+
+        model_responses_api = ChatOpenAI(model="gpt-4o-mini", use_responses_api=True)
+
+        @tool
+        def get_user_preferences(category: str) -> str:
+            """Get user preferences for a category."""
+            return f"Preferences for {category}: not set"
+
+        memory_name = f"demo_conversation_memory_{uuid.uuid4().hex[:8]}"
+
+        memory_middleware = ConversationMemoryMiddleware(
+            ConversationMemoryConfig(
+                redis_url=redis_url,
+                name=memory_name,
+                session_tag="user_789",
+                top_k=3,
+                distance_threshold=0.7,
+            )
+        )
+
+        try:
+            agent = create_agent(
+                model=model_responses_api,
+                tools=[get_user_preferences],
+                middleware=[memory_middleware],
+            )
+
+            # Turn 1: Introduce Carol
+            result1 = await agent.ainvoke(
+                {
+                    "messages": [
+                        HumanMessage(
+                            content="Hi! I'm Carol, an embedded systems engineer. I work with C and Rust."
+                        )
+                    ]
+                }
+            )
+            assert "messages" in result1
+
+            # Turn 2: Share interests
+            result2 = await agent.ainvoke(
+                {
+                    "messages": [
+                        HumanMessage(
+                            content="I'm interested in RTOS, bare-metal programming, and IoT protocols."
+                        )
+                    ]
+                }
+            )
+            assert "messages" in result2
+
+            # Turn 3: Test recall
+            result3 = await agent.ainvoke(
+                {
+                    "messages": [
+                        HumanMessage(
+                            content="What's my name and what languages do I use?"
+                        )
+                    ]
+                }
+            )
+            assert "messages" in result3
+
+            # Check that Carol's name appears in the response
+            response_content = result3["messages"][-1].content
+            if isinstance(response_content, list):
+                # Responses API: extract text from blocks
+                text_parts = []
+                for block in response_content:
+                    if isinstance(block, dict) and block.get("type") == "output_text":
+                        text_parts.append(block.get("text", ""))
+                    elif isinstance(block, str):
+                        text_parts.append(block)
+                response_text = " ".join(text_parts)
+            else:
+                response_text = response_content
+
+            assert (
+                "carol" in response_text.lower()
+            ), f"Expected 'Carol' in response: {response_text[:200]}"
+
+            print("SUCCESS! Memory with Responses API recall test passed!")
+
+        finally:
+            await memory_middleware.aclose()
 
 
 if __name__ == "__main__":
