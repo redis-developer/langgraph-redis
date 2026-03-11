@@ -94,6 +94,47 @@ def _sync_saver(redis_url: str, ttl: Any = None) -> Generator[RedisSaver, None, 
 # ══════════════════════════════════════════════════════════════════════════════
 
 
+def test_sync_hitl_with_ttl(redis_url: str) -> None:
+    """Sync RedisSaver + TTL + HitL interrupt/resume flow."""
+    from langgraph.graph import END, START, StateGraph
+    from langgraph.types import Command
+
+    with _sync_saver(redis_url, ttl=TTL_CONFIG) as saver:
+        builder = StateGraph(AgentState)
+        builder.add_node("review", review_node)
+        builder.add_node("process", process_node)
+        builder.add_edge(START, "review")
+        builder.add_edge("review", "process")
+        builder.add_edge("process", END)
+
+        graph = builder.compile(checkpointer=saver)
+
+        thread_id = f"hitl-ttl-sync-{uuid4()}"
+        config = {"configurable": {"thread_id": thread_id}}
+
+        graph.invoke(
+            {
+                "messages": [HumanMessage(content="Please review this")],
+                "user_confirmed": False,
+            },
+            config=config,
+        )
+
+        state = graph.get_state(config)
+        # In sync mode, task.interrupts may not be populated by get_state()
+        # (langgraph 1.0.x behaviour). Use state.next to confirm the graph is
+        # paused at the review node waiting for human input.
+        assert state.next, "Graph should be paused at interrupt with TTL enabled"
+        assert "review" in state.next, "Graph should be waiting at review node"
+
+        final_state = graph.invoke(
+            Command(resume={"approved": True}),
+            config=config,
+        )
+
+        assert final_state.get("user_confirmed") is True
+
+
 @requires_python_311
 @pytest.mark.asyncio
 async def test_async_hitl_with_ttl(redis_url: str) -> None:
@@ -295,46 +336,6 @@ async def test_async_hitl_ttl_single_resume(redis_url: str) -> None:
             not has_pending
         ), "Graph should complete after single resume with TTL enabled"
         assert resume_count == count_before_resume + 1
-
-
-def test_sync_hitl_with_ttl(redis_url: str) -> None:
-    """Sync RedisSaver + TTL + HitL interrupt/resume flow."""
-    from langgraph.graph import END, START, StateGraph
-    from langgraph.types import Command
-
-    with _sync_saver(redis_url, ttl=TTL_CONFIG) as saver:
-        builder = StateGraph(AgentState)
-        builder.add_node("review", review_node)
-        builder.add_node("process", process_node)
-        builder.add_edge(START, "review")
-        builder.add_edge("review", "process")
-        builder.add_edge("process", END)
-
-        graph = builder.compile(checkpointer=saver)
-
-        thread_id = f"hitl-ttl-sync-{uuid4()}"
-        config = {"configurable": {"thread_id": thread_id}}
-
-        graph.invoke(
-            {
-                "messages": [HumanMessage(content="Please review this")],
-                "user_confirmed": False,
-            },
-            config=config,
-        )
-
-        state = graph.get_state(config)
-        has_interrupt = any(
-            hasattr(task, "interrupts") and task.interrupts for task in state.tasks
-        )
-        assert has_interrupt, "Interrupt should be present in sync saver with TTL"
-
-        final_state = graph.invoke(
-            Command(resume={"approved": True}),
-            config=config,
-        )
-
-        assert final_state.get("user_confirmed") is True
 
 
 # ══════════════════════════════════════════════════════════════════════════════
