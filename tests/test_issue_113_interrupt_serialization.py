@@ -147,3 +147,71 @@ def test_interrupt_resume_workflow(redis_url: str) -> None:
         # If we get here, the test passed
         assert "messages" in final_state
         print(f"Final messages: {final_state['messages']}")
+
+
+def test_interrupt_serializer_roundtrip_current_fields() -> None:
+    """Verify serialization roundtrip uses the actual Interrupt fields."""
+    from langgraph.checkpoint.redis.jsonplus_redis import JsonPlusRedisSerializer
+
+    serde = JsonPlusRedisSerializer()
+    original = Interrupt(value={"question": "approve?"})
+
+    type_str, data = serde.dumps_typed(original)
+    assert type_str == "json"
+
+    restored = serde.loads_typed((type_str, data))
+    assert isinstance(restored, Interrupt), f"Expected Interrupt, got {type(restored)}"
+    assert restored.value == {"question": "approve?"}
+
+
+def test_interrupt_deserializes_old_format() -> None:
+    """Deserialize data written by langgraph <=1.0.x (fields: value, id)."""
+    import orjson
+
+    from langgraph.checkpoint.redis.jsonplus_redis import JsonPlusRedisSerializer
+
+    serde = JsonPlusRedisSerializer()
+
+    old_payload = {
+        "__interrupt__": True,
+        "value": {"question": "approve?"},
+        "id": "abc-123",
+    }
+    data = ("json", orjson.dumps(old_payload))
+    restored = serde.loads_typed(data)
+
+    assert isinstance(restored, Interrupt), f"Expected Interrupt, got {type(restored)}"
+    assert restored.value == {"question": "approve?"}
+    # id is passed through only if the installed Interrupt accepts it
+    if hasattr(restored, "id"):
+        assert restored.id == "abc-123"
+
+
+def test_interrupt_deserializes_new_format() -> None:
+    """Deserialize data written by langgraph >=1.1.x (fields: value, resumable, ns, when)."""
+    import dataclasses
+
+    import orjson
+
+    from langgraph.checkpoint.redis.jsonplus_redis import JsonPlusRedisSerializer
+
+    serde = JsonPlusRedisSerializer()
+
+    new_payload = {
+        "__interrupt__": True,
+        "value": {"question": "approve?"},
+        "resumable": True,
+        "ns": ["review:task-1"],
+        "when": "during",
+    }
+    data = ("json", orjson.dumps(new_payload))
+    restored = serde.loads_typed(data)
+
+    assert isinstance(restored, Interrupt), f"Expected Interrupt, got {type(restored)}"
+    assert restored.value == {"question": "approve?"}
+    # resumable/ns/when are passed through only if the installed Interrupt accepts them
+    field_names = {f.name for f in dataclasses.fields(Interrupt)}
+    if "resumable" in field_names:
+        assert restored.resumable is True
+        assert restored.ns == ["review:task-1"]
+        assert restored.when == "during"
