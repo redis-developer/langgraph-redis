@@ -101,8 +101,8 @@ favicons = [
 ]
 
 # -- sphinx-multiversion options ---------------------------------------------
-# Tag whitelist: match v0.4.0+ and v1.0.0+ (skip old tags without docs/)
-smv_tag_whitelist = r"^v0\.(([4-9]|\d{2,})\.\d+)$|^v([1-9]\d*)\.\d+\.\d+$"
+# Tag whitelist: match v0.4.1+ and v1.0.0+ (v0.4.0 and earlier lack docs/)
+smv_tag_whitelist = r"^v0\.4\.([1-9]\d*)$|^v0\.([5-9]|\d{2,})\.\d+$|^v([1-9]\d*)\.\d+\.\d+$"
 smv_branch_whitelist = r"^main$"
 smv_remote_whitelist = r"^origin$"
 smv_released_pattern = r"^refs/tags/.*$"
