@@ -1,23 +1,46 @@
-{% if versions %}
 <div class="version-switcher">
   <h4>Version</h4>
-  <select onchange="if (this.value) window.location.href = this.value;">
-    {%- for item in versions.tags %}
-    <option
-      value="{{ vpathto(item.name) }}"
-      {% if item.name == current_version.name %}selected{% endif %}
-    >
-      {{ item.name }}{% if loop.first %} (latest){% endif %}
-    </option>
-    {%- endfor %}
-    {%- for item in versions.branches %}
-    <option
-      value="{{ vpathto(item.name) }}"
-      {% if item.name == current_version.name %}selected{% endif %}
-    >
-      {{ item.name }}{% if item.name == "main" %} (dev){% endif %}
-    </option>
-    {%- endfor %}
+  <select id="version-select" onchange="if (this.value) window.location.href = this.value;">
+    <option selected>Loading...</option>
   </select>
 </div>
-{% endif %}
+<script>
+(function() {
+  // Walk up from current page to find versions.json at the site root
+  var depth = window.location.pathname.replace(/\/+$/, '').split('/').length - 1;
+  // Try relative paths — handles both GitHub Pages subpath and root deployments
+  var candidates = [];
+  for (var i = 0; i <= depth; i++) {
+    candidates.push('../'.repeat(i) + 'versions.json');
+  }
+
+  function tryFetch(urls) {
+    if (urls.length === 0) return;
+    var url = urls.shift();
+    fetch(url).then(function(r) {
+      if (!r.ok) throw new Error(r.status);
+      return r.json();
+    }).then(populate).catch(function() { tryFetch(urls); });
+  }
+
+  function populate(data) {
+    var sel = document.getElementById('version-select');
+    sel.innerHTML = '';
+    var current = data.current || '';
+    data.versions.forEach(function(v) {
+      var opt = document.createElement('option');
+      var label = v.name;
+      if (v.tag) label += v.name === data.latest ? ' (latest)' : '';
+      else label += ' (dev)';
+      opt.textContent = label;
+      // Build path relative to site root
+      var base = url.replace('versions.json', '');
+      opt.value = base + v.name + '/';
+      if (v.name === current) opt.selected = true;
+      sel.appendChild(opt);
+    });
+  }
+
+  tryFetch(candidates);
+})();
+</script>
