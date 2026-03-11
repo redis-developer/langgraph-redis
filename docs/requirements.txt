@@ -4,5 +4,4 @@ myst-nb>=1.0
 sphinx-design>=0.5
 sphinx-copybutton>=0.5
 sphinx-favicon>=1.0
-sphinx-multiversion-contrib>=0.2.13
 pyyaml>=6.0
