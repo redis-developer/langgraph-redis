@@ -31,6 +31,7 @@ extensions = [
     "_extension.gallery_directive",
     "myst_nb",
     "sphinx_favicon",
+    "sphinx_multiversion",
 ]
 
 templates_path = ["_templates"]
@@ -98,3 +99,22 @@ favicons = [
     "Redis_Favicon_16x16_Red.png",
     "Redis_Favicon_144x144_Red.png",
 ]
+
+# -- sphinx-multiversion options ---------------------------------------------
+# Tag whitelist: match v0.4.0+ and v1.0.0+ (skip old tags without docs/)
+smv_tag_whitelist = r"^v0\.(([4-9]|\d{2,})\.\d+)$|^v([1-9]\d*)\.\d+\.\d+$"
+smv_branch_whitelist = r"^main$"
+smv_remote_whitelist = r"^origin$"
+smv_released_pattern = r"^refs/tags/.*$"
+smv_outputdir_format = "{ref.name}"
+
+# -- Sidebar with version switcher ------------------------------------------
+html_sidebars = {
+    "**": [
+        "navbar-logo.html",
+        "icon-links.html",
+        "search-button-field.html",
+        "sbt-sidebar-nav.html",
+        "versioning.html",
+    ],
+}

@@ -1,4 +1,4 @@
-.PHONY: install format lint test test-all test-sentinel clean redis-start redis-stop check-types check docs docs-clean docs-serve
+.PHONY: install format lint test test-all test-sentinel clean redis-start redis-stop check-types check docs docs-clean docs-serve docs-multi
 
 install:
 	poetry install --all-extras
@@ -48,6 +48,10 @@ docs:
 docs-clean:
 	rm -rf docs/_build
 	rm -rf docs/examples/checkpoints docs/examples/human_in_the_loop docs/examples/memory docs/examples/middleware docs/examples/react_agent
+
+docs-multi:
+	python docs/copy_notebooks.py
+	sphinx-multiversion docs docs/_build/html
 
 docs-serve: docs
 	python -m http.server 8085 --directory docs/_build/html
