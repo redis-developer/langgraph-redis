@@ -1,4 +1,4 @@
-.PHONY: install format lint test test-all test-sentinel clean redis-start redis-stop check-types check
+.PHONY: install format lint test test-all test-sentinel clean redis-start redis-stop check-types check docs docs-clean docs-serve
 
 install:
 	poetry install --all-extras
@@ -40,6 +40,17 @@ find-dead-code:
 	poetry run find-dead-code
 
 check: lint test
+
+docs:
+	python docs/copy_notebooks.py
+	sphinx-build -b html docs docs/_build/html
+
+docs-clean:
+	rm -rf docs/_build
+	rm -rf docs/examples/checkpoints docs/examples/human_in_the_loop docs/examples/memory docs/examples/middleware docs/examples/react_agent
+
+docs-serve: docs
+	python -m http.server 8085 --directory docs/_build/html
 
 clean:
 	find . -type d -name "__pycache__" -exec rm -rf {} +
