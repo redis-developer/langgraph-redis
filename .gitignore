@@ -107,6 +107,11 @@ instance/
 
 # Sphinx documentation
 docs/_build/
+docs/examples/checkpoints/
+docs/examples/human_in_the_loop/
+docs/examples/memory/
+docs/examples/middleware/
+docs/examples/react_agent/
 
 # PyBuilder
 .pybuilder/
