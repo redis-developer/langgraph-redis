@@ -187,3 +187,39 @@ html[data-theme="dark"] .table tbody tr:hover {
     text-decoration: none !important;
     color: #DC382D !important;
 }
+
+/* -- Version switcher ------------------------------------------------------ */
+.version-switcher {
+    padding: 0.5rem 1rem 1rem;
+    border-top: 1px solid var(--pst-color-border);
+    margin-top: 0.5rem;
+}
+
+.version-switcher h4 {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--pst-color-text-muted);
+    margin: 0.5rem 0 0.4rem;
+}
+
+.version-switcher select {
+    width: 100%;
+    padding: 0.35rem 0.5rem;
+    font-size: 0.85rem;
+    border: 1px solid var(--pst-color-border);
+    border-radius: 6px;
+    background-color: var(--pst-color-surface);
+    color: var(--pst-color-text-base);
+    cursor: pointer;
+    appearance: auto;
+}
+
+.version-switcher select:hover {
+    border-color: var(--pst-color-text-muted);
+}
+
+.version-switcher select:focus {
+    outline: 2px solid #DC382D;
+    outline-offset: 1px;
+}

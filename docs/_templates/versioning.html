@@ -1,0 +1,23 @@
+{% if versions %}
+<div class="version-switcher">
+  <h4>Version</h4>
+  <select onchange="if (this.value) window.location.href = this.value;">
+    {%- for item in versions.tags %}
+    <option
+      value="{{ vpathto(item.name) }}"
+      {% if item.name == current_version.name %}selected{% endif %}
+    >
+      {{ item.name }}{% if loop.first %} (latest){% endif %}
+    </option>
+    {%- endfor %}
+    {%- for item in versions.branches %}
+    <option
+      value="{{ vpathto(item.name) }}"
+      {% if item.name == current_version.name %}selected{% endif %}
+    >
+      {{ item.name }}{% if item.name == "main" %} (dev){% endif %}
+    </option>
+    {%- endfor %}
+  </select>
+</div>
+{% endif %}
