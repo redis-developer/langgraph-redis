@@ -1179,7 +1179,9 @@ class AsyncRedisSaver(
                                 await self._redis.expire(zset_key, ttl_seconds)
                             except Exception:
                                 logger.warning(
-                                    "Failed to apply TTL to write registry key"
+                                    "Failed to apply TTL to write registry key: %s",
+                                    zset_key,
+                                    exc_info=True,
                                 )
 
             else:
@@ -1274,7 +1276,11 @@ class AsyncRedisSaver(
                         ttl_seconds = int(self.ttl_config["default_ttl"] * 60)
                         await self._redis.expire(zset_key, ttl_seconds)
                     except Exception:
-                        logger.warning("Failed to apply TTL to write registry key")
+                        logger.warning(
+                            "Failed to apply TTL to write registry key: %s",
+                            zset_key,
+                            exc_info=True,
+                        )
 
         except asyncio.CancelledError:
             # Handle cancellation/interruption

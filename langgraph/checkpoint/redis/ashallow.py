@@ -549,7 +549,11 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
                 try:
                     await self._redis.expire(thread_zset_key, ttl_seconds)
                 except Exception:
-                    logger.warning("Failed to apply TTL to write registry key")
+                    logger.warning(
+                        "Failed to apply TTL to write registry key: %s",
+                        thread_zset_key,
+                        exc_info=True,
+                    )
 
         except asyncio.CancelledError:
             # Handle cancellation/interruption

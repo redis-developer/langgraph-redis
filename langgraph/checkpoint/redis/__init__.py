@@ -697,15 +697,12 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
                 thread_id, checkpoint_ns, checkpoint_id, write_keys
             )
 
-            # Apply TTL to registry key (best-effort)
+            # Apply TTL to registry key (already best-effort inside apply_ttl)
             if self.ttl_config and "default_ttl" in self.ttl_config:
                 ttl_seconds = int(self.ttl_config["default_ttl"] * 60)
-                try:
-                    self._key_registry.apply_ttl(
-                        thread_id, checkpoint_ns, checkpoint_id, ttl_seconds
-                    )
-                except Exception:
-                    logger.warning("Failed to apply TTL to write registry key")
+                self._key_registry.apply_ttl(
+                    thread_id, checkpoint_ns, checkpoint_id, ttl_seconds
+                )
 
     def _get_checkpoint_document_by_id(
         self, thread_id: str, checkpoint_ns: str, checkpoint_id: str

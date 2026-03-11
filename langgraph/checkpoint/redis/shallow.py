@@ -529,13 +529,19 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
             try:
                 self._redis.expire(thread_write_registry_key, ttl_seconds)
             except Exception:
-                logger.warning("Failed to apply TTL to write registry key")
+                logger.warning(
+                    "Failed to apply TTL to write registry key: %s",
+                    thread_write_registry_key,
+                    exc_info=True,
+                )
             for key in write_keys:
                 try:
                     self._redis.expire(key, ttl_seconds)
                 except Exception:
                     logger.warning(
-                        "Failed to apply TTL to checkpoint write key: %s", key
+                        "Failed to apply TTL to checkpoint write key: %s",
+                        key,
+                        exc_info=True,
                     )
 
     def _load_pending_writes(

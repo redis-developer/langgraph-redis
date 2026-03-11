@@ -26,13 +26,11 @@ These tests verify:
 4. TTL is still applied to keys after the pipeline succeeds
 """
 
-import asyncio
 import logging
 import operator
 import sys
 from contextlib import asynccontextmanager, contextmanager
 from typing import Annotated, Any, AsyncGenerator, Dict, Generator, List, TypedDict
-from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
@@ -299,10 +297,6 @@ async def test_async_hitl_ttl_single_resume(redis_url: str) -> None:
         assert resume_count == count_before_resume + 1
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="Sync interrupt() intermittently fails when run after async tests in same process",
-)
 def test_sync_hitl_with_ttl(redis_url: str) -> None:
     """Sync RedisSaver + TTL + HitL interrupt/resume flow."""
     from langgraph.graph import END, START, StateGraph

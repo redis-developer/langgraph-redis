@@ -179,7 +179,11 @@ class SyncCheckpointKeyRegistry(CheckpointKeyRegistry):
         try:
             self._redis.expire(zset_key, ttl_seconds)
         except Exception:
-            logger.warning("Failed to apply TTL to write registry key: %s", zset_key)
+            logger.warning(
+                "Failed to apply TTL to write registry key: %s",
+                zset_key,
+                exc_info=True,
+            )
 
 
 class AsyncCheckpointKeyRegistry(CheckpointKeyRegistry):
@@ -277,4 +281,8 @@ class AsyncCheckpointKeyRegistry(CheckpointKeyRegistry):
         try:
             await self._redis.expire(zset_key, ttl_seconds)
         except Exception:
-            logger.warning("Failed to apply TTL to write registry key: %s", zset_key)
+            logger.warning(
+                "Failed to apply TTL to write registry key: %s",
+                zset_key,
+                exc_info=True,
+            )

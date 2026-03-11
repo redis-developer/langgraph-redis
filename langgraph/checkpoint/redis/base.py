@@ -256,9 +256,6 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
             # Regular TTL setting
             ttl_seconds = int(ttl_minutes * 60)
 
-            # Check if cluster mode is detected (for sync checkpoint savers)
-            cluster_mode = getattr(self, "cluster_mode", False)
-
             # Apply TTL individually per key so that a single EXPIRE failure
             # (e.g. MOVED on Redis Enterprise proxy) does not prevent TTL
             # from being set on the remaining keys.
