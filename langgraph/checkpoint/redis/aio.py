@@ -309,54 +309,31 @@ class AsyncRedisSaver(
         if ttl_minutes is not None:
             # Special case: -1 means remove TTL (make persistent)
             if ttl_minutes == -1:
-                if self.cluster_mode:
-                    # For cluster mode, execute PERSIST operations individually
-                    await self._redis.persist(main_key)
+                # Apply PERSIST individually per key so that a single failure
+                # does not prevent TTL removal on the remaining keys.
+                all_keys = [main_key] + (related_keys or [])
+                for key in all_keys:
+                    try:
+                        await self._redis.persist(key)
+                    except Exception:
+                        logger.warning("Failed to remove TTL from key: %s", key)
 
-                    if related_keys:
-                        for key in related_keys:
-                            await self._redis.persist(key)
-
-                    return True
-                else:
-                    # For non-cluster mode, use pipeline for efficiency
-                    pipeline = self._redis.pipeline()
-
-                    # Remove TTL for main key
-                    pipeline.persist(main_key)
-
-                    # Remove TTL for related keys
-                    if related_keys:
-                        for key in related_keys:
-                            pipeline.persist(key)
-
-                    return await pipeline.execute()
+                return True
 
             # Regular TTL setting
             ttl_seconds = int(ttl_minutes * 60)
 
-            if self.cluster_mode:
-                # For cluster mode, execute TTL operations individually
-                await self._redis.expire(main_key, ttl_seconds)
+            # Apply TTL individually per key so that a single EXPIRE failure
+            # (e.g. MOVED on Redis Enterprise proxy) does not prevent TTL
+            # from being set on the remaining keys.
+            all_keys = [main_key] + (related_keys or [])
+            for key in all_keys:
+                try:
+                    await self._redis.expire(key, ttl_seconds)
+                except Exception:
+                    logger.warning("Failed to apply TTL to key: %s", key)
 
-                if related_keys:
-                    for key in related_keys:
-                        await self._redis.expire(key, ttl_seconds)
-
-                return True
-            else:
-                # For non-cluster mode, use pipeline for efficiency
-                pipeline = self._redis.pipeline()
-
-                # Set TTL for main key
-                pipeline.expire(main_key, ttl_seconds)
-
-                # Set TTL for related keys
-                if related_keys:
-                    for key in related_keys:
-                        pipeline.expire(key, ttl_seconds)
-
-                return await pipeline.execute()
+            return True
 
     async def aget_tuple(self, config: RunnableConfig) -> Optional[CheckpointTuple]:
         """Get a checkpoint tuple from Redis asynchronously."""
@@ -1013,15 +990,26 @@ class AsyncRedisSaver(
                 and ttl_seconds is not None
             ):
                 # In cluster mode, also call expire directly so tests can verify
-                await self._redis.expire(checkpoint_key, ttl_seconds)
+                try:
+                    await self._redis.expire(checkpoint_key, ttl_seconds)
+                except Exception:
+                    logger.warning(
+                        "Failed to apply TTL to checkpoint key: %s", checkpoint_key
+                    )
 
             # Update latest checkpoint pointer
             latest_pointer_key = f"checkpoint_latest:{storage_safe_thread_id}:{storage_safe_checkpoint_ns}"
             await self._redis.set(latest_pointer_key, checkpoint_key)
 
-            # Apply TTL to latest pointer key as well
+            # Apply TTL to latest pointer key as well (best-effort)
             if ttl_seconds is not None:
-                await self._redis.expire(latest_pointer_key, ttl_seconds)
+                try:
+                    await self._redis.expire(latest_pointer_key, ttl_seconds)
+                except Exception:
+                    logger.warning(
+                        "Failed to apply TTL to latest pointer key: %s",
+                        latest_pointer_key,
+                    )
 
             return next_config
 
@@ -1184,16 +1172,28 @@ class AsyncRedisSaver(
                         zadd_mapping = {key: idx for idx, key in enumerate(write_keys)}
                         await self._redis.zadd(zset_key, zadd_mapping)  # type: ignore[arg-type]
 
-                        # Apply TTL to registry key if configured
+                        # Apply TTL to registry key if configured (best-effort)
                         if self.ttl_config and "default_ttl" in self.ttl_config:
                             ttl_seconds = int(self.ttl_config.get("default_ttl") * 60)
-                            await self._redis.expire(zset_key, ttl_seconds)
+                            try:
+                                await self._redis.expire(zset_key, ttl_seconds)
+                            except Exception:
+                                logger.warning(
+                                    "Failed to apply TTL to write registry key: %s",
+                                    zset_key,
+                                    exc_info=True,
+                                )
 
             else:
-                # For non-cluster mode, use pipeline without transaction to avoid lock contention
+                # For non-cluster mode, use pipeline without transaction to avoid lock contention.
+                # IMPORTANT: Only critical commands (JSON.SET, JSON.MERGE, ZADD) go in the
+                # pipeline. EXPIRE (TTL) commands are applied separately afterward to avoid
+                # pipeline failures on Redis Enterprise proxy, where mixed JSON module +
+                # native commands in a single pipeline can cause EXPIRE to fail, aborting
+                # the entire pipeline and losing interrupt writes.
                 pipeline = self._redis.pipeline(transaction=False)
 
-                # Add all write operations to the pipeline efficiently
+                # Add all write operations to the pipeline (critical)
                 for write_obj in writes_objects:
                     key = self._make_redis_checkpoint_writes_key_cached(
                         thread_id,
@@ -1206,7 +1206,56 @@ class AsyncRedisSaver(
                     pipeline.json().set(key, "$", cast(Any, write_obj))
                     created_keys.append(key)
 
-                # Add TTL operations to the pipeline if configured
+                # Update checkpoint to indicate it has writes (critical)
+                checkpoint_key = ""
+                if writes_objects:
+                    checkpoint_key = self._make_redis_checkpoint_key(
+                        thread_id, checkpoint_ns, checkpoint_id
+                    )
+                    pipeline.json().merge(checkpoint_key, "$", {"has_writes": True})
+
+                # Registry operation (critical)
+                zset_key = ""
+                if self._key_registry and created_keys:
+                    zset_key = self._key_registry.make_write_keys_zset_key(
+                        thread_id, checkpoint_ns, checkpoint_id
+                    )
+                    zadd_mapping = {key: idx for idx, key in enumerate(created_keys)}
+                    pipeline.zadd(zset_key, zadd_mapping)  # type: ignore[arg-type]
+
+                # Execute critical commands with raise_on_error=False to get
+                # per-command results instead of aborting on first failure
+                results = await pipeline.execute(raise_on_error=False)
+
+                # Check results for critical command failures
+                merge_failed = False
+                for result in results:
+                    if isinstance(result, Exception):
+                        err_str = str(result)
+                        if "JSON.MERGE" in err_str or "merge" in err_str.lower():
+                            merge_failed = True
+                        else:
+                            raise result
+
+                # Handle JSON.MERGE fallback for older Redis versions
+                if merge_failed and checkpoint_key:
+                    try:
+                        checkpoint_data = await self._redis.json().get(  # type: ignore[misc]
+                            checkpoint_key
+                        )
+                        if isinstance(
+                            checkpoint_data, dict
+                        ) and not checkpoint_data.get("has_writes"):
+                            checkpoint_data["has_writes"] = True
+                            await self._redis.json().set(  # type: ignore[misc]
+                                checkpoint_key, "$", checkpoint_data
+                            )
+                    except Exception:
+                        pass
+
+                # Apply TTL separately (best-effort — failures here don't lose
+                # writes). Individual calls ensure partial success: if one key's
+                # EXPIRE fails on RE proxy, the others still get TTL applied.
                 if (
                     created_keys
                     and self.ttl_config
@@ -1214,113 +1263,24 @@ class AsyncRedisSaver(
                 ):
                     ttl_seconds = int(self.ttl_config["default_ttl"] * 60)
                     for key in created_keys:
-                        pipeline.expire(key, ttl_seconds)
+                        try:
+                            await self._redis.expire(key, ttl_seconds)
+                        except Exception:
+                            logger.warning(
+                                "Failed to apply TTL to checkpoint write key: %s",
+                                key,
+                            )
 
-                # Update checkpoint to indicate it has writes
-                if writes_objects:
-                    checkpoint_key = self._make_redis_checkpoint_key(
-                        thread_id, checkpoint_ns, checkpoint_id
-                    )
-                    # Use merge to update existing document without error
-                    pipeline.json().merge(checkpoint_key, "$", {"has_writes": True})
-
-                # Integrate registry operations into the pipeline if registry is available
-                write_keys = []
-                for write_obj in writes_objects:
-                    key = self._make_redis_checkpoint_writes_key_cached(
-                        thread_id,
-                        checkpoint_ns,
-                        checkpoint_id,
-                        task_id,
-                        write_obj["idx"],  # type: ignore[arg-type]
-                    )
-                    write_keys.append(key)
-
-                if self._key_registry and write_keys:
-                    # Use per-checkpoint sorted set registry
-                    zset_key = self._key_registry.make_write_keys_zset_key(
-                        thread_id, checkpoint_ns, checkpoint_id
-                    )
-
-                    # Add all write keys with their index as score for ordering
-                    zadd_mapping = {key: idx for idx, key in enumerate(write_keys)}
-                    pipeline.zadd(zset_key, zadd_mapping)  # type: ignore[arg-type]
-
-                    # Apply TTL to registry key if configured
-                    if self.ttl_config and "default_ttl" in self.ttl_config:
-                        ttl_seconds = int(self.ttl_config.get("default_ttl") * 60)
-                        pipeline.expire(zset_key, ttl_seconds)
-
-                # Execute everything in one round trip
-                try:
-                    await pipeline.execute()
-                except Exception as e:
-                    # Check if JSON.MERGE failed (older Redis versions)
-                    if "JSON.MERGE" in str(e) or "merge" in str(e).lower():
-                        # Retry without JSON.MERGE for older Redis versions
-                        async with self._redis.pipeline(
-                            transaction=False
-                        ) as fallback_pipeline:
-                            # Re-add all the write operations
-                            for write_obj in writes_objects:
-                                key = self._make_redis_checkpoint_writes_key_cached(
-                                    thread_id,
-                                    checkpoint_ns,
-                                    checkpoint_id,
-                                    task_id,
-                                    write_obj["idx"],  # type: ignore[arg-type]
-                                )
-                                fallback_pipeline.json().set(
-                                    key, "$", cast(Any, write_obj)
-                                )
-
-                            # Add TTL operations if configured
-                            if (
-                                created_keys
-                                and self.ttl_config
-                                and "default_ttl" in self.ttl_config
-                            ):
-                                ttl_seconds = int(self.ttl_config["default_ttl"] * 60)
-                                for key in created_keys:
-                                    fallback_pipeline.expire(key, ttl_seconds)
-
-                            # Re-add registry operations if needed
-                            if self._key_registry and write_keys:
-                                zset_key = self._key_registry.make_write_keys_zset_key(
-                                    thread_id, checkpoint_ns, checkpoint_id
-                                )
-                                zadd_mapping = {
-                                    key: idx for idx, key in enumerate(write_keys)
-                                }
-                                fallback_pipeline.zadd(zset_key, zadd_mapping)  # type: ignore[arg-type]
-                                if self.ttl_config and "default_ttl" in self.ttl_config:
-                                    ttl_seconds = int(
-                                        self.ttl_config.get("default_ttl") * 60
-                                    )
-                                    fallback_pipeline.expire(zset_key, ttl_seconds)
-
-                            # Execute the fallback pipeline
-                            await fallback_pipeline.execute()
-
-                            # Update has_writes flag separately for older Redis
-                            if checkpoint_key:
-                                try:
-                                    checkpoint_data = await self._redis.json().get(  # type: ignore[misc]
-                                        checkpoint_key
-                                    )
-                                    if isinstance(
-                                        checkpoint_data, dict
-                                    ) and not checkpoint_data.get("has_writes"):
-                                        checkpoint_data["has_writes"] = True
-                                        await self._redis.json().set(  # type: ignore[misc]
-                                            checkpoint_key, "$", checkpoint_data
-                                        )
-                                except Exception:
-                                    # If this fails, it's not critical - the writes are still saved
-                                    pass
-                    else:
-                        # Re-raise other exceptions
-                        raise
+                if zset_key and self.ttl_config and "default_ttl" in self.ttl_config:
+                    try:
+                        ttl_seconds = int(self.ttl_config["default_ttl"] * 60)
+                        await self._redis.expire(zset_key, ttl_seconds)
+                    except Exception:
+                        logger.warning(
+                            "Failed to apply TTL to write registry key: %s",
+                            zset_key,
+                            exc_info=True,
+                        )
 
         except asyncio.CancelledError:
             # Handle cancellation/interruption

@@ -242,60 +242,31 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         if ttl_minutes is not None:
             # Special case: -1 means remove TTL (make persistent)
             if ttl_minutes == -1:
-                # Check if cluster mode is detected (for sync checkpoint savers)
-                cluster_mode = getattr(self, "cluster_mode", False)
+                # Apply PERSIST individually per key so that a single failure
+                # does not prevent TTL removal on the remaining keys.
+                all_keys = [main_key] + (related_keys or [])
+                for key in all_keys:
+                    try:
+                        self._redis.persist(key)
+                    except Exception:
+                        logger.warning("Failed to remove TTL from key: %s", key)
 
-                if cluster_mode:
-                    # For cluster mode, execute PERSIST operations individually
-                    self._redis.persist(main_key)
-
-                    if related_keys:
-                        for key in related_keys:
-                            self._redis.persist(key)
-
-                    return True
-                else:
-                    # For non-cluster mode, use pipeline for efficiency
-                    pipeline = self._redis.pipeline()
-
-                    # Remove TTL for main key
-                    pipeline.persist(main_key)
-
-                    # Remove TTL for related keys
-                    if related_keys:
-                        for key in related_keys:
-                            pipeline.persist(key)
-
-                    return pipeline.execute()
+                return True
 
             # Regular TTL setting
             ttl_seconds = int(ttl_minutes * 60)
 
-            # Check if cluster mode is detected (for sync checkpoint savers)
-            cluster_mode = getattr(self, "cluster_mode", False)
+            # Apply TTL individually per key so that a single EXPIRE failure
+            # (e.g. MOVED on Redis Enterprise proxy) does not prevent TTL
+            # from being set on the remaining keys.
+            all_keys = [main_key] + (related_keys or [])
+            for key in all_keys:
+                try:
+                    self._redis.expire(key, ttl_seconds)
+                except Exception:
+                    logger.warning("Failed to apply TTL to key: %s", key)
 
-            if cluster_mode:
-                # For cluster mode, execute TTL operations individually
-                self._redis.expire(main_key, ttl_seconds)
-
-                if related_keys:
-                    for key in related_keys:
-                        self._redis.expire(key, ttl_seconds)
-
-                return True
-            else:
-                # For non-cluster mode, use pipeline for efficiency
-                pipeline = self._redis.pipeline()
-
-                # Set TTL for main key
-                pipeline.expire(main_key, ttl_seconds)
-
-                # Set TTL for related keys
-                if related_keys:
-                    for key in related_keys:
-                        pipeline.expire(key, ttl_seconds)
-
-                return pipeline.execute()
+            return True
 
     def _dump_checkpoint(self, checkpoint: Checkpoint) -> dict[str, Any]:
         """Convert checkpoint to Redis format."""

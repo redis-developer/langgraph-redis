@@ -581,9 +581,15 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
         )
         self._redis.set(latest_pointer_key, checkpoint_key)
 
-        # Apply TTL to latest pointer key as well
+        # Apply TTL to latest pointer key as well (best-effort)
         if ttl_seconds is not None:
-            self._redis.expire(latest_pointer_key, ttl_seconds)
+            try:
+                self._redis.expire(latest_pointer_key, ttl_seconds)
+            except Exception:
+                logger.warning(
+                    "Failed to apply TTL to latest pointer key: %s",
+                    latest_pointer_key,
+                )
 
         return next_config
 
@@ -618,11 +624,16 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
             }
             writes_objects.append(write_obj)
 
-        with self._redis.pipeline(transaction=False) as pipeline:
-            # Keep track of keys we're creating
-            created_keys = []
-            write_keys = []
+        # IMPORTANT: Only critical commands (JSON.SET, JSON.MERGE) go in the pipeline.
+        # EXPIRE (TTL) commands are applied separately afterward to avoid pipeline
+        # failures on Redis Enterprise proxy, where mixed JSON module + native commands
+        # in a single pipeline can cause EXPIRE to fail, aborting the entire pipeline
+        # and losing interrupt writes.
+        write_keys: list[str] = []
+        checkpoint_key = ""
+        merge_failed = False
 
+        with self._redis.pipeline(transaction=False) as pipeline:
             for write_obj in writes_objects:
                 idx_value = write_obj["idx"]
                 assert isinstance(idx_value, int)
@@ -635,72 +646,50 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
                 )
                 write_keys.append(key)
                 pipeline.json().set(key, "$", cast(Any, write_obj))
-                created_keys.append(key)
 
-            # Add TTL operations to the pipeline if configured
-            if created_keys and self.ttl_config and "default_ttl" in self.ttl_config:
-                ttl_seconds = int(self.ttl_config["default_ttl"] * 60)
-                for key in created_keys:
-                    pipeline.expire(key, ttl_seconds)
-
-            # Update checkpoint to indicate it has writes
+            # Update checkpoint to indicate it has writes (critical)
             if writes_objects:
                 checkpoint_key = self._make_redis_checkpoint_key_cached(
                     thread_id, checkpoint_ns, checkpoint_id
                 )
-                # Use merge to update existing document
                 pipeline.json().merge(checkpoint_key, "$", {"has_writes": True})
 
+            # Execute critical commands with raise_on_error=False
+            results = pipeline.execute(raise_on_error=False)
+
+            # Check results for critical command failures
+            for result in results:
+                if isinstance(result, Exception):
+                    err_str = str(result)
+                    if "JSON.MERGE" in err_str or "merge" in err_str.lower():
+                        merge_failed = True
+                    else:
+                        raise result
+
+        # Handle JSON.MERGE fallback for older Redis versions
+        if merge_failed and checkpoint_key:
             try:
-                pipeline.execute()
-            except Exception as e:
-                # Check if JSON.MERGE failed (older Redis versions)
-                if "JSON.MERGE" in str(e) or "merge" in str(e).lower():
-                    # Retry without JSON.MERGE for older Redis versions
-                    with self._redis.pipeline(transaction=False) as fallback_pipeline:
-                        # Re-add all the write operations
-                        for write_obj in writes_objects:
-                            idx_value = write_obj["idx"]
-                            assert isinstance(idx_value, int)
-                            key = self._make_redis_checkpoint_writes_key_cached(
-                                thread_id,
-                                checkpoint_ns,
-                                checkpoint_id,
-                                task_id,
-                                idx_value,
-                            )
-                            fallback_pipeline.json().set(key, "$", cast(Any, write_obj))
+                checkpoint_data = self._redis.json().get(checkpoint_key)
+                if isinstance(checkpoint_data, dict) and not checkpoint_data.get(
+                    "has_writes"
+                ):
+                    checkpoint_data["has_writes"] = True
+                    self._redis.json().set(checkpoint_key, "$", checkpoint_data)
+            except Exception:
+                pass
 
-                        # Add TTL operations if configured
-                        if (
-                            created_keys
-                            and self.ttl_config
-                            and "default_ttl" in self.ttl_config
-                        ):
-                            ttl_seconds = int(self.ttl_config["default_ttl"] * 60)
-                            for key in created_keys:
-                                fallback_pipeline.expire(key, ttl_seconds)
-
-                        # Execute the fallback pipeline
-                        fallback_pipeline.execute()
-
-                        # Update has_writes flag separately for older Redis
-                        if checkpoint_key:
-                            try:
-                                checkpoint_data = self._redis.json().get(checkpoint_key)
-                                if isinstance(
-                                    checkpoint_data, dict
-                                ) and not checkpoint_data.get("has_writes"):
-                                    checkpoint_data["has_writes"] = True
-                                    self._redis.json().set(
-                                        checkpoint_key, "$", checkpoint_data
-                                    )
-                            except Exception:
-                                # If this fails, it's not critical - the writes are still saved
-                                pass
-                else:
-                    # Re-raise other exceptions
-                    raise
+        # Apply TTL separately (best-effort — failures here don't lose writes).
+        # Individual calls ensure partial success: if one key's EXPIRE fails
+        # on RE proxy, the others still get TTL applied.
+        if write_keys and self.ttl_config and "default_ttl" in self.ttl_config:
+            ttl_seconds = int(self.ttl_config["default_ttl"] * 60)
+            for key in write_keys:
+                try:
+                    self._redis.expire(key, ttl_seconds)
+                except Exception:
+                    logger.warning(
+                        "Failed to apply TTL to checkpoint write key: %s", key
+                    )
 
         # Update key registry with the write keys
         if self._key_registry and write_keys:
@@ -708,7 +697,7 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
                 thread_id, checkpoint_ns, checkpoint_id, write_keys
             )
 
-            # Apply TTL to registry key if configured
+            # Apply TTL to registry key (already best-effort inside apply_ttl)
             if self.ttl_config and "default_ttl" in self.ttl_config:
                 ttl_seconds = int(self.ttl_config["default_ttl"] * 60)
                 self._key_registry.apply_ttl(

@@ -188,15 +188,22 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
             thread_id, checkpoint_ns
         )
 
+        # Only critical commands (JSON.SET) go in the pipeline.
+        # EXPIRE is applied separately to avoid pipeline failures on
+        # Redis Enterprise proxy with mixed JSON + native commands.
         with self._redis.pipeline(transaction=False) as pipeline:
             pipeline.json().set(checkpoint_key, "$", checkpoint_data)
-
-            # Apply TTL if configured
-            if self.ttl_config and "default_ttl" in self.ttl_config:
-                ttl_seconds = int(self.ttl_config.get("default_ttl") * 60)
-                pipeline.expire(checkpoint_key, ttl_seconds)
-
             pipeline.execute()
+
+        # Apply TTL separately (best-effort)
+        if self.ttl_config and "default_ttl" in self.ttl_config:
+            ttl_seconds = int(self.ttl_config.get("default_ttl") * 60)
+            try:
+                self._redis.expire(checkpoint_key, ttl_seconds)
+            except Exception:
+                logger.warning(
+                    "Failed to apply TTL to checkpoint key: %s", checkpoint_key
+                )
 
         # NOTE: We intentionally do NOT clean up old writes here.
         # In the HITL (Human-in-the-Loop) flow, interrupt writes are saved via
@@ -353,12 +360,16 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         if not checkpoint_data or not isinstance(checkpoint_data, dict):
             return None
 
-        # TTL refresh if enabled - always refresh for shallow implementation
-        # Since there's only one checkpoint, the overhead is minimal
+        # TTL refresh if enabled (best-effort)
         if self.ttl_config and self.ttl_config.get("refresh_on_read"):
             default_ttl_minutes = self.ttl_config.get("default_ttl", 60)
             ttl_seconds = int(default_ttl_minutes * 60)
-            self._redis.expire(checkpoint_key, ttl_seconds)
+            try:
+                self._redis.expire(checkpoint_key, ttl_seconds)
+            except Exception:
+                logger.warning(
+                    "Failed to refresh TTL on checkpoint key: %s", checkpoint_key
+                )
 
         # Parse the checkpoint data
         checkpoint = checkpoint_data.get("checkpoint", {})
@@ -490,33 +501,48 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
             )
             write_keys.append(key)
 
-        # Create a unified pipeline for all operations
+        # Only critical commands (JSON.SET, ZADD) go in the pipeline.
+        # EXPIRE (TTL) is applied separately to avoid pipeline failures on
+        # Redis Enterprise proxy with mixed JSON + native commands.
         with self._redis.pipeline(transaction=False) as pipeline:
 
-            # Add all JSON write operations - always overwrite for simplicity
+            # Add all JSON write operations (critical)
             for idx, write_obj in enumerate(writes_objects):
                 key = write_keys[idx]
-                # Always set the complete object - simpler and faster than checking existence
                 pipeline.json().set(key, "$", write_obj)
 
-            # THREAD-LEVEL REGISTRY: Store write keys in thread-level sorted set
-            # These will be cleared when checkpoint changes
+            # Registry operation (critical)
             zadd_mapping = {key: idx for idx, key in enumerate(write_keys)}
             pipeline.zadd(thread_write_registry_key, zadd_mapping)  # type: ignore[arg-type]
 
-            # Note: We don't update has_writes on the checkpoint anymore
-            # because put_writes can be called before the checkpoint exists
+            # Execute critical commands only
+            results = pipeline.execute(raise_on_error=False)
 
-            # Apply TTL to registry key if configured
-            if self.ttl_config and "default_ttl" in self.ttl_config:
-                ttl_seconds = int(self.ttl_config.get("default_ttl") * 60)
-                pipeline.expire(thread_write_registry_key, ttl_seconds)
-                # Also apply TTL to all write keys
-                for key in write_keys:
-                    pipeline.expire(key, ttl_seconds)
+            # Check results for critical command failures
+            for result in results:
+                if isinstance(result, Exception):
+                    raise result
 
-            # Execute everything in one round trip
-            pipeline.execute()
+        # Apply TTL separately (best-effort — failures don't lose writes)
+        if self.ttl_config and "default_ttl" in self.ttl_config:
+            ttl_seconds = int(self.ttl_config.get("default_ttl") * 60)
+            try:
+                self._redis.expire(thread_write_registry_key, ttl_seconds)
+            except Exception:
+                logger.warning(
+                    "Failed to apply TTL to write registry key: %s",
+                    thread_write_registry_key,
+                    exc_info=True,
+                )
+            for key in write_keys:
+                try:
+                    self._redis.expire(key, ttl_seconds)
+                except Exception:
+                    logger.warning(
+                        "Failed to apply TTL to checkpoint write key: %s",
+                        key,
+                        exc_info=True,
+                    )
 
     def _load_pending_writes(
         self, thread_id: str, checkpoint_ns: str, checkpoint_id: str

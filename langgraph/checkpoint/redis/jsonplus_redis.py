@@ -8,6 +8,46 @@ from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 logger = logging.getLogger(__name__)
 
 
+def _interrupt_fields() -> set[str]:
+    """Return the set of field names on the installed Interrupt dataclass.
+
+    langgraph <=1.0.x has Interrupt(value, id).
+    langgraph >=1.1.x has Interrupt(value, resumable, ns, when).
+    """
+    from langgraph.types import Interrupt
+
+    return {f.name for f in dataclasses.fields(Interrupt)}
+
+
+def _serialize_interrupt(obj: Any, *, preprocess: Any = None) -> dict[str, Any]:
+    """Serialize an Interrupt object using whichever fields exist."""
+    fields = _interrupt_fields()
+    result: dict[str, Any] = {"__interrupt__": True}
+    if preprocess is not None:
+        result["value"] = preprocess(obj.value)
+    else:
+        result["value"] = obj.value
+    # Persist every field the installed Interrupt has (except value, handled above)
+    for field in ("id", "resumable", "ns", "when"):
+        if field in fields:
+            result[field] = getattr(obj, field)
+    return result
+
+
+def _deserialize_interrupt(obj: dict[str, Any], *, revive: Any = None) -> Any:
+    """Reconstruct an Interrupt from a serialized dict, tolerating both formats."""
+    from langgraph.types import Interrupt
+
+    fields = _interrupt_fields()
+    value = revive(obj["value"]) if revive is not None else obj["value"]
+    kwargs: dict[str, Any] = {"value": value}
+    # Pass through whichever optional fields the installed class accepts
+    for field in ("id", "resumable", "ns", "when"):
+        if field in fields and field in obj:
+            kwargs[field] = obj[field]
+    return Interrupt(**kwargs)
+
+
 class JsonPlusRedisSerializer(JsonPlusSerializer):
     """Redis-optimized serializer using orjson for JSON processing.
 
@@ -42,11 +82,7 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
         from langgraph.types import Interrupt
 
         if isinstance(obj, Interrupt):
-            return {
-                "__interrupt__": True,
-                "value": obj.value,
-                "id": obj.id,
-            }
+            return _serialize_interrupt(obj)
 
         # Handle Send objects with a type marker (issue #94)
         from langgraph.types import Send
@@ -89,12 +125,7 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
         from langgraph.types import Interrupt, Send
 
         if isinstance(obj, Interrupt):
-            # Add type marker to distinguish from plain dicts
-            return {
-                "__interrupt__": True,
-                "value": self._preprocess_interrupts(obj.value),
-                "id": obj.id,
-            }
+            return _serialize_interrupt(obj, preprocess=self._preprocess_interrupts)
         elif isinstance(obj, Send):
             # Add type marker to distinguish from plain dicts (issue #94)
             return {
@@ -238,7 +269,7 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
         'lc', 'type', and 'constructor' fields, causing errors when the application
         expects actual message objects with 'role' and 'content' attributes.
 
-        It also handles LangGraph Interrupt objects which serialize to {"value": ..., "resumable": ..., "ns": ..., "when": ...}
+        It also handles LangGraph Interrupt objects (both old and new serialization formats)
         and must be reconstructed to prevent AttributeError when accessing Interrupt attributes.
 
         Additionally, it handles dataclass objects (like langmem's RunningSummary) that are serialized
@@ -271,25 +302,14 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
                     # Reviver successfully reconstructed the object
                     return revived
 
-            # Check if this is a serialized Interrupt object with type marker
-            # LangGraph 1.0+: Interrupt objects serialize to {"__interrupt__": True, "value": ..., "id": ...}
-            # This must be done before recursively processing to avoid losing the structure
-            if (
-                obj.get("__interrupt__") is True
-                and "value" in obj
-                and "id" in obj
-                and len(obj) == 3
-            ):
-                # Try to reconstruct as an Interrupt object
+            # Check if this is a serialized Interrupt object with type marker.
+            # Handles both formats:
+            #   langgraph <=1.0.x: {"__interrupt__": True, "value": ..., "id": ...}
+            #   langgraph >=1.1.x: {"__interrupt__": True, "value": ..., "resumable": ..., "ns": ..., "when": ...}
+            if obj.get("__interrupt__") is True and "value" in obj:
                 try:
-                    from langgraph.types import Interrupt
-
-                    return Interrupt(
-                        value=self._revive_if_needed(obj["value"]),
-                        id=obj["id"],
-                    )
+                    return _deserialize_interrupt(obj, revive=self._revive_if_needed)
                 except (ImportError, TypeError, ValueError) as e:
-                    # If we can't import or construct Interrupt, log and fall through
                     logger.debug(
                         "Failed to deserialize Interrupt object: %s", e, exc_info=True
                     )
