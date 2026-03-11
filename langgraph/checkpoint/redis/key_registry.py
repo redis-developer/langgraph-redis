@@ -4,6 +4,7 @@ This module provides a registry for tracking writes per checkpoint using Redis
 sorted sets, eliminating the need for some FT.SEARCH operations.
 """
 
+import logging
 from typing import List, Optional, Union
 
 from redis import Redis
@@ -12,6 +13,8 @@ from redis.asyncio.cluster import RedisCluster as AsyncRedisCluster
 from redis.cluster import RedisCluster
 
 from langgraph.checkpoint.redis.util import to_storage_safe_id, to_storage_safe_str
+
+logger = logging.getLogger(__name__)
 
 WRITE_KEYS_ZSET_PREFIX = "write_keys_zset"
 REDIS_KEY_SEPARATOR = ":"
@@ -169,11 +172,14 @@ class SyncCheckpointKeyRegistry(CheckpointKeyRegistry):
     def apply_ttl(
         self, thread_id: str, checkpoint_ns: str, checkpoint_id: str, ttl_seconds: int
     ) -> None:
-        """Apply TTL to the checkpoint's write registry."""
+        """Apply TTL to the checkpoint's write registry (best-effort)."""
         zset_key = self.make_write_keys_zset_key(
             thread_id, checkpoint_ns, checkpoint_id
         )
-        self._redis.expire(zset_key, ttl_seconds)
+        try:
+            self._redis.expire(zset_key, ttl_seconds)
+        except Exception:
+            logger.warning("Failed to apply TTL to write registry key: %s", zset_key)
 
 
 class AsyncCheckpointKeyRegistry(CheckpointKeyRegistry):
@@ -264,8 +270,11 @@ class AsyncCheckpointKeyRegistry(CheckpointKeyRegistry):
     async def apply_ttl(
         self, thread_id: str, checkpoint_ns: str, checkpoint_id: str, ttl_seconds: int
     ) -> None:
-        """Apply TTL to the checkpoint's write registry."""
+        """Apply TTL to the checkpoint's write registry (best-effort)."""
         zset_key = self.make_write_keys_zset_key(
             thread_id, checkpoint_ns, checkpoint_id
         )
-        await self._redis.expire(zset_key, ttl_seconds)
+        try:
+            await self._redis.expire(zset_key, ttl_seconds)
+        except Exception:
+            logger.warning("Failed to apply TTL to write registry key: %s", zset_key)
