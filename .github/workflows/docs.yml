@@ -44,7 +44,7 @@ jobs:
         run: poetry install --all-extras
 
       - name: Install docs dependencies
-        run: pip install -r docs/requirements.txt
+        run: poetry run pip install -r docs/requirements.txt
 
       - name: Build versioned documentation
         run: |
@@ -72,8 +72,8 @@ jobs:
             fi
 
             git checkout "$tag" -- docs/ examples/ || git checkout "$tag" -- docs/
-            python docs/copy_notebooks.py || true
-            sphinx-build -b html docs "$OUTPUT_DIR/$tag"
+            poetry run python docs/copy_notebooks.py || true
+            poetry run sphinx-build -b html docs "$OUTPUT_DIR/$tag"
             git checkout HEAD -- docs/ examples/ 2>/dev/null || git checkout HEAD -- docs/
 
             if [ -z "$LATEST_TAG" ]; then
@@ -89,8 +89,8 @@ jobs:
           # Build docs for main (current HEAD)
           echo "=== Building docs for main ==="
           git checkout HEAD -- docs/ examples/ 2>/dev/null || true
-          python docs/copy_notebooks.py
-          sphinx-build -b html docs "$OUTPUT_DIR/main"
+          poetry run python docs/copy_notebooks.py
+          poetry run sphinx-build -b html docs "$OUTPUT_DIR/main"
 
           VERSIONS_JSON=$(echo "$VERSIONS_JSON" | python3 -c "
           import json, sys
@@ -123,6 +123,9 @@ jobs:
               json.dump(data, f, indent=2)
           "
           done
+
+          # Ensure GitHub Pages doesn't process with Jekyll
+          touch "$OUTPUT_DIR/.nojekyll"
 
           # Create root redirect
           cat > "$OUTPUT_DIR/index.html" << REDIRECT_EOF
