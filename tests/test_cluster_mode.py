@@ -417,26 +417,17 @@ def test_checkpoint_saver_ttl_behavior(checkpoint_saver):
 
     checkpoint_saver._apply_ttl_to_keys(main_key, blob_keys)
 
-    if checkpoint_saver.cluster_mode:
-        # In cluster mode, TTL operations should be called directly
-        assert len(client.expire_calls) == 3
-        assert {
-            "key": main_key,
-            "ttl": 300,
-        } in client.expire_calls  # 5 minutes = 300 seconds
-        assert {"key": "blob:key1", "ttl": 300} in client.expire_calls
-        assert {"key": "blob:key2", "ttl": 300} in client.expire_calls
-        # Pipeline should not be used
-        assert len(client.pipeline_calls) == 0
-    else:
-        # In non-cluster mode, pipeline should be used
-        assert len(client.pipeline_calls) > 0
-        assert client.pipeline_calls[0]["transaction"] is True
-        client._pipeline.expire.assert_any_call(main_key, 300)
-        client._pipeline.expire.assert_any_call("blob:key1", 300)
-        client._pipeline.expire.assert_any_call("blob:key2", 300)
-        # Direct expire calls should not be made
-        assert len(client.expire_calls) == 0
+    # Both cluster and non-cluster mode now use individual expire calls
+    # (no pipeline) to avoid EXPIRE failures on Redis Enterprise proxy
+    assert len(client.expire_calls) == 3
+    assert {
+        "key": main_key,
+        "ttl": 300,
+    } in client.expire_calls  # 5 minutes = 300 seconds
+    assert {"key": "blob:key1", "ttl": 300} in client.expire_calls
+    assert {"key": "blob:key2", "ttl": 300} in client.expire_calls
+    # Pipeline should not be used for TTL operations
+    assert len(client.pipeline_calls) == 0
 
 
 def test_checkpoint_saver_delete_thread_behavior(checkpoint_saver):

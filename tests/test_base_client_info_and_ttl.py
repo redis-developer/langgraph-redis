@@ -133,20 +133,16 @@ def test_apply_ttl_to_keys_with_default_ttl():
     saver = MockRedisSaver()
     saver.ttl_config = {"default_ttl": 5}  # 5 minutes
 
-    # Mock pipeline
-    mock_pipeline = MagicMock()
-    saver._redis.pipeline = MagicMock(return_value=mock_pipeline)
-    mock_pipeline.execute = MagicMock(return_value=[True, True, True])
+    saver._redis.expire = MagicMock(return_value=True)
 
     result = saver._apply_ttl_to_keys("main_key", ["related1", "related2"])
 
-    # Should create pipeline and set TTL
-    saver._redis.pipeline.assert_called_once()
-    mock_pipeline.expire.assert_any_call("main_key", 300)  # 5 * 60
-    mock_pipeline.expire.assert_any_call("related1", 300)
-    mock_pipeline.expire.assert_any_call("related2", 300)
-    assert mock_pipeline.expire.call_count == 3
-    mock_pipeline.execute.assert_called_once()
+    # Should call expire individually per key (not via pipeline)
+    saver._redis.expire.assert_any_call("main_key", 300)  # 5 * 60
+    saver._redis.expire.assert_any_call("related1", 300)
+    saver._redis.expire.assert_any_call("related2", 300)
+    assert saver._redis.expire.call_count == 3
+    assert result is True
 
 
 def test_apply_ttl_to_keys_cluster_mode():
@@ -173,14 +169,13 @@ def test_apply_ttl_to_keys_with_explicit_ttl():
     saver = MockRedisSaver()
     saver.ttl_config = {"default_ttl": 5}  # This should be overridden
 
-    mock_pipeline = MagicMock()
-    saver._redis.pipeline = MagicMock(return_value=mock_pipeline)
-    mock_pipeline.execute = MagicMock(return_value=[True])
+    saver._redis.expire = MagicMock(return_value=True)
 
     # Provide explicit TTL of 15 minutes
     result = saver._apply_ttl_to_keys("main_key", [], ttl_minutes=15)
 
-    mock_pipeline.expire.assert_called_once_with("main_key", 900)  # 15 * 60
+    saver._redis.expire.assert_called_once_with("main_key", 900)  # 15 * 60
+    assert result is True
 
 
 def test_load_writes_from_redis_processing():
