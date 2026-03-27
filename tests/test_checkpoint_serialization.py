@@ -609,6 +609,43 @@ def test_issue_181_msgpack_checkpoint_keeps_messages_json_safe() -> None:
     assert restored["channel_values"]["binary"] == b"abc"
 
 
+def test_msgpack_checkpoint_with_non_string_keys_remains_json_safe() -> None:
+    """Ensure msgpack checkpoints with non-string keys still normalize for Redis JSON."""
+    from langchain_core.messages import HumanMessage
+
+    from langgraph.checkpoint.redis.base import BaseRedisSaver
+
+    class DummySaver(BaseRedisSaver):
+        def create_indexes(self) -> None:
+            pass
+
+        def configure_client(self, **kwargs) -> None:
+            self._redis = None
+
+    saver = DummySaver(redis_client=object())
+    messages = [HumanMessage(content="hello")]
+
+    checkpoint = create_checkpoint(
+        checkpoint=empty_checkpoint(),
+        channels={
+            "messages": messages,
+            "binary": b"abc",
+            "mapping": {1: "one", 2: "two"},
+        },
+        step=1,
+    )
+    checkpoint["channel_values"]["messages"] = messages
+    checkpoint["channel_values"]["binary"] = b"abc"
+    checkpoint["channel_values"]["mapping"] = {1: "one", 2: "two"}
+
+    dumped = saver._dump_checkpoint(checkpoint)
+
+    assert dumped["type"] == "msgpack"
+    assert dumped["channel_values"]["mapping"] == {"1": "one", "2": "two"}
+    assert isinstance(dumped["channel_values"]["messages"][0], dict)
+    assert dumped["channel_values"]["binary"] == {"__bytes__": "YWJj"}
+
+
 def test_subgraph_state_history_pending_sends(redis_url: str) -> None:
     """Test that get_state_history with subgraphs properly handles pending_sends.
 

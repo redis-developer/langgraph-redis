@@ -296,12 +296,14 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
     def _msgpack_to_redis_json(self, value: Any) -> dict[str, Any]:
         """Convert a msgpack-deserialized checkpoint into Redis JSON-safe data."""
         binary_safe = self._replace_binary_markers(value)
-        type_, data = self.serde.dumps_typed(binary_safe)
-        if type_ != "json":
-            raise TypeError(
-                "Checkpoint payload remained non-JSON-serializable after binary normalization"
-            )
-        return cast(dict, orjson.loads(data))
+        serializer = cast(JsonPlusRedisSerializer, self.serde)
+        processed = serializer._preprocess_interrupts(binary_safe)
+        json_bytes = orjson.dumps(
+            processed,
+            default=serializer._default_handler,
+            option=orjson.OPT_NON_STR_KEYS,
+        )
+        return cast(dict, orjson.loads(json_bytes))
 
     def _replace_binary_markers(self, value: Any) -> Any:
         """Recursively replace binary values with JSON-safe markers."""
