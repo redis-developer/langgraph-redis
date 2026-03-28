@@ -116,6 +116,38 @@ async def test_async_deserializes_langchain_messages(redis_url: str):
 
 
 @pytest.mark.asyncio
+async def test_issue_181_async_checkpoint_with_messages_and_bytes(redis_url: str):
+    """Ensure mixed binary payloads do not break async message checkpoint writes."""
+    async with AsyncRedisSaver.from_conn_string(redis_url) as saver:
+        thread_id = str(uuid4())
+        messages = [
+            HumanMessage(content="What's the weather like?", id="human-1"),
+            AIMessage(content="I'll help you check the weather.", id="ai-1"),
+        ]
+
+        checkpoint = create_checkpoint(
+            checkpoint=empty_checkpoint(),
+            channels={"messages": messages, "binary": b"abc"},
+            step=1,
+        )
+        checkpoint["channel_values"]["messages"] = messages
+        checkpoint["channel_values"]["binary"] = b"abc"
+
+        config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+
+        saved_config = await saver.aput(
+            config, checkpoint, {"source": "test", "step": 1, "writes": {}}, {}
+        )
+        loaded_tuple = await saver.aget_tuple(saved_config)
+
+        assert loaded_tuple is not None
+        loaded_messages = loaded_tuple.checkpoint["channel_values"]["messages"]
+        assert isinstance(loaded_messages[0], HumanMessage)
+        assert isinstance(loaded_messages[1], AIMessage)
+        assert loaded_tuple.checkpoint["channel_values"]["binary"] == b"abc"
+
+
+@pytest.mark.asyncio
 async def test_async_handles_serialized_langchain_format(redis_url: str):
     """Test that async handles the serialized LangChain format that causes MESSAGE_COERCION_FAILURE.
 

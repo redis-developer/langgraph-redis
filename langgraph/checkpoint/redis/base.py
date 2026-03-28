@@ -276,17 +276,14 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         if type_ == "json":
             checkpoint_data = cast(dict, orjson.loads(data))
         else:
-            # For msgpack or other types, deserialize with loads_typed
             checkpoint_data = cast(dict, self.serde.loads_typed((type_, data)))
-
-            # When using msgpack, bytes are preserved - but Redis JSON.SET can't handle them
-            # Encode bytes in channel_values with type marker for JSON storage
-            if "channel_values" in checkpoint_data:
-                for key, value in checkpoint_data["channel_values"].items():
-                    if isinstance(value, bytes):
-                        checkpoint_data["channel_values"][key] = {
-                            "__bytes__": self._encode_blob(value)
-                        }
+            if type_ == "msgpack":
+                # Msgpack fallback can rehydrate LangChain messages as live Python
+                # objects. Normalize the checkpoint back through the JSON serializer
+                # so RedisJSON only sees JSON-safe constructor dictionaries.
+                checkpoint_data = cast(
+                    dict, self._msgpack_to_redis_json(checkpoint_data)
+                )
 
         # Ensure channel_versions are always strings to fix issue #40
         if "channel_versions" in checkpoint_data:
@@ -295,6 +292,30 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
             }
 
         return {"type": type_, **checkpoint_data, "pending_sends": []}
+
+    def _msgpack_to_redis_json(self, value: Any) -> dict[str, Any]:
+        """Convert a msgpack-deserialized checkpoint into Redis JSON-safe data."""
+        binary_safe = self._replace_binary_markers(value)
+        serializer = cast(JsonPlusRedisSerializer, self.serde)
+        processed = serializer._preprocess_interrupts(binary_safe)
+        json_bytes = orjson.dumps(
+            processed,
+            default=serializer._default_handler,
+            option=orjson.OPT_NON_STR_KEYS,
+        )
+        return cast(dict, orjson.loads(json_bytes))
+
+    def _replace_binary_markers(self, value: Any) -> Any:
+        """Recursively replace binary values with JSON-safe markers."""
+        if isinstance(value, bytes):
+            return {"__bytes__": self._encode_blob(value)}
+        if isinstance(value, dict):
+            return {k: self._replace_binary_markers(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [self._replace_binary_markers(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(self._replace_binary_markers(item) for item in value)
+        return value
 
     def _deserialize_channel_values(
         self, channel_values: dict[str, Any]

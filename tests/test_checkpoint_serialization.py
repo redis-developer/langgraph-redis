@@ -561,6 +561,91 @@ def test_checkpoint_with_messages(redis_url: str) -> None:
         assert loaded_messages[1].content == "Let me check that for you."
 
 
+def test_issue_181_msgpack_checkpoint_keeps_messages_json_safe() -> None:
+    """Ensure msgpack fallback does not leak live message objects into Redis JSON."""
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from langgraph.checkpoint.redis.base import BaseRedisSaver
+
+    class DummySaver(BaseRedisSaver):
+        def create_indexes(self) -> None:
+            pass
+
+        def configure_client(self, **kwargs) -> None:
+            self._redis = None
+
+    saver = DummySaver(redis_client=object())
+    messages = [
+        HumanMessage(content="What is the weather in SF?"),
+        AIMessage(content="Let me check that for you."),
+    ]
+
+    checkpoint = create_checkpoint(
+        checkpoint=empty_checkpoint(),
+        channels={"messages": messages, "binary": b"abc"},
+        step=1,
+    )
+    checkpoint["channel_values"]["messages"] = messages
+    checkpoint["channel_values"]["binary"] = b"abc"
+
+    dumped = saver._dump_checkpoint(checkpoint)
+
+    # The mixed bytes payload forces msgpack fallback, but the Redis document
+    # must still be fully JSON-safe.
+    assert dumped["type"] == "msgpack"
+    assert isinstance(dumped["channel_values"]["messages"][0], dict)
+    assert dumped["channel_values"]["messages"][0]["id"][-1] == "HumanMessage"
+    assert dumped["channel_values"]["binary"] == {"__bytes__": "YWJj"}
+
+    restored = saver._load_checkpoint(
+        dumped,
+        saver._deserialize_channel_values(dumped["channel_values"]),
+        [],
+    )
+
+    restored_messages = restored["channel_values"]["messages"]
+    assert isinstance(restored_messages[0], HumanMessage)
+    assert isinstance(restored_messages[1], AIMessage)
+    assert restored["channel_values"]["binary"] == b"abc"
+
+
+def test_msgpack_checkpoint_with_non_string_keys_remains_json_safe() -> None:
+    """Ensure msgpack checkpoints with non-string keys still normalize for Redis JSON."""
+    from langchain_core.messages import HumanMessage
+
+    from langgraph.checkpoint.redis.base import BaseRedisSaver
+
+    class DummySaver(BaseRedisSaver):
+        def create_indexes(self) -> None:
+            pass
+
+        def configure_client(self, **kwargs) -> None:
+            self._redis = None
+
+    saver = DummySaver(redis_client=object())
+    messages = [HumanMessage(content="hello")]
+
+    checkpoint = create_checkpoint(
+        checkpoint=empty_checkpoint(),
+        channels={
+            "messages": messages,
+            "binary": b"abc",
+            "mapping": {1: "one", 2: "two"},
+        },
+        step=1,
+    )
+    checkpoint["channel_values"]["messages"] = messages
+    checkpoint["channel_values"]["binary"] = b"abc"
+    checkpoint["channel_values"]["mapping"] = {1: "one", 2: "two"}
+
+    dumped = saver._dump_checkpoint(checkpoint)
+
+    assert dumped["type"] == "msgpack"
+    assert dumped["channel_values"]["mapping"] == {"1": "one", "2": "two"}
+    assert isinstance(dumped["channel_values"]["messages"][0], dict)
+    assert dumped["channel_values"]["binary"] == {"__bytes__": "YWJj"}
+
+
 def test_subgraph_state_history_pending_sends(redis_url: str) -> None:
     """Test that get_state_history with subgraphs properly handles pending_sends.
 
