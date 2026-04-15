@@ -1,3 +1,4 @@
+import asyncio
 from typing import Any, AsyncGenerator, Dict
 
 import pytest
@@ -494,3 +495,72 @@ async def test_shallow_redis_saver_inline_storage(redis_url: str) -> None:
             # Clean up test data
             await redis_client.flushdb()
             await redis_client.aclose()
+
+
+# --- Issue #179: AsyncShallowRedisSaver construction outside async context ---
+
+
+def test_async_shallow_redis_saver_construction_outside_event_loop(
+    redis_url: str,
+) -> None:
+    """AsyncShallowRedisSaver should be constructable outside an async context (Issue #179).
+
+    Previously, AsyncShallowRedisSaver.__init__ called asyncio.get_running_loop() which
+    raised RuntimeError when no event loop was running.
+    """
+    # This must not raise RuntimeError even when there is no running event loop
+    saver = AsyncShallowRedisSaver(redis_url)
+    assert saver is not None
+    # Loop should be None until asetup() is called
+    assert saver.loop is None
+
+
+def test_async_shallow_redis_saver_construction_with_client_outside_event_loop(
+    redis_url: str,
+) -> None:
+    """AsyncShallowRedisSaver accepts a pre-built client without a running loop (Issue #179)."""
+    from redis.asyncio import Redis as AsyncRedis
+
+    client = AsyncRedis.from_url(redis_url)
+    try:
+        saver = AsyncShallowRedisSaver(redis_client=client)
+        assert saver is not None
+        assert saver.loop is None
+    finally:
+        asyncio.run(client.aclose())
+
+
+@pytest.mark.asyncio
+async def test_async_shallow_redis_saver_loop_captured_in_asetup(
+    redis_url: str,
+) -> None:
+    """asetup() must capture the running event loop so sync wrappers work (Issue #179)."""
+    saver = AsyncShallowRedisSaver(redis_url)
+    assert saver.loop is None  # not yet set
+
+    await saver.asetup()
+
+    assert saver.loop is not None
+    assert saver.loop is asyncio.get_running_loop()
+
+    await saver._redis.aclose()
+
+
+@pytest.mark.asyncio
+async def test_async_shallow_redis_saver_context_manager_after_sync_construction(
+    redis_url: str,
+) -> None:
+    """Saver constructed before entering the async context manager must still work."""
+    saver = AsyncShallowRedisSaver(redis_url)
+
+    async with saver:
+        assert saver.loop is asyncio.get_running_loop()
+
+        config: RunnableConfig = {
+            "configurable": {"thread_id": "issue-179-shallow-test", "checkpoint_ns": ""}
+        }
+        chk: Checkpoint = empty_checkpoint()
+        meta: CheckpointMetadata = {"source": "input", "step": 0, "writes": {}}
+        await saver.aput(config, chk, meta, {})
+        result = await saver.aget_tuple(config)
+        assert result is not None

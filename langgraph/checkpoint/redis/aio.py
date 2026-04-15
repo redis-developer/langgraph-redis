@@ -101,7 +101,9 @@ class AsyncRedisSaver(
             checkpoint_prefix=checkpoint_prefix,
             checkpoint_write_prefix=checkpoint_write_prefix,
         )
-        self.loop = asyncio.get_running_loop()
+        # Deferred: the event loop is captured in asetup() so that the saver can
+        # be constructed outside an async context (Issue #179).
+        self.loop: Optional[asyncio.AbstractEventLoop] = None
 
         # Instance-level cache for frequently used keys (limited size to prevent memory issues)
         self._key_cache: Dict[str, str] = {}
@@ -243,6 +245,13 @@ class AsyncRedisSaver(
 
     async def asetup(self) -> None:
         """Set up the checkpoint saver."""
+        # Capture the running event loop here so that sync wrapper methods
+        # (get_tuple, put, put_writes, …) can dispatch coroutines to it via
+        # asyncio.run_coroutine_threadsafe.  Deferring this to asetup() instead
+        # of __init__ lets callers construct the saver outside an async context
+        # (Issue #179).
+        self.loop = asyncio.get_running_loop()
+
         self.create_indexes()
         await self.checkpoints_index.create(overwrite=False)
         await self.checkpoint_writes_index.create(overwrite=False)
@@ -1307,6 +1316,20 @@ class AsyncRedisSaver(
             task_id (str): Identifier for the task creating the writes.
             task_path (str): Path of the task creating the writes.
         """
+        if self.loop is None:
+            raise RuntimeError(
+                "AsyncRedisSaver must be set up before calling synchronous methods. "
+                "Call `await saver.asetup()` or use `async with saver:` first."
+            )
+        try:
+            if asyncio.get_running_loop() is self.loop:
+                raise asyncio.InvalidStateError(
+                    "Synchronous calls to AsyncRedisSaver are only allowed from a "
+                    "different thread. From the main thread, use the async interface. "
+                    "For example, use `await checkpointer.aput_writes(...)`."
+                )
+        except RuntimeError:
+            pass
         return asyncio.run_coroutine_threadsafe(
             self.aput_writes(config, writes, task_id), self.loop
         ).result()
@@ -1315,12 +1338,17 @@ class AsyncRedisSaver(
         self, thread_id: str, checkpoint_ns: str = "", checkpoint_id: str = ""
     ) -> Dict[str, Any]:
         """Retrieve channel_values using efficient FT.SEARCH with checkpoint_id (sync wrapper)."""
+        if self.loop is None:
+            raise RuntimeError(
+                "AsyncRedisSaver must be set up before calling synchronous methods. "
+                "Call `await saver.asetup()` or use `async with saver:` first."
+            )
         try:
             if asyncio.get_running_loop() is self.loop:
                 raise asyncio.InvalidStateError(
                     "Synchronous calls to AsyncRedisSaver are only allowed from a "
-                    "different thread. From the main thread, use the async interface."
-                    "For example, use `await checkpointer.get_channel_values(...)`."
+                    "different thread. From the main thread, use the async interface. "
+                    "For example, use `await checkpointer.aget_channel_values(...)`."
                 )
         except RuntimeError:
             pass
@@ -1345,6 +1373,11 @@ class AsyncRedisSaver(
         Raises:
             asyncio.InvalidStateError: If called from the wrong thread/event loop
         """
+        if self.loop is None:
+            raise RuntimeError(
+                "AsyncRedisSaver must be set up before calling synchronous methods. "
+                "Call `await saver.asetup()` or use `async with saver:` first."
+            )
         try:
             # check if we are in the main thread, only bg threads can block
             if asyncio.get_running_loop() is self.loop:
@@ -1381,6 +1414,11 @@ class AsyncRedisSaver(
         Raises:
             asyncio.InvalidStateError: If called from the wrong thread/event loop
         """
+        if self.loop is None:
+            raise RuntimeError(
+                "AsyncRedisSaver must be set up before calling synchronous methods. "
+                "Call `await saver.asetup()` or use `async with saver:` first."
+            )
         try:
             # check if we are in the main thread, only bg threads can block
             if asyncio.get_running_loop() is self.loop:

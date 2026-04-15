@@ -77,7 +77,9 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             checkpoint_prefix=checkpoint_prefix,
             checkpoint_write_prefix=checkpoint_write_prefix,
         )
-        self.loop = asyncio.get_running_loop()
+        # Deferred: the event loop is captured in asetup() so that the saver can
+        # be constructed outside an async context (Issue #179).
+        self.loop: Optional[asyncio.AbstractEventLoop] = None
 
         # Instance-level cache for frequently used keys (limited size to prevent memory issues)
         self._key_cache: Dict[str, str] = {}
@@ -139,6 +141,13 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
 
     async def asetup(self) -> None:
         """Initialize Redis indexes asynchronously."""
+        # Capture the running event loop here so that sync wrapper methods
+        # (get_tuple, put, put_writes, …) can dispatch coroutines to it via
+        # asyncio.run_coroutine_threadsafe.  Deferring this to asetup() instead
+        # of __init__ lets callers construct the saver outside an async context
+        # (Issue #179).
+        self.loop = asyncio.get_running_loop()
+
         await self.checkpoints_index.create(overwrite=False)
         await self.checkpoint_writes_index.create(overwrite=False)
 
@@ -725,6 +734,11 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
 
     def get_tuple(self, config: RunnableConfig) -> Optional[CheckpointTuple]:
         """Retrieve a checkpoint tuple from Redis synchronously."""
+        if self.loop is None:
+            raise RuntimeError(
+                "AsyncShallowRedisSaver must be set up before calling synchronous methods. "
+                "Call `await saver.asetup()` or use `async with saver:` first."
+            )
         try:
             if asyncio.get_running_loop() is self.loop:
                 raise asyncio.InvalidStateError(
@@ -747,6 +761,20 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         new_versions: ChannelVersions,
     ) -> RunnableConfig:
         """Store only the latest checkpoint synchronously."""
+        if self.loop is None:
+            raise RuntimeError(
+                "AsyncShallowRedisSaver must be set up before calling synchronous methods. "
+                "Call `await saver.asetup()` or use `async with saver:` first."
+            )
+        try:
+            if asyncio.get_running_loop() is self.loop:
+                raise asyncio.InvalidStateError(
+                    "Synchronous calls to AsyncShallowRedisSaver are only allowed from a "
+                    "different thread. From the main thread, use the async interface. "
+                    "For example, use `await checkpointer.aput(...)`."
+                )
+        except RuntimeError:
+            pass
         return asyncio.run_coroutine_threadsafe(
             self.aput(config, checkpoint, metadata, new_versions), self.loop
         ).result()
@@ -759,6 +787,20 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         task_path: str = "",
     ) -> None:
         """Store intermediate writes synchronously."""
+        if self.loop is None:
+            raise RuntimeError(
+                "AsyncShallowRedisSaver must be set up before calling synchronous methods. "
+                "Call `await saver.asetup()` or use `async with saver:` first."
+            )
+        try:
+            if asyncio.get_running_loop() is self.loop:
+                raise asyncio.InvalidStateError(
+                    "Synchronous calls to AsyncShallowRedisSaver are only allowed from a "
+                    "different thread. From the main thread, use the async interface. "
+                    "For example, use `await checkpointer.aput_writes(...)`."
+                )
+        except RuntimeError:
+            pass
         return asyncio.run_coroutine_threadsafe(
             self.aput_writes(config, writes, task_id), self.loop
         ).result()
@@ -771,6 +813,11 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         channel_versions: Optional[Dict[str, Any]] = None,
     ) -> dict[str, Any]:
         """Retrieve channel_values dictionary with properly constructed message objects (sync wrapper)."""
+        if self.loop is None:
+            raise RuntimeError(
+                "AsyncShallowRedisSaver must be set up before calling synchronous methods. "
+                "Call `await saver.asetup()` or use `async with saver:` first."
+            )
         try:
             if asyncio.get_running_loop() is self.loop:
                 raise asyncio.InvalidStateError(

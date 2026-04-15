@@ -848,3 +848,78 @@ async def test_root_graph_checkpoint(
         checkpoints = [c async for c in checkpointer.alist(config)]
         assert len(checkpoints) > 0
         assert checkpoints[-1].checkpoint["id"] == latest["id"]
+
+
+# --- Issue #179: AsyncRedisSaver construction outside async context ---
+
+
+def test_async_redis_saver_construction_outside_event_loop(redis_url: str) -> None:
+    """AsyncRedisSaver should be constructable outside an async context (Issue #179).
+
+    Previously, AsyncRedisSaver.__init__ called asyncio.get_running_loop() which
+    raised RuntimeError when no event loop was running.
+    """
+    # This must not raise RuntimeError even when there is no running event loop
+    saver = AsyncRedisSaver(redis_url)
+    assert saver is not None
+    # Loop should be None until asetup() is called
+    assert saver.loop is None
+
+
+def test_async_redis_saver_construction_with_client_outside_event_loop(
+    redis_url: str,
+) -> None:
+    """AsyncRedisSaver should accept a pre-built client without a running loop (Issue #179).
+
+    The typical use-case from the issue: constructing the saver synchronously,
+    then setting up (and using it) later inside an async lifespan handler.
+    """
+    from redis.asyncio import Redis as AsyncRedis
+
+    client = AsyncRedis.from_url(redis_url)
+    try:
+        saver = AsyncRedisSaver(redis_client=client)
+        assert saver is not None
+        assert saver.loop is None
+    finally:
+        asyncio.run(client.aclose())
+
+
+@pytest.mark.asyncio
+async def test_async_redis_saver_loop_captured_in_asetup(redis_url: str) -> None:
+    """asetup() must capture the running event loop so sync wrappers work (Issue #179)."""
+    saver = AsyncRedisSaver(redis_url)
+    assert saver.loop is None  # not yet set
+
+    await saver.asetup()
+
+    # After asetup the loop attribute must point to the current running loop
+    assert saver.loop is not None
+    assert saver.loop is asyncio.get_running_loop()
+
+    await saver._redis.aclose()
+
+
+@pytest.mark.asyncio
+async def test_async_redis_saver_context_manager_after_sync_construction(
+    redis_url: str,
+) -> None:
+    """Saver built before entering the async context manager must still work."""
+    # Construct before entering `async with`; in this async test a loop is already
+    # running, but this still verifies the saver is usable end-to-end once setup
+    # happens on context-manager entry.
+    saver = AsyncRedisSaver(redis_url)
+
+    async with saver:
+        # After entering the context the loop must be set
+        assert saver.loop is asyncio.get_running_loop()
+
+        # Basic functional smoke test
+        config: RunnableConfig = {
+            "configurable": {"thread_id": "issue-179-test", "checkpoint_ns": ""}
+        }
+        chk: Checkpoint = empty_checkpoint()
+        meta: CheckpointMetadata = {"source": "input", "step": 0, "writes": {}}
+        await saver.aput(config, chk, meta, {})
+        result = await saver.aget_tuple(config)
+        assert result is not None
