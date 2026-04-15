@@ -39,7 +39,7 @@ aioconsole = "^0.8.1"
 langchain-openai = "^0.3.30"
 testcontainers = "^4.12.0"
 isort = "^6.0.1"
-cryptography = { version = ">=46.0.7", markers = "python_version > '3.9.1'" }
+cryptography = ">=46.0.7"
 coverage = "^7.10.3"
 pytest-cov = "^6.2.1"
 vulture = "^2.14"
