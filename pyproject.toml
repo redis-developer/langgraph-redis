@@ -27,9 +27,9 @@ tomli = { version = "^2.0.1", python = "<3.11" }
 
 [tool.poetry.group.dev.dependencies]
 langgraph = ">=1.0.10"
-black = ">=26.3.1"
+black = ">=26.3.1,<27"
 codespell = "^2.4.1"
-pytest = ">=9.0.3"
+pytest = ">=9.0.3,<10"
 anyio = "^4.10.0"
 pytest-asyncio = "^1.1.0"
 pytest-xdist = { extras = ["psutil"], version = "^3.8.0" }
