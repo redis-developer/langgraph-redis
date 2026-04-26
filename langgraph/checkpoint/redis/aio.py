@@ -685,30 +685,48 @@ class AsyncRedisSaver(
 
         # Construct the Redis query
         # Sort by checkpoint_id in descending order to get most recent checkpoints first
-        query = FilterQuery(
-            filter_expression=combined_filter,
-            return_fields=[
-                "thread_id",
-                "checkpoint_ns",
-                "checkpoint_id",
-                "parent_checkpoint_id",
-                "$.checkpoint",
-                "$.metadata",
-                "has_writes",  # Include has_writes to optimize pending_writes loading
-            ],
-            num_results=10000 if requires_post_filter else limit or 10000,
-            sort_by=("checkpoint_id", "DESC"),
-        )
+        return_fields = [
+            "thread_id",
+            "checkpoint_ns",
+            "checkpoint_id",
+            "parent_checkpoint_id",
+            "$.checkpoint",
+            "$.metadata",
+            "has_writes",  # Include has_writes to optimize pending_writes loading
+        ]
 
-        # Execute the query asynchronously
-        results = await self.checkpoints_index.search(query)
+        if requires_post_filter:
+            result_docs = []
+            offset = 0
+            page_size = 10000
+            while True:
+                query = FilterQuery(
+                    filter_expression=combined_filter,
+                    return_fields=return_fields,
+                    num_results=page_size,
+                    sort_by=("checkpoint_id", "DESC"),
+                )
+                query.paging(offset, page_size)
+                results = await self.checkpoints_index.search(query)
+                result_docs.extend(results.docs)
+                if len(results.docs) < page_size:
+                    break
+                offset += page_size
+        else:
+            query = FilterQuery(
+                filter_expression=combined_filter,
+                return_fields=return_fields,
+                num_results=limit or 10000,
+                sort_by=("checkpoint_id", "DESC"),
+            )
+            result_docs = (await self.checkpoints_index.search(query)).docs
 
         # Pre-process all docs to collect batch query requirements
         all_docs_data = []
         pending_sends_batch_keys = []
         pending_writes_batch_keys = []
 
-        for doc in results.docs:
+        for doc in result_docs:
             # Extract all attributes once
             doc_dict = doc.__dict__ if hasattr(doc, "__dict__") else {}
 

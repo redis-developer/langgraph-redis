@@ -174,14 +174,15 @@ def test_list_filters_custom_metadata_and_before(redis_url: str) -> None:
 
         thread_id = "thread-custom-filter-sync"
         for checkpoint_id, score in [("1", 42), ("2", 99), ("3", 99)]:
+            configurable = {
+                "thread_id": thread_id,
+                "checkpoint_ns": "",
+                "checkpoint_id": checkpoint_id,
+            }
+            if checkpoint_id == "1":
+                configurable["run_id"] = "run-1"
             checkpointer.put(
-                {
-                    "configurable": {
-                        "thread_id": thread_id,
-                        "checkpoint_ns": "",
-                        "checkpoint_id": checkpoint_id,
-                    }
-                },
+                {"configurable": configurable},
                 _make_checkpoint(checkpoint_id),
                 CheckpointMetadata(
                     source="input",
@@ -195,7 +196,7 @@ def test_list_filters_custom_metadata_and_before(redis_url: str) -> None:
         filtered = list(
             checkpointer.list(
                 {"configurable": {"thread_id": thread_id}},
-                filter={"score": 42},
+                filter={"run_id": "run-1", "score": 42},
             )
         )
         assert len(filtered) == 1
@@ -260,14 +261,15 @@ async def test_alist_filters_custom_metadata_and_before(redis_url: str) -> None:
     async with AsyncRedisSaver.from_conn_string(redis_url) as checkpointer:
         thread_id = "thread-custom-filter-async"
         for checkpoint_id, score in [("1", 42), ("2", 99), ("3", 99)]:
+            configurable = {
+                "thread_id": thread_id,
+                "checkpoint_ns": "",
+                "checkpoint_id": checkpoint_id,
+            }
+            if checkpoint_id == "1":
+                configurable["run_id"] = "run-1"
             await checkpointer.aput(
-                {
-                    "configurable": {
-                        "thread_id": thread_id,
-                        "checkpoint_ns": "",
-                        "checkpoint_id": checkpoint_id,
-                    }
-                },
+                {"configurable": configurable},
                 _make_checkpoint(checkpoint_id),
                 CheckpointMetadata(
                     source="input",
@@ -282,7 +284,7 @@ async def test_alist_filters_custom_metadata_and_before(redis_url: str) -> None:
             item
             async for item in checkpointer.alist(
                 {"configurable": {"thread_id": thread_id}},
-                filter={"score": 42},
+                filter={"run_id": "run-1", "score": 42},
             )
         ]
         assert len(filtered) == 1

@@ -43,7 +43,7 @@ def _metadata_filter_matches(
     if not filters:
         return True
     for key, expected in filters.items():
-        if key == "thread_id":
+        if key in {"thread_id", "run_id"}:
             continue
         actual = metadata.get(key)
         if isinstance(expected, list):
