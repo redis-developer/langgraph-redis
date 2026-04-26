@@ -126,6 +126,183 @@ async def test_alist_filters_run_id_and_thread_id(redis_url: str) -> None:
         assert len(thread_id_results) == 2
 
 
+def test_list_filters_root_namespace(redis_url: str) -> None:
+    with RedisSaver.from_conn_string(redis_url) as checkpointer:
+        checkpointer.setup()
+
+        thread_id = "thread-root-namespace-sync"
+        root_config: RunnableConfig = {
+            "configurable": {
+                "thread_id": thread_id,
+                "checkpoint_ns": "",
+                "checkpoint_id": "1",
+            }
+        }
+        child_config: RunnableConfig = {
+            "configurable": {
+                "thread_id": thread_id,
+                "checkpoint_ns": "child:1",
+                "checkpoint_id": "2",
+            }
+        }
+
+        checkpointer.put(
+            root_config,
+            _make_checkpoint("1"),
+            CheckpointMetadata(source="input", step=0, writes={}),
+            {"messages": "1"},
+        )
+        checkpointer.put(
+            child_config,
+            _make_checkpoint("2"),
+            CheckpointMetadata(source="input", step=1, writes={}),
+            {"messages": "1"},
+        )
+
+        root_results = list(
+            checkpointer.list(
+                {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+            )
+        )
+        assert len(root_results) == 1
+        assert root_results[0].checkpoint["id"] == "1"
+
+
+def test_list_filters_custom_metadata_and_before(redis_url: str) -> None:
+    with RedisSaver.from_conn_string(redis_url) as checkpointer:
+        checkpointer.setup()
+
+        thread_id = "thread-custom-filter-sync"
+        for checkpoint_id, score in [("1", 42), ("2", 99), ("3", 99)]:
+            configurable = {
+                "thread_id": thread_id,
+                "checkpoint_ns": "",
+                "checkpoint_id": checkpoint_id,
+            }
+            if checkpoint_id == "1":
+                configurable["run_id"] = "run-1"
+            checkpointer.put(
+                {"configurable": configurable},
+                _make_checkpoint(checkpoint_id),
+                CheckpointMetadata(
+                    source="input",
+                    step=int(checkpoint_id),
+                    writes={},
+                    score=score,
+                ),
+                {"messages": "1"},
+            )
+
+        filtered = list(
+            checkpointer.list(
+                {"configurable": {"thread_id": thread_id}},
+                filter={"run_id": "run-1", "score": 42},
+            )
+        )
+        assert len(filtered) == 1
+        assert filtered[0].checkpoint["id"] == "1"
+
+        before = {"configurable": {"thread_id": thread_id, "checkpoint_id": "3"}}
+        paged = list(
+            checkpointer.list(
+                {"configurable": {"thread_id": thread_id}},
+                before=before,
+                limit=1,
+            )
+        )
+        assert len(paged) == 1
+        assert paged[0].checkpoint["id"] == "2"
+
+
+@pytest.mark.asyncio
+async def test_alist_filters_root_namespace(redis_url: str) -> None:
+    async with AsyncRedisSaver.from_conn_string(redis_url) as checkpointer:
+        thread_id = "thread-root-namespace-async"
+        root_config: RunnableConfig = {
+            "configurable": {
+                "thread_id": thread_id,
+                "checkpoint_ns": "",
+                "checkpoint_id": "1",
+            }
+        }
+        child_config: RunnableConfig = {
+            "configurable": {
+                "thread_id": thread_id,
+                "checkpoint_ns": "child:1",
+                "checkpoint_id": "2",
+            }
+        }
+
+        await checkpointer.aput(
+            root_config,
+            _make_checkpoint("1"),
+            CheckpointMetadata(source="input", step=0, writes={}),
+            {"messages": "1"},
+        )
+        await checkpointer.aput(
+            child_config,
+            _make_checkpoint("2"),
+            CheckpointMetadata(source="input", step=1, writes={}),
+            {"messages": "1"},
+        )
+
+        root_results = [
+            item
+            async for item in checkpointer.alist(
+                {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+            )
+        ]
+        assert len(root_results) == 1
+        assert root_results[0].checkpoint["id"] == "1"
+
+
+@pytest.mark.asyncio
+async def test_alist_filters_custom_metadata_and_before(redis_url: str) -> None:
+    async with AsyncRedisSaver.from_conn_string(redis_url) as checkpointer:
+        thread_id = "thread-custom-filter-async"
+        for checkpoint_id, score in [("1", 42), ("2", 99), ("3", 99)]:
+            configurable = {
+                "thread_id": thread_id,
+                "checkpoint_ns": "",
+                "checkpoint_id": checkpoint_id,
+            }
+            if checkpoint_id == "1":
+                configurable["run_id"] = "run-1"
+            await checkpointer.aput(
+                {"configurable": configurable},
+                _make_checkpoint(checkpoint_id),
+                CheckpointMetadata(
+                    source="input",
+                    step=int(checkpoint_id),
+                    writes={},
+                    score=score,
+                ),
+                {"messages": "1"},
+            )
+
+        filtered = [
+            item
+            async for item in checkpointer.alist(
+                {"configurable": {"thread_id": thread_id}},
+                filter={"run_id": "run-1", "score": 42},
+            )
+        ]
+        assert len(filtered) == 1
+        assert filtered[0].checkpoint["id"] == "1"
+
+        before = {"configurable": {"thread_id": thread_id, "checkpoint_id": "3"}}
+        paged = [
+            item
+            async for item in checkpointer.alist(
+                {"configurable": {"thread_id": thread_id}},
+                before=before,
+                limit=1,
+            )
+        ]
+        assert len(paged) == 1
+        assert paged[0].checkpoint["id"] == "2"
+
+
 # Now test using the higher-level configuration
 async def test_aget_state_history_run_id_and_thread_id_pregel(redis_url: str) -> None:
     class State(TypedDict):
