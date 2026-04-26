@@ -31,8 +31,11 @@ from langgraph.checkpoint.redis.ashallow import AsyncShallowRedisSaver
 from langgraph.checkpoint.redis.base import (
     CHECKPOINT_PREFIX,
     CHECKPOINT_WRITE_PREFIX,
+    INDEXED_CHECKPOINT_FILTER_KEYS,
     REDIS_KEY_SEPARATOR,
     BaseRedisSaver,
+    _checkpoint_id_filter_matches,
+    _metadata_filter_matches,
 )
 from langgraph.checkpoint.redis.key_registry import SyncCheckpointKeyRegistry
 from langgraph.checkpoint.redis.message_exporter import (
@@ -250,9 +253,12 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
 
             # Search for checkpoints with any namespace, including an empty
             # string, while `checkpoint_id` has to have a value.
-            if checkpoint_ns := config["configurable"].get("checkpoint_ns"):
+            if "checkpoint_ns" in config["configurable"]:
                 filter_expression.append(
-                    Tag("checkpoint_ns") == to_storage_safe_str(checkpoint_ns)
+                    Tag("checkpoint_ns")
+                    == to_storage_safe_str(
+                        config["configurable"].get("checkpoint_ns", "")
+                    )
                 )
             if checkpoint_id := get_checkpoint_id(config):
                 filter_expression.append(
@@ -269,20 +275,20 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
                     filter_expression.append(Tag("thread_id") == to_storage_safe_id(v))
                 elif k == "run_id":
                     filter_expression.append(Tag("run_id") == to_storage_safe_id(v))
-                else:
-                    raise ValueError(f"Unsupported filter key: {k}")
 
-        if before:
-            before_checkpoint_id = get_checkpoint_id(before)
-            if before_checkpoint_id:
-                try:
-                    before_ulid = ULID.from_str(before_checkpoint_id)
-                    before_ts = before_ulid.timestamp
-                    # Use numeric range query: checkpoint_ts < before_ts
-                    filter_expression.append(Num("checkpoint_ts") < before_ts)
-                except Exception:
-                    # If not a valid ULID, ignore the before filter
-                    pass
+        requires_post_filter = bool(
+            filter and any(k not in INDEXED_CHECKPOINT_FILTER_KEYS for k in filter)
+        )
+        before_checkpoint_id = get_checkpoint_id(before) if before else None
+
+        if before_checkpoint_id and not requires_post_filter:
+            try:
+                before_ulid = ULID.from_str(before_checkpoint_id)
+                before_ts = before_ulid.timestamp
+                # Use numeric range query: checkpoint_ts < before_ts
+                filter_expression.append(Num("checkpoint_ts") < before_ts)
+            except Exception:
+                requires_post_filter = True
 
         # Combine all filter expressions
         combined_filter = filter_expression[0] if filter_expression else "*"
@@ -302,7 +308,7 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
                 "$.metadata",
                 "has_writes",  # Include has_writes to optimize pending_writes loading
             ],
-            num_results=limit or 10000,
+            num_results=10000 if requires_post_filter else limit or 10000,
             sort_by=("checkpoint_id", "DESC"),
         )
 
@@ -430,6 +436,12 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
             else:
                 metadata = cast(CheckpointMetadata, metadata_dict)
 
+            if requires_post_filter and (
+                not _checkpoint_id_filter_matches(checkpoint_id, before_checkpoint_id)
+                or not _metadata_filter_matches(metadata, filter)
+            ):
+                continue
+
             # Pre-create the config structure more efficiently
             config_param: RunnableConfig = {
                 "configurable": {
@@ -474,6 +486,10 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
                 parent_config=parent_config,
                 pending_writes=pending_writes,
             )
+            if limit is not None:
+                limit -= 1
+                if limit <= 0:
+                    break
 
     def put(
         self,
@@ -1692,7 +1708,7 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
 
         # Validate input
         if not thread_ids:
-            raise ValueError("``thread_ids`` must be a non-empty sequence")
+            return
         if keep_last < 0:
             raise ValueError(f"``keep_last`` must be >= 0, got {keep_last}")
         if max_results < 1:

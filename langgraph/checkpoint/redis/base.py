@@ -33,6 +33,34 @@ logger = logging.getLogger(__name__)
 REDIS_KEY_SEPARATOR = ":"
 CHECKPOINT_PREFIX = "checkpoint"
 CHECKPOINT_WRITE_PREFIX = "checkpoint_write"
+INDEXED_CHECKPOINT_FILTER_KEYS = {"source", "step", "thread_id", "run_id"}
+
+
+def _metadata_filter_matches(
+    metadata: dict[str, Any], filters: Optional[dict[str, Any]]
+) -> bool:
+    """Return whether checkpoint metadata matches user-supplied filters."""
+    if not filters:
+        return True
+    for key, expected in filters.items():
+        if key == "thread_id":
+            continue
+        actual = metadata.get(key)
+        if isinstance(expected, list):
+            if actual not in expected:
+                return False
+        elif actual != expected:
+            return False
+    return True
+
+
+def _checkpoint_id_filter_matches(
+    checkpoint_id: str, before_checkpoint_id: Optional[str]
+) -> bool:
+    """Apply list(before=...) using the same descending checkpoint_id order."""
+    if not before_checkpoint_id:
+        return True
+    return checkpoint_id < before_checkpoint_id
 
 
 class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexType]):
