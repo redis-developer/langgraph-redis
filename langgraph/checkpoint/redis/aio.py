@@ -1069,6 +1069,10 @@ class AsyncRedisSaver(
                         pipeline = self._redis.pipeline(transaction=False)
                         pipeline.json().set(checkpoint_key, "$", checkpoint_data)
                         await pipeline.execute()
+
+                    # Apply ttl to avoid orphaned checkpoints
+                    await self._apply_ttl_to_keys(checkpoint_key)
+
                 except Exception:
                     # If this also fails, we just propagate the original cancellation
                     pass
