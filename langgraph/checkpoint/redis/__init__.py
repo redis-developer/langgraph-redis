@@ -576,8 +576,8 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
         )
 
         # Update latest checkpoint pointer
-        latest_pointer_key = (
-            f"checkpoint_latest:{storage_safe_thread_id}:{storage_safe_checkpoint_ns}"
+        latest_pointer_key = self._make_redis_checkpoint_latest_key(
+            thread_id, checkpoint_ns
         )
         self._redis.set(latest_pointer_key, checkpoint_key)
 
@@ -754,8 +754,8 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
         storage_safe_checkpoint_ns = to_storage_safe_str(checkpoint_ns)
 
         # Get latest checkpoint using pointer
-        latest_pointer_key = (
-            f"checkpoint_latest:{storage_safe_thread_id}:{storage_safe_checkpoint_ns}"
+        latest_pointer_key = self._make_redis_checkpoint_latest_key(
+            thread_id, checkpoint_ns
         )
         checkpoint_key_bytes = self._redis.get(latest_pointer_key)
 
@@ -1599,7 +1599,10 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
 
         # Add latest checkpoint pointers to deletion list
         for checkpoint_ns in checkpoint_namespaces:
-            latest_pointer_key = f"checkpoint_latest:{storage_safe_thread_id}:{to_storage_safe_str(checkpoint_ns)}"
+            latest_pointer_key = self._make_redis_checkpoint_latest_key(
+                thread_id,
+                from_storage_safe_str(checkpoint_ns),
+            )
             keys_to_delete.append(latest_pointer_key)
 
         # Channel values are stored inline — no separate blob keys to clean up.
@@ -1781,11 +1784,14 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
                     )
 
             # Delete checkpoint_latest pointers for fully_evicted namespaces.
-            # ns values here come from the index and are already storage-safe,
-            # matching the format written by put(): checkpoint-latest:{tid}:{safe_ns}
+            # ns values come from the index storage-safe, so convert them back before
+            # passing them to the latest-pointer key helper.
             for ns in fully_evicted_ns:
                 keys_to_delete.append(
-                    f"checkpoint_latest:{storage_safe_thread_id}:{ns}"
+                    self._make_redis_checkpoint_latest_key(
+                        thread_id,
+                        from_storage_safe_str(ns),
+                    )
                 )
 
             if self.cluster_mode:

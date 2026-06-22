@@ -128,7 +128,7 @@ def test_custom_checkpoint_prefix_sync_all_components(
         assert len(keys) > 0
         assert prefixes == {
             custom_checkpoint_prefix.encode(),
-            b"checkpoint_latest",
+            f"{custom_checkpoint_prefix}_latest".encode(),
         }
 
         # Test write prefix by adding writes
@@ -371,7 +371,7 @@ async def test_custom_checkpoint_prefix_async_all_components(
         assert len(keys) > 0
         assert prefixes == {
             custom_checkpoint_prefix.encode(),
-            b"checkpoint_latest",
+            f"{custom_checkpoint_prefix}_latest".encode(),
         }
 
         # Test write prefix by adding writes
