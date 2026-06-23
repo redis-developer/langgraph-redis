@@ -309,7 +309,10 @@ async def test_async_ttl_applied_on_cancellation(redis_url: str) -> None:
 
     from langgraph.checkpoint.base import empty_checkpoint
 
-    from langgraph.checkpoint.redis.base import to_storage_safe_id, to_storage_safe_str
+    from langgraph.checkpoint.redis.util import (
+        to_storage_safe_id,
+        to_storage_safe_str,
+    )
 
     ttl_config = {"default_ttl": 60}  # 60 minutes
     thread_id = str(uuid4())
