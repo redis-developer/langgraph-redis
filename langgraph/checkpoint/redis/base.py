@@ -211,7 +211,14 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         return {
             **loaded,
             "pending_sends": [
-                self.serde.loads_typed((safely_decode(c), b))
+                # Blobs are stored base64-encoded in Redis JSON (see _encode_blob),
+                # so they must be decoded before deserialization, exactly as the
+                # pending_writes path does via _load_writes. The pending_sends
+                # loaders return the raw base64 blob, so decode it here at the
+                # single point where every variant (sync/async, single/batch)
+                # funnels through. Without this, loads_typed feeds a base64 string
+                # to orjson and raises JSONDecodeError on resume.
+                self.serde.loads_typed((safely_decode(c), self._decode_blob(b)))
                 for c, b in pending_sends or []
             ],
             "channel_values": channel_values,
