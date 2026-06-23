@@ -1,5 +1,6 @@
 import dataclasses
 import logging
+from collections.abc import Callable, Sequence
 from typing import Any
 
 import orjson
@@ -68,11 +69,34 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
         "parent_checkpoint_id",
     ]
 
+    def _encode_constructor_envelope(
+        self,
+        constructor: Callable[..., Any] | type[Any],
+        *,
+        args: Sequence[Any] | None = None,
+        kwargs: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Build an lc:2 default-constructor envelope.
+
+        This preserves type information for JSON values that should be revived
+        by calling the target class constructor.
+        """
+        out: dict[str, Any] = {
+            "lc": 2,
+            "type": "constructor",
+            "id": [*constructor.__module__.split("."), constructor.__name__],
+        }
+        if args is not None:
+            out["args"] = args
+        if kwargs is not None:
+            out["kwargs"] = kwargs
+        return out
+
     def _default_handler(self, obj: Any) -> Any:
         """Custom JSON encoder for objects that orjson can't serialize.
 
-        This handles LangChain objects by delegating to the parent's
-        _encode_constructor_args method which creates the LC format.
+        This handles LangChain objects by encoding them in the LC constructor
+        format that the loader can revive.
         """
         # Bytes/bytearray in nested structures require msgpack - signal to fallback
         if isinstance(obj, (bytes, bytearray)):
@@ -94,10 +118,10 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
                 "arg": obj.arg,
             }
 
-        # Try to encode using parent's constructor args encoder
+        # Try to encode using the constructor envelope format.
         # This creates the {"lc": 2, "type": "constructor", ...} format
         try:
-            # _encode_constructor_args needs the CLASS, not the instance
+            # The envelope needs the CLASS, not the instance.
             # For LangChain objects with to_json(), use that data for kwargs
             if hasattr(obj, "to_json"):
                 json_dict = obj.to_json()
@@ -107,7 +131,7 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
 
             # For other objects, encode with constructor args
             # Pass the class and the instance's __dict__ as kwargs
-            return self._encode_constructor_args(
+            return self._encode_constructor_envelope(
                 type(obj), kwargs=obj.__dict__ if hasattr(obj, "__dict__") else {}
             )
         except (AttributeError, KeyError, ValueError, TypeError):
@@ -152,7 +176,7 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
                 k: self._preprocess_interrupts(v)
                 for k, v in dataclasses.asdict(obj).items()
             }
-            return self._encode_constructor_args(type(obj), kwargs=processed_dict)
+            return self._encode_constructor_envelope(type(obj), kwargs=processed_dict)
         elif isinstance(obj, dict):
             return {k: self._preprocess_interrupts(v) for k, v in obj.items()}
         elif isinstance(obj, (list, tuple)):
@@ -218,7 +242,7 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
     def _reconstruct_from_constructor(self, obj: dict[str, Any]) -> Any:
         """Reconstruct an object from LangChain constructor format.
 
-        This handles objects that were serialized using _encode_constructor_args
+        This handles objects that were serialized using the lc:2 constructor envelope
         but are not LangChain objects (e.g., dataclasses, regular classes, sets).
 
         Args:
