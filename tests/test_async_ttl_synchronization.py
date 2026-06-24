@@ -300,3 +300,60 @@ async def test_async_ttl_no_refresh_for_persistent_keys(redis_url: str) -> None:
         assert (
             ttl_after == -1
         ), f"Key should remain persistent (TTL=-1), got {ttl_after}"
+
+
+@pytest.mark.asyncio
+async def test_async_ttl_applied_on_cancellation(redis_url: str) -> None:
+    """Test that TTL is applied to fallback checkpoints created during CancelledError."""
+    from unittest.mock import patch
+
+    from langgraph.checkpoint.base import empty_checkpoint
+
+    from langgraph.checkpoint.redis.util import (
+        to_storage_safe_id,
+        to_storage_safe_str,
+    )
+
+    ttl_config = {"default_ttl": 60}  # 60 minutes
+    thread_id = str(uuid4())
+    checkpoint_ns = ""
+    config = {
+        "configurable": {
+            "thread_id": thread_id,
+            "checkpoint_ns": checkpoint_ns,
+        }
+    }
+
+    # We set stream_mode in metadata so it triggers the fallback save.
+    metadata = {
+        "source": "input",
+        "step": 0,
+        "writes": {},
+        "parents": {},
+        "stream_mode": "values",
+    }
+    checkpoint = empty_checkpoint()
+
+    async with _saver(redis_url, ttl_config) as saver:
+        # Mock checkpoints_index.load to raise CancelledError
+        with patch.object(
+            saver.checkpoints_index, "load", side_effect=asyncio.CancelledError()
+        ):
+            with pytest.raises(asyncio.CancelledError):
+                await saver.aput(config, checkpoint, metadata, {})
+
+        # The fallback save should have run. Let's find the checkpoint key.
+        checkpoint_key = saver._make_redis_checkpoint_key(
+            to_storage_safe_id(thread_id),
+            to_storage_safe_str(checkpoint_ns),
+            to_storage_safe_id(checkpoint["id"]),
+        )
+
+        # Check if the key exists
+        exists = await saver._redis.exists(checkpoint_key)
+        assert exists, "Fallback checkpoint was not saved."
+
+        # Check if the TTL was applied (60 minutes = 3600 seconds)
+        current_ttl = await saver._redis.ttl(checkpoint_key)
+        assert current_ttl > 0, f"TTL was not applied. Expected > 0, got {current_ttl}"
+        assert current_ttl <= 3600, f"TTL exceeds expected range. Got {current_ttl}"
