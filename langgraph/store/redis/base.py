@@ -519,7 +519,7 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
             # Delete matching documents
             for op in deletes:
                 prefix = _namespace_to_text(op.namespace)
-                query = f"(@prefix:{prefix} @key:{{{op.key}}})"
+                query = f"(@prefix:{prefix} @key:{{{_token_escaper.escape(op.key)}}})"
                 results = self.store_index.search(query)
                 for doc in results.docs:
                     self._redis.delete(doc.id)
