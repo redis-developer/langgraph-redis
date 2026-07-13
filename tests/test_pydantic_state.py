@@ -251,7 +251,7 @@ def test_revive_if_needed_fallback_behavior(redis_url: str) -> None:
     """Test that _revive_if_needed properly falls back when _reviver fails.
 
     The PR #126 change ensures _revive_if_needed is tried first, which
-    includes its own fallback to _reconstruct_from_constructor.
+    includes Redis-specific constructor decoding before upstream revival.
     """
     with _saver(redis_url) as saver:
         config = {

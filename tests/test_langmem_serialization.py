@@ -21,6 +21,27 @@ except (ImportError, AttributeError):
 class TestLangmemSerialization:
     """Test that langmem objects are properly serialized and deserialized."""
 
+    def _roundtrip_nested_summaries(self) -> list[RunningSummary]:
+        serializer = JsonPlusRedisSerializer()
+        state = {
+            "summaries": [
+                RunningSummary(
+                    summary="First summary",
+                    summarized_message_ids={"msg1"},
+                    last_summarized_message_id="msg1",
+                ),
+                RunningSummary(
+                    summary="Second summary",
+                    summarized_message_ids={"msg2", "msg3"},
+                    last_summarized_message_id="msg3",
+                ),
+            ]
+        }
+
+        type_str, data_bytes = serializer.dumps_typed(state)
+        deserialized = serializer.loads_typed((type_str, data_bytes))
+        return deserialized["summaries"]
+
     def test_running_summary_serialization(self) -> None:
         """Test that RunningSummary objects roundtrip correctly through serialization."""
         serializer = JsonPlusRedisSerializer()
@@ -90,29 +111,22 @@ class TestLangmemSerialization:
 
     def test_nested_running_summary_in_list(self) -> None:
         """Test that RunningSummary objects nested in lists are properly handled."""
-        serializer = JsonPlusRedisSerializer()
-
-        state = {
-            "summaries": [
-                RunningSummary(
-                    summary="First summary",
-                    summarized_message_ids={"msg1"},
-                    last_summarized_message_id="msg1",
-                ),
-                RunningSummary(
-                    summary="Second summary",
-                    summarized_message_ids={"msg2", "msg3"},
-                    last_summarized_message_id="msg3",
-                ),
-            ]
-        }
-
-        # Serialize and deserialize
-        type_str, data_bytes = serializer.dumps_typed(state)
-        deserialized = serializer.loads_typed((type_str, data_bytes))
+        summaries = self._roundtrip_nested_summaries()
 
         # Check both summaries are properly reconstructed
-        assert len(deserialized["summaries"]) == 2
-        for summary in deserialized["summaries"]:
+        assert len(summaries) == 2
+        for summary in summaries:
             assert isinstance(summary, RunningSummary)
             assert hasattr(summary, "summarized_message_ids")
+
+    def test_nested_running_summary_preserves_message_id_sets(self) -> None:
+        """Test that nested RunningSummary set fields roundtrip correctly.
+
+        Each summarized_message_ids field should deserialize as the original set,
+        covering set envelopes nested inside dataclass envelopes inside a list.
+        """
+        summaries = self._roundtrip_nested_summaries()
+
+        expected_message_ids = [{"msg1"}, {"msg2", "msg3"}]
+        for summary, message_ids in zip(summaries, expected_message_ids, strict=True):
+            assert summary.summarized_message_ids == message_ids
