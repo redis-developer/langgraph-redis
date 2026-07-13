@@ -128,7 +128,7 @@ def _deserialize_response(cached_str: str) -> ModelResponse:
                         result=[cached_message], structured_response=None
                     )
                 # If revived is not an AIMessage, wrap content in one
-                content = _strip_content_ids(getattr(revived, "content", str(revived)))
+                content = getattr(revived, "content", str(revived))
                 return ModelResponse(
                     result=[
                         AIMessage(
@@ -140,7 +140,7 @@ def _deserialize_response(cached_str: str) -> ModelResponse:
                     structured_response=None,
                 )
             # Simple dict with content - wrap in ModelResponse
-            content = _strip_content_ids(data.get("content", ""))
+            content = data.get("content", "")
             return ModelResponse(
                 result=[
                     AIMessage(
