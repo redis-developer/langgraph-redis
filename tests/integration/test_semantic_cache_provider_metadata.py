@@ -650,6 +650,29 @@ class TestPlainDictDeserialization:
         assert msg.content == ""
         _assert_clean_cached_message(msg)
 
+    def test_plain_dict_content_blocks_strip_provider_ids(self):
+        """Plain dict content blocks should not preserve provider IDs."""
+        cached_str = json.dumps(
+            {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Hello!",
+                        "annotations": [],
+                        "id": "msg_093316aa120a13ed006a54f3dcb2a4819688faf45873742ce2",
+                    }
+                ]
+            }
+        )
+
+        result = _deserialize_response(cached_str)
+        msg = result.result[0]
+
+        assert isinstance(msg.content, list)
+        assert msg.content[0]["text"] == "Hello!"
+        assert "id" not in msg.content[0]
+        _assert_clean_cached_message(msg)
+
     @pytest.mark.asyncio
     async def test_plain_dict_via_middleware(
         self, redis_url: str, vectorizer: HFTextVectorizer
