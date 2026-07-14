@@ -818,7 +818,7 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         """Build the latest-checkpoint pointer key."""
         storage_safe_thread_id = str(to_storage_safe_id(thread_id))
         storage_safe_checkpoint_ns = to_storage_safe_str(checkpoint_ns)
-        
+
         return REDIS_KEY_SEPARATOR.join(
             [
                 f"{self._checkpoint_prefix}_latest",

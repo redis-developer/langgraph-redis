@@ -245,7 +245,7 @@ class TestSemanticCacheNotebook:
             SemanticCacheConfig(
                 redis_url=redis_url,
                 name=cache_name,
-                distance_threshold=0.15,
+                distance_threshold=0.30,
                 ttl_seconds=3600,
                 cache_final_only=True,
             )
@@ -267,6 +267,7 @@ class TestSemanticCacheNotebook:
             )
 
             ai_msg = result["messages"][-1]
+            assert ai_msg.additional_kwargs.get("cached") is True
             if isinstance(ai_msg.content, list):
                 for block in ai_msg.content:
                     if isinstance(block, dict):
