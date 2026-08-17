@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -34,13 +33,12 @@ from langgraph.checkpoint.redis.base import (
     CHECKPOINT_WRITE_PREFIX,
     REDIS_KEY_SEPARATOR,
     BaseRedisSaver,
+    aexpire_with_retry,
 )
 from langgraph.checkpoint.redis.util import (
     to_storage_safe_id,
     to_storage_safe_str,
 )
-
-logger = logging.getLogger(__name__)
 
 # Constants
 MILLISECONDS_PER_SECOND = 1000
@@ -249,12 +247,7 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             # Apply TTL separately (best-effort)
             if self.ttl_config and "default_ttl" in self.ttl_config:
                 ttl_seconds = int(self.ttl_config.get("default_ttl") * 60)
-                try:
-                    await self._redis.expire(checkpoint_key, ttl_seconds)
-                except Exception:
-                    logger.warning(
-                        "Failed to apply TTL to checkpoint key: %s", checkpoint_key
-                    )
+                await aexpire_with_retry(self._redis, checkpoint_key, ttl_seconds)
 
             # NOTE: We intentionally do NOT clean up old writes here.
             # In the HITL (Human-in-the-Loop) flow, interrupt writes are saved via
@@ -395,12 +388,7 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         if self.ttl_config and self.ttl_config.get("refresh_on_read"):
             default_ttl_minutes = self.ttl_config.get("default_ttl", 60)
             ttl_seconds = int(default_ttl_minutes * 60)
-            try:
-                await self._redis.expire(checkpoint_key, ttl_seconds)
-            except Exception:
-                logger.warning(
-                    "Failed to refresh TTL on checkpoint key: %s", checkpoint_key
-                )
+            await aexpire_with_retry(self._redis, checkpoint_key, ttl_seconds)
 
         # Parse the checkpoint data
         checkpoint = full_checkpoint_data.get("checkpoint", {})
@@ -549,20 +537,8 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             if self.ttl_config and "default_ttl" in self.ttl_config:
                 ttl_seconds = int(self.ttl_config.get("default_ttl") * 60)
                 for key in write_keys:
-                    try:
-                        await self._redis.expire(key, ttl_seconds)
-                    except Exception:
-                        logger.warning(
-                            "Failed to apply TTL to checkpoint write key: %s", key
-                        )
-                try:
-                    await self._redis.expire(thread_zset_key, ttl_seconds)
-                except Exception:
-                    logger.warning(
-                        "Failed to apply TTL to write registry key: %s",
-                        thread_zset_key,
-                        exc_info=True,
-                    )
+                    await aexpire_with_retry(self._redis, key, ttl_seconds)
+                await aexpire_with_retry(self._redis, thread_zset_key, ttl_seconds)
 
         except asyncio.CancelledError:
             # Handle cancellation/interruption

@@ -46,6 +46,8 @@ from langgraph.checkpoint.redis.base import (
     CHECKPOINT_WRITE_PREFIX,
     REDIS_KEY_SEPARATOR,
     BaseRedisSaver,
+    aexpire_with_retry,
+    apersist_with_retry,
 )
 from langgraph.checkpoint.redis.key_registry import (
     AsyncCheckpointKeyRegistry as AsyncKeyRegistry,
@@ -318,29 +320,25 @@ class AsyncRedisSaver(
         if ttl_minutes is not None:
             # Special case: -1 means remove TTL (make persistent)
             if ttl_minutes == -1:
-                # Apply PERSIST individually per key so that a single failure
-                # does not prevent TTL removal on the remaining keys.
+                # Apply PERSIST individually per key (each retried on its
+                # own) so that a single failure does not prevent TTL
+                # removal on the remaining keys.
                 all_keys = [main_key] + (related_keys or [])
                 for key in all_keys:
-                    try:
-                        await self._redis.persist(key)
-                    except Exception:
-                        logger.warning("Failed to remove TTL from key: %s", key)
+                    await apersist_with_retry(self._redis, key)
 
                 return True
 
             # Regular TTL setting
             ttl_seconds = int(ttl_minutes * 60)
 
-            # Apply TTL individually per key so that a single EXPIRE failure
-            # (e.g. MOVED on Redis Enterprise proxy) does not prevent TTL
-            # from being set on the remaining keys.
+            # Apply TTL individually per key (each retried on its own) so
+            # that a single EXPIRE failure (e.g. MOVED on Redis Enterprise
+            # proxy) does not prevent TTL from being set on the remaining
+            # keys.
             all_keys = [main_key] + (related_keys or [])
             for key in all_keys:
-                try:
-                    await self._redis.expire(key, ttl_seconds)
-                except Exception:
-                    logger.warning("Failed to apply TTL to key: %s", key)
+                await aexpire_with_retry(self._redis, key, ttl_seconds)
 
             return True
 
@@ -483,6 +481,16 @@ class AsyncRedisSaver(
                     write_keys = await self._key_registry.get_write_keys(
                         doc_thread_id, doc_checkpoint_ns, doc_checkpoint_id
                     )
+
+                # This checkpoint was resolved via the latest-checkpoint
+                # pointer (no explicit checkpoint_id given), so keep the
+                # pointer key's TTL in sync too - otherwise it can expire
+                # independently of the checkpoint/writes it points to.
+                if not checkpoint_id or checkpoint_id == EMPTY_ID_SENTINEL:
+                    latest_pointer_key = self._make_redis_checkpoint_latest_key(
+                        doc_thread_id, doc_checkpoint_ns
+                    )
+                    write_keys = [*write_keys, latest_pointer_key]
 
                 # Apply TTL to checkpoint and write keys
                 await self._apply_ttl_to_keys(
@@ -1001,12 +1009,7 @@ class AsyncRedisSaver(
                 and ttl_seconds is not None
             ):
                 # In cluster mode, also call expire directly so tests can verify
-                try:
-                    await self._redis.expire(checkpoint_key, ttl_seconds)
-                except Exception:
-                    logger.warning(
-                        "Failed to apply TTL to checkpoint key: %s", checkpoint_key
-                    )
+                await aexpire_with_retry(self._redis, checkpoint_key, ttl_seconds)
 
             # Update latest checkpoint pointer
             latest_pointer_key = self._make_redis_checkpoint_latest_key(
@@ -1016,13 +1019,7 @@ class AsyncRedisSaver(
 
             # Apply TTL to latest pointer key as well (best-effort)
             if ttl_seconds is not None:
-                try:
-                    await self._redis.expire(latest_pointer_key, ttl_seconds)
-                except Exception:
-                    logger.warning(
-                        "Failed to apply TTL to latest pointer key: %s",
-                        latest_pointer_key,
-                    )
+                await aexpire_with_retry(self._redis, latest_pointer_key, ttl_seconds)
 
             return next_config
 
@@ -1192,14 +1189,7 @@ class AsyncRedisSaver(
                         # Apply TTL to registry key if configured (best-effort)
                         if self.ttl_config and "default_ttl" in self.ttl_config:
                             ttl_seconds = int(self.ttl_config.get("default_ttl") * 60)
-                            try:
-                                await self._redis.expire(zset_key, ttl_seconds)
-                            except Exception:
-                                logger.warning(
-                                    "Failed to apply TTL to write registry key: %s",
-                                    zset_key,
-                                    exc_info=True,
-                                )
+                            await aexpire_with_retry(self._redis, zset_key, ttl_seconds)
 
             else:
                 # For non-cluster mode, use pipeline without transaction to avoid lock contention.
@@ -1280,24 +1270,11 @@ class AsyncRedisSaver(
                 ):
                     ttl_seconds = int(self.ttl_config["default_ttl"] * 60)
                     for key in created_keys:
-                        try:
-                            await self._redis.expire(key, ttl_seconds)
-                        except Exception:
-                            logger.warning(
-                                "Failed to apply TTL to checkpoint write key: %s",
-                                key,
-                            )
+                        await aexpire_with_retry(self._redis, key, ttl_seconds)
 
                 if zset_key and self.ttl_config and "default_ttl" in self.ttl_config:
-                    try:
-                        ttl_seconds = int(self.ttl_config["default_ttl"] * 60)
-                        await self._redis.expire(zset_key, ttl_seconds)
-                    except Exception:
-                        logger.warning(
-                            "Failed to apply TTL to write registry key: %s",
-                            zset_key,
-                            exc_info=True,
-                        )
+                    ttl_seconds = int(self.ttl_config["default_ttl"] * 60)
+                    await aexpire_with_retry(self._redis, zset_key, ttl_seconds)
 
         except asyncio.CancelledError:
             # Handle cancellation/interruption

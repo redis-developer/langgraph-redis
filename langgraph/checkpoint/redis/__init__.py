@@ -33,6 +33,7 @@ from langgraph.checkpoint.redis.base import (
     CHECKPOINT_WRITE_PREFIX,
     REDIS_KEY_SEPARATOR,
     BaseRedisSaver,
+    expire_with_retry,
 )
 from langgraph.checkpoint.redis.key_registry import SyncCheckpointKeyRegistry
 from langgraph.checkpoint.redis.message_exporter import (
@@ -583,13 +584,7 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
 
         # Apply TTL to latest pointer key as well (best-effort)
         if ttl_seconds is not None:
-            try:
-                self._redis.expire(latest_pointer_key, ttl_seconds)
-            except Exception:
-                logger.warning(
-                    "Failed to apply TTL to latest pointer key: %s",
-                    latest_pointer_key,
-                )
+            expire_with_retry(self._redis, latest_pointer_key, ttl_seconds)
 
         return next_config
 
@@ -684,12 +679,7 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
         if write_keys and self.ttl_config and "default_ttl" in self.ttl_config:
             ttl_seconds = int(self.ttl_config["default_ttl"] * 60)
             for key in write_keys:
-                try:
-                    self._redis.expire(key, ttl_seconds)
-                except Exception:
-                    logger.warning(
-                        "Failed to apply TTL to checkpoint write key: %s", key
-                    )
+                expire_with_retry(self._redis, key, ttl_seconds)
 
         # Update key registry with the write keys
         if self._key_registry and write_keys:
@@ -979,6 +969,16 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
                     write_keys = self._get_write_keys_from_search(
                         doc_thread_id, doc_checkpoint_ns, doc_checkpoint_id
                     )
+
+                # This checkpoint was resolved via the latest-checkpoint
+                # pointer (no explicit checkpoint_id given), so keep the
+                # pointer key's TTL in sync too - otherwise it can expire
+                # independently of the checkpoint/writes it points to.
+                if not checkpoint_id or checkpoint_id == EMPTY_ID_SENTINEL:
+                    latest_pointer_key = self._make_redis_checkpoint_latest_key(
+                        doc_thread_id, doc_checkpoint_ns
+                    )
+                    write_keys = [*write_keys, latest_pointer_key]
 
                 # Apply TTL to checkpoint and write keys
                 self._apply_ttl_to_keys(checkpoint_key, write_keys)
