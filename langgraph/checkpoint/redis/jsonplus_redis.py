@@ -108,6 +108,11 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
         if isinstance(obj, Interrupt):
             return _serialize_interrupt(obj)
 
+        from langgraph.checkpoint.serde.types import _DeltaSnapshot
+
+        if isinstance(obj, _DeltaSnapshot):
+            return {"__delta_snapshot__": True, "value": obj.value}
+
         # Handle Send objects with a type marker (issue #94)
         from langgraph.types import Send
 
@@ -138,31 +143,72 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
             # For types we can't handle, raise TypeError
             raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
 
-    def _preprocess_interrupts(self, obj: Any) -> Any:
-        """Recursively add type markers to Interrupt and Send objects before serialization.
+    def _preprocess_redis_json(
+        self,
+        obj: Any,
+        *,
+        encode_bytes: Callable[[bytes], Any] | None = None,
+    ) -> Any:
+        """Recursively normalize values before Redis JSON encoding.
 
-        This prevents false positives where user data with {value, id} fields
-        could be incorrectly deserialized as Interrupt objects.
+        The order here is intentional:
 
-        Also handles dataclass instances to preserve type information during serialization.
+        1. Escape scalar values that Redis JSON cannot store directly, such as
+           bytes and bytearray, when an encode_bytes callback is provided.
+        2. Preserve allowlisted semantic/type-carrying values before treating
+           them as containers. This includes explicit Redis markers for
+           Interrupt, _DeltaSnapshot, and Send, plus constructor envelopes for
+           set and dataclass instances. This is especially important for
+           _DeltaSnapshot because it is a NamedTuple and would otherwise be
+           flattened by the generic tuple branch.
+        3. Recurse through ordinary containers only after those special cases
+           have had a chance to preserve their type information.
+
+        When encode_bytes is provided, nested bytes/bytearray values are escaped
+        as Redis JSON markers. Without it, bytes are left in place so orjson can
+        raise and dumps_typed can fall back to msgpack.
         """
+        from langgraph.checkpoint.serde.types import _DeltaSnapshot
         from langgraph.types import Interrupt, Send
 
+        if isinstance(obj, (bytes, bytearray)):
+            return (
+                {"__bytes__": encode_bytes(bytes(obj))}
+                if encode_bytes is not None
+                else obj
+            )
         if isinstance(obj, Interrupt):
-            return _serialize_interrupt(obj, preprocess=self._preprocess_interrupts)
+            return _serialize_interrupt(
+                obj,
+                preprocess=lambda value: self._preprocess_redis_json(
+                    value, encode_bytes=encode_bytes
+                ),
+            )
+        elif isinstance(obj, _DeltaSnapshot):
+            return {
+                "__delta_snapshot__": True,
+                "value": self._preprocess_redis_json(
+                    obj.value, encode_bytes=encode_bytes
+                ),
+            }
         elif isinstance(obj, Send):
             # Add type marker to distinguish from plain dicts (issue #94)
             return {
                 "__send__": True,
                 "node": obj.node,
-                "arg": self._preprocess_interrupts(obj.arg),
+                "arg": self._preprocess_redis_json(obj.arg, encode_bytes=encode_bytes),
             }
         elif isinstance(obj, set):
             # Handle sets by converting to list for JSON serialization
             # Will be reconstructed back to set on deserialization
             return self._encode_constructor_envelope(
                 set,
-                args=[[self._preprocess_interrupts(item) for item in obj]],
+                args=[
+                    [
+                        self._preprocess_redis_json(item, encode_bytes=encode_bytes)
+                        for item in obj
+                    ]
+                ],
             )
         elif dataclasses.is_dataclass(obj) and not isinstance(obj, type):
             # Handle dataclass instances (like langmem's RunningSummary)
@@ -170,14 +216,22 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
             # Recursively process the dataclass fields without dataclasses.asdict(),
             # which would erase nested dataclass type information.
             processed_dict = {
-                field.name: self._preprocess_interrupts(getattr(obj, field.name))
+                field.name: self._preprocess_redis_json(
+                    getattr(obj, field.name), encode_bytes=encode_bytes
+                )
                 for field in dataclasses.fields(obj)
             }
             return self._encode_constructor_envelope(type(obj), kwargs=processed_dict)
         elif isinstance(obj, dict):
-            return {k: self._preprocess_interrupts(v) for k, v in obj.items()}
+            return {
+                k: self._preprocess_redis_json(v, encode_bytes=encode_bytes)
+                for k, v in obj.items()
+            }
         elif isinstance(obj, (list, tuple)):
-            processed = [self._preprocess_interrupts(item) for item in obj]
+            processed = [
+                self._preprocess_redis_json(item, encode_bytes=encode_bytes)
+                for item in obj
+            ]
             # Preserve tuple type
             return tuple(processed) if isinstance(obj, tuple) else processed
         else:
@@ -199,8 +253,8 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
             return "null", b""
         else:
             try:
-                # Preprocess to add type markers to Interrupt objects
-                processed_obj = self._preprocess_interrupts(obj)
+                # Normalize marker types before JSON encoding.
+                processed_obj = self._preprocess_redis_json(obj)
                 # Try orjson first with custom default handler
                 json_bytes = orjson.dumps(processed_obj, default=self._default_handler)
                 return "json", json_bytes
@@ -318,10 +372,7 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
             # Match json.loads(object_hook=...) semantics by reviving children first.
             revived = {k: self._revive_if_needed(v) for k, v in obj.items()}
 
-            if (
-                revived.get("lc") in (1, 2)
-                and revived.get("type") == "constructor"
-            ):
+            if revived.get("lc") in (1, 2) and revived.get("type") == "constructor":
                 # If the dictionary is an lc constructor envelope
                 if revived.get("id") == ["builtins", "set"]:
                     return self._reconstruct_set_constructor(revived)
@@ -355,6 +406,22 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
                 except (ImportError, TypeError, ValueError) as e:
                     logger.debug(
                         "Failed to deserialize Interrupt object: %s", e, exc_info=True
+                    )
+
+            # _DeltaSnapshot marker (issue #201). Redis JSON cannot store msgpack
+            # ext code 7, so wrap the seed with a local constructor.
+            if (
+                revived.get("__delta_snapshot__") is True
+                and "value" in revived
+                and len(revived) == 2
+            ):
+                try:
+                    from langgraph.checkpoint.serde.types import _DeltaSnapshot
+
+                    return _DeltaSnapshot(revived["value"])
+                except (ImportError, TypeError, ValueError) as e:
+                    logger.debug(
+                        "Failed to deserialize _DeltaSnapshot: %s", e, exc_info=True
                     )
 
             # Check if this is a serialized Send object with type marker (issue #94)

@@ -302,27 +302,17 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
 
     def _msgpack_to_redis_json(self, value: Any) -> dict[str, Any]:
         """Convert a msgpack-deserialized checkpoint into Redis JSON-safe data."""
-        binary_safe = self._replace_binary_markers(value)
         serializer = cast(JsonPlusRedisSerializer, self.serde)
-        processed = serializer._preprocess_interrupts(binary_safe)
+        processed = serializer._preprocess_redis_json(
+            value,
+            encode_bytes=self._encode_blob,
+        )
         json_bytes = orjson.dumps(
             processed,
             default=serializer._default_handler,
             option=orjson.OPT_NON_STR_KEYS,
         )
         return cast(dict, orjson.loads(json_bytes))
-
-    def _replace_binary_markers(self, value: Any) -> Any:
-        """Recursively replace binary values with JSON-safe markers."""
-        if isinstance(value, bytes):
-            return {"__bytes__": self._encode_blob(value)}
-        if isinstance(value, dict):
-            return {k: self._replace_binary_markers(v) for k, v in value.items()}
-        if isinstance(value, list):
-            return [self._replace_binary_markers(item) for item in value]
-        if isinstance(value, tuple):
-            return tuple(self._replace_binary_markers(item) for item in value)
-        return value
 
     def _deserialize_channel_values(
         self, channel_values: dict[str, Any]
@@ -376,6 +366,14 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
             if "__bytes__" in obj and len(obj) == 1:
                 # Decode base64-encoded bytes
                 return self._decode_blob(obj["__bytes__"])
+
+            # Delegate _DeltaSnapshot markers to the serializer (issue #201).
+            if obj.get("__delta_snapshot__") is True:
+                if hasattr(self.serde, "_revive_if_needed"):
+                    revived = {
+                        k: self._recursive_deserialize(v) for k, v in obj.items()
+                    }
+                    return self.serde._revive_if_needed(revived)
 
             # Check if this is a Send object marker (issue #94)
             if (
