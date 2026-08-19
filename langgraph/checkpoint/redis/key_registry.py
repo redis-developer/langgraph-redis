@@ -4,7 +4,6 @@ This module provides a registry for tracking writes per checkpoint using Redis
 sorted sets, eliminating the need for some FT.SEARCH operations.
 """
 
-import logging
 from typing import List, Optional, Union
 
 from redis import Redis
@@ -12,9 +11,8 @@ from redis.asyncio import Redis as AsyncRedis
 from redis.asyncio.cluster import RedisCluster as AsyncRedisCluster
 from redis.cluster import RedisCluster
 
+from langgraph.checkpoint.redis.base import aexpire_with_retry, expire_with_retry
 from langgraph.checkpoint.redis.util import to_storage_safe_id, to_storage_safe_str
-
-logger = logging.getLogger(__name__)
 
 WRITE_KEYS_ZSET_PREFIX = "write_keys_zset"
 REDIS_KEY_SEPARATOR = ":"
@@ -176,14 +174,7 @@ class SyncCheckpointKeyRegistry(CheckpointKeyRegistry):
         zset_key = self.make_write_keys_zset_key(
             thread_id, checkpoint_ns, checkpoint_id
         )
-        try:
-            self._redis.expire(zset_key, ttl_seconds)
-        except Exception:
-            logger.warning(
-                "Failed to apply TTL to write registry key: %s",
-                zset_key,
-                exc_info=True,
-            )
+        expire_with_retry(self._redis, zset_key, ttl_seconds)
 
 
 class AsyncCheckpointKeyRegistry(CheckpointKeyRegistry):
@@ -278,11 +269,4 @@ class AsyncCheckpointKeyRegistry(CheckpointKeyRegistry):
         zset_key = self.make_write_keys_zset_key(
             thread_id, checkpoint_ns, checkpoint_id
         )
-        try:
-            await self._redis.expire(zset_key, ttl_seconds)
-        except Exception:
-            logger.warning(
-                "Failed to apply TTL to write registry key: %s",
-                zset_key,
-                exc_info=True,
-            )
+        await aexpire_with_retry(self._redis, zset_key, ttl_seconds)

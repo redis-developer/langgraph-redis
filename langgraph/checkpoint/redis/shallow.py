@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import logging
 import time
 from collections import OrderedDict
 from contextlib import contextmanager
@@ -31,6 +30,7 @@ from langgraph.checkpoint.redis.base import (
     CHECKPOINT_WRITE_PREFIX,
     REDIS_KEY_SEPARATOR,
     BaseRedisSaver,
+    expire_with_retry,
 )
 from langgraph.checkpoint.redis.util import (
     from_storage_safe_str,
@@ -40,9 +40,6 @@ from langgraph.checkpoint.redis.util import (
 
 # Constants
 MILLISECONDS_PER_SECOND = 1000
-
-# Logger for this module
-logger = logging.getLogger(__name__)
 
 
 class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
@@ -198,12 +195,7 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         # Apply TTL separately (best-effort)
         if self.ttl_config and "default_ttl" in self.ttl_config:
             ttl_seconds = int(self.ttl_config.get("default_ttl") * 60)
-            try:
-                self._redis.expire(checkpoint_key, ttl_seconds)
-            except Exception:
-                logger.warning(
-                    "Failed to apply TTL to checkpoint key: %s", checkpoint_key
-                )
+            expire_with_retry(self._redis, checkpoint_key, ttl_seconds)
 
         # NOTE: We intentionally do NOT clean up old writes here.
         # In the HITL (Human-in-the-Loop) flow, interrupt writes are saved via
@@ -364,12 +356,7 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         if self.ttl_config and self.ttl_config.get("refresh_on_read"):
             default_ttl_minutes = self.ttl_config.get("default_ttl", 60)
             ttl_seconds = int(default_ttl_minutes * 60)
-            try:
-                self._redis.expire(checkpoint_key, ttl_seconds)
-            except Exception:
-                logger.warning(
-                    "Failed to refresh TTL on checkpoint key: %s", checkpoint_key
-                )
+            expire_with_retry(self._redis, checkpoint_key, ttl_seconds)
 
         # Parse the checkpoint data
         checkpoint = checkpoint_data.get("checkpoint", {})
@@ -526,23 +513,9 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         # Apply TTL separately (best-effort — failures don't lose writes)
         if self.ttl_config and "default_ttl" in self.ttl_config:
             ttl_seconds = int(self.ttl_config.get("default_ttl") * 60)
-            try:
-                self._redis.expire(thread_write_registry_key, ttl_seconds)
-            except Exception:
-                logger.warning(
-                    "Failed to apply TTL to write registry key: %s",
-                    thread_write_registry_key,
-                    exc_info=True,
-                )
+            expire_with_retry(self._redis, thread_write_registry_key, ttl_seconds)
             for key in write_keys:
-                try:
-                    self._redis.expire(key, ttl_seconds)
-                except Exception:
-                    logger.warning(
-                        "Failed to apply TTL to checkpoint write key: %s",
-                        key,
-                        exc_info=True,
-                    )
+                expire_with_retry(self._redis, key, ttl_seconds)
 
     def _load_pending_writes(
         self, thread_id: str, checkpoint_ns: str, checkpoint_id: str

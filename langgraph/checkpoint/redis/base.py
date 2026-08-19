@@ -1,7 +1,9 @@
+import asyncio
 import base64
 import binascii
 import logging
 import random
+import time
 from abc import abstractmethod
 from typing import Any, Dict, Generic, List, Optional, Sequence, Tuple, Union, cast
 
@@ -33,6 +35,131 @@ logger = logging.getLogger(__name__)
 REDIS_KEY_SEPARATOR = ":"
 CHECKPOINT_PREFIX = "checkpoint"
 CHECKPOINT_WRITE_PREFIX = "checkpoint_write"
+
+# Bounded retry for best-effort TTL operations. A single transient failure
+# (e.g. a MOVED error from a Redis Enterprise proxy) must not permanently
+# leave a RediSearch-indexed key without a TTL, since that key would then
+# never expire and never leave the search index.
+_TTL_RETRY_ATTEMPTS = 3
+_TTL_RETRY_BASE_DELAY_SECONDS = 0.05
+
+
+def expire_with_retry(
+    redis_client: Any,
+    key: str,
+    ttl_seconds: int,
+    *,
+    attempts: int = _TTL_RETRY_ATTEMPTS,
+    base_delay: float = _TTL_RETRY_BASE_DELAY_SECONDS,
+) -> bool:
+    """Apply EXPIRE to a key, retrying transient failures.
+
+    Best-effort: never raises. Returns True if EXPIRE ultimately succeeded
+    (i.e. did not raise), False if every attempt raised.
+    """
+    last_exc: Optional[BaseException] = None
+    for attempt in range(attempts):
+        try:
+            redis_client.expire(key, ttl_seconds)
+            return True
+        except Exception as exc:
+            last_exc = exc
+            if attempt < attempts - 1:
+                time.sleep(base_delay * (2**attempt))
+    logger.warning(
+        "Failed to apply TTL to key %s after %d attempts: %s",
+        key,
+        attempts,
+        last_exc,
+        exc_info=last_exc,
+    )
+    return False
+
+
+def persist_with_retry(
+    redis_client: Any,
+    key: str,
+    *,
+    attempts: int = _TTL_RETRY_ATTEMPTS,
+    base_delay: float = _TTL_RETRY_BASE_DELAY_SECONDS,
+) -> bool:
+    """Apply PERSIST to a key, retrying transient failures.
+
+    Best-effort: never raises. Returns True if PERSIST ultimately succeeded
+    (i.e. did not raise), False if every attempt raised.
+    """
+    last_exc = None
+    for attempt in range(attempts):
+        try:
+            redis_client.persist(key)
+            return True
+        except Exception as exc:
+            last_exc = exc
+            if attempt < attempts - 1:
+                time.sleep(base_delay * (2**attempt))
+    logger.warning(
+        "Failed to remove TTL from key %s after %d attempts: %s",
+        key,
+        attempts,
+        last_exc,
+        exc_info=last_exc,
+    )
+    return False
+
+
+async def aexpire_with_retry(
+    redis_client: Any,
+    key: str,
+    ttl_seconds: int,
+    *,
+    attempts: int = _TTL_RETRY_ATTEMPTS,
+    base_delay: float = _TTL_RETRY_BASE_DELAY_SECONDS,
+) -> bool:
+    """Async version of expire_with_retry. Best-effort: never raises."""
+    last_exc: Optional[BaseException] = None
+    for attempt in range(attempts):
+        try:
+            await redis_client.expire(key, ttl_seconds)
+            return True
+        except Exception as exc:
+            last_exc = exc
+            if attempt < attempts - 1:
+                await asyncio.sleep(base_delay * (2**attempt))
+    logger.warning(
+        "Failed to apply TTL to key %s after %d attempts: %s",
+        key,
+        attempts,
+        last_exc,
+        exc_info=last_exc,
+    )
+    return False
+
+
+async def apersist_with_retry(
+    redis_client: Any,
+    key: str,
+    *,
+    attempts: int = _TTL_RETRY_ATTEMPTS,
+    base_delay: float = _TTL_RETRY_BASE_DELAY_SECONDS,
+) -> bool:
+    """Async version of persist_with_retry. Best-effort: never raises."""
+    last_exc = None
+    for attempt in range(attempts):
+        try:
+            await redis_client.persist(key)
+            return True
+        except Exception as exc:
+            last_exc = exc
+            if attempt < attempts - 1:
+                await asyncio.sleep(base_delay * (2**attempt))
+    logger.warning(
+        "Failed to remove TTL from key %s after %d attempts: %s",
+        key,
+        attempts,
+        last_exc,
+        exc_info=last_exc,
+    )
+    return False
 
 
 class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexType]):
@@ -249,29 +376,25 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         if ttl_minutes is not None:
             # Special case: -1 means remove TTL (make persistent)
             if ttl_minutes == -1:
-                # Apply PERSIST individually per key so that a single failure
-                # does not prevent TTL removal on the remaining keys.
+                # Apply PERSIST individually per key (each retried on its own)
+                # so that a single failure does not prevent TTL removal on
+                # the remaining keys.
                 all_keys = [main_key] + (related_keys or [])
                 for key in all_keys:
-                    try:
-                        self._redis.persist(key)
-                    except Exception:
-                        logger.warning("Failed to remove TTL from key: %s", key)
+                    persist_with_retry(self._redis, key)
 
                 return True
 
             # Regular TTL setting
             ttl_seconds = int(ttl_minutes * 60)
 
-            # Apply TTL individually per key so that a single EXPIRE failure
-            # (e.g. MOVED on Redis Enterprise proxy) does not prevent TTL
-            # from being set on the remaining keys.
+            # Apply TTL individually per key (each retried on its own) so
+            # that a single EXPIRE failure (e.g. MOVED on Redis Enterprise
+            # proxy) does not prevent TTL from being set on the remaining
+            # keys.
             all_keys = [main_key] + (related_keys or [])
             for key in all_keys:
-                try:
-                    self._redis.expire(key, ttl_seconds)
-                except Exception:
-                    logger.warning("Failed to apply TTL to key: %s", key)
+                expire_with_retry(self._redis, key, ttl_seconds)
 
             return True
 
