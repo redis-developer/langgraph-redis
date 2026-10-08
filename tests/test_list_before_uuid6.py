@@ -3,17 +3,36 @@
 LangGraph creates checkpoint ids with uuid6() (36 characters). The savers built the
 ``before`` filter by parsing the id as a ULID, and when that failed they dropped the
 filter, so ``get_state_history(config, before=...)`` returned the whole history.
+
+The shallow savers stamped ``checkpoint_ts`` the same way, falling back to
+``checkpoint["ts"]`` for every UUIDv6 id. ULID ids keep working as before.
 """
 
 import operator
 import uuid
+from datetime import datetime, timezone
 from typing import Annotated, TypedDict
 
 import pytest
+from langchain_core.runnables import RunnableConfig
+from langgraph.checkpoint.base import Checkpoint, CheckpointMetadata, empty_checkpoint
 from langgraph.graph import END, START, StateGraph
+from ulid import ULID
 
 from langgraph.checkpoint.redis import RedisSaver
 from langgraph.checkpoint.redis.aio import AsyncRedisSaver
+from langgraph.checkpoint.redis.ashallow import AsyncShallowRedisSaver
+from langgraph.checkpoint.redis.shallow import ShallowRedisSaver
+
+# A LangGraph checkpoint id (the one from Issue #136). Its UUIDv6 time field is
+# 2025-11-10 13:03:23.206485 UTC.
+UUID6_ID = "1f0be35a-360e-6154-8002-cb3ee66bf299"
+UUID6_ID_MS = (
+    datetime(2025, 11, 10, 13, 3, 23, 206485, tzinfo=timezone.utc).timestamp() * 1000
+)
+# A checkpoint["ts"] almost two years earlier, so the fallback cannot pass for the id.
+OTHER_TS = "2024-01-01T00:00:00+00:00"
+OTHER_TS_MS = datetime(2024, 1, 1, tzinfo=timezone.utc).timestamp() * 1000
 
 
 class State(TypedDict):
@@ -105,3 +124,109 @@ def test_checkpoint_id_timestamp_formats() -> None:
     # Ids that encode no time give None, and the caller falls back.
     assert checkpoint_id_timestamp(str(uuid.uuid4())) is None
     assert checkpoint_id_timestamp("not-an-id") is None
+
+
+def _uuid6_checkpoint() -> Checkpoint:
+    checkpoint = empty_checkpoint()
+    checkpoint["id"] = UUID6_ID
+    checkpoint["ts"] = OTHER_TS
+    return checkpoint
+
+
+def _thread_config(thread_id: str) -> RunnableConfig:
+    return {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+
+
+def test_shallow_put_stores_uuid6_id_timestamp(redis_url: str) -> None:
+    """checkpoint_ts comes from the UUIDv6 id, not the checkpoint["ts"] fallback."""
+    thread_id = f"shallow-{uuid.uuid4()}"
+    metadata: CheckpointMetadata = {"source": "input", "step": 1}
+
+    with ShallowRedisSaver.from_conn_string(redis_url) as saver:
+        saver.setup()
+        saver.put(_thread_config(thread_id), _uuid6_checkpoint(), metadata, {})
+        stored = saver._redis.json().get(
+            saver._make_shallow_redis_checkpoint_key_cached(thread_id, "")
+        )
+
+    assert stored["checkpoint_id"] == UUID6_ID
+    assert stored["checkpoint_ts"] == pytest.approx(UUID6_ID_MS, abs=1)
+    assert stored["checkpoint_ts"] != pytest.approx(OTHER_TS_MS, abs=1)
+
+
+@pytest.mark.asyncio
+async def test_ashallow_aput_stores_uuid6_id_timestamp(redis_url: str) -> None:
+    """checkpoint_ts comes from the UUIDv6 id, not the checkpoint["ts"] fallback."""
+    thread_id = f"ashallow-{uuid.uuid4()}"
+    metadata: CheckpointMetadata = {"source": "input", "step": 1}
+
+    async with AsyncShallowRedisSaver.from_conn_string(redis_url) as saver:
+        await saver.asetup()
+        await saver.aput(_thread_config(thread_id), _uuid6_checkpoint(), metadata, {})
+        stored = await saver._redis.json().get(
+            saver._make_shallow_redis_checkpoint_key_cached(thread_id, "")
+        )
+
+    assert stored["checkpoint_id"] == UUID6_ID
+    assert stored["checkpoint_ts"] == pytest.approx(UUID6_ID_MS, abs=1)
+    assert stored["checkpoint_ts"] != pytest.approx(OTHER_TS_MS, abs=1)
+
+
+def _ulid_ids(count: int) -> list[str]:
+    """Explicit ULID checkpoint ids one second apart, oldest first."""
+    start = datetime(2025, 10, 1, tzinfo=timezone.utc).timestamp()
+    return [str(ULID.from_timestamp(start + i)) for i in range(count)]
+
+
+def _ulid_checkpoint(checkpoint_id: str) -> Checkpoint:
+    checkpoint = empty_checkpoint()
+    checkpoint["id"] = checkpoint_id
+    return checkpoint
+
+
+def _list_ids(tuples: list) -> list[str]:
+    return [t.config["configurable"]["checkpoint_id"] for t in tuples]
+
+
+def test_list_before_ulid_checkpoint(redis_url: str) -> None:
+    """Explicit ULID ids still filter: list(before=...) returns the older ones."""
+    thread_id = f"ulid-{uuid.uuid4()}"
+    ids = _ulid_ids(4)
+
+    with RedisSaver.from_conn_string(redis_url) as saver:
+        saver.setup()
+        config: RunnableConfig = _thread_config(thread_id)
+        for step, checkpoint_id in enumerate(ids):
+            metadata: CheckpointMetadata = {"source": "loop", "step": step}
+            config = saver.put(config, _ulid_checkpoint(checkpoint_id), metadata, {})
+
+        thread = _thread_config(thread_id)
+        assert _list_ids(list(saver.list(thread))) == ids[::-1]
+
+        before = {"configurable": {**thread["configurable"], "checkpoint_id": ids[2]}}
+        assert _list_ids(list(saver.list(thread, before=before))) == [ids[1], ids[0]]
+
+
+@pytest.mark.asyncio
+async def test_alist_before_ulid_checkpoint(redis_url: str) -> None:
+    """Explicit ULID ids still filter: alist(before=...) returns the older ones."""
+    thread_id = f"aulid-{uuid.uuid4()}"
+    ids = _ulid_ids(4)
+
+    async with AsyncRedisSaver.from_conn_string(redis_url) as saver:
+        await saver.asetup()
+        config: RunnableConfig = _thread_config(thread_id)
+        for step, checkpoint_id in enumerate(ids):
+            metadata: CheckpointMetadata = {"source": "loop", "step": step}
+            config = await saver.aput(
+                config, _ulid_checkpoint(checkpoint_id), metadata, {}
+            )
+
+        thread = _thread_config(thread_id)
+        assert _list_ids([t async for t in saver.alist(thread)]) == ids[::-1]
+
+        before = {"configurable": {**thread["configurable"], "checkpoint_id": ids[2]}}
+        assert _list_ids([t async for t in saver.alist(thread, before=before)]) == [
+            ids[1],
+            ids[0],
+        ]
