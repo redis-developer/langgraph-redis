@@ -11,10 +11,44 @@ including handling bytes vs string responses depending on how the Redis client i
 configured with decode_responses.
 """
 
-from typing import Any
+import uuid
+from typing import Any, Optional
+
+from ulid import ULID
 
 EMPTY_STRING_SENTINEL = "__empty__"
 EMPTY_ID_SENTINEL = "00000000-0000-0000-0000-000000000000"
+
+# 100-nanosecond intervals between the UUID epoch (1582-10-15) and the Unix epoch.
+_UUID_EPOCH_OFFSET = 0x01B21DD213814000
+
+
+def checkpoint_id_timestamp(checkpoint_id: str) -> Optional[float]:
+    """Return the timestamp a checkpoint id encodes, or None if it encodes none.
+
+    This is the value stored as ``checkpoint_ts`` and compared by ``list(before=...)``,
+    so both sides must come from here.
+
+    A ULID returns ``ULID.timestamp``, the value the savers have always stored for one.
+    LangGraph's own checkpoint ids are UUIDv6, whose 60-bit timestamp is returned in
+    milliseconds since the Unix epoch, the unit already stored for non-ULID ids. Any
+    other id (for example a uuid4) carries no time and returns None.
+    """
+    if not isinstance(checkpoint_id, str):
+        return None
+    try:
+        return ULID.from_str(checkpoint_id).timestamp
+    except ValueError:
+        pass
+    try:
+        parsed = uuid.UUID(checkpoint_id)
+    except ValueError:
+        return None
+    if parsed.version != 6:
+        return None
+    n = parsed.int
+    ticks = ((n >> 96) << 28) | (((n >> 80) & 0xFFFF) << 12) | ((n >> 64) & 0x0FFF)
+    return (ticks - _UUID_EPOCH_OFFSET) / 10_000
 
 
 def to_storage_safe_str(value: str) -> str:

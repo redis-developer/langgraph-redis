@@ -24,7 +24,6 @@ from redisvl.index import SearchIndex
 from redisvl.query import FilterQuery
 from redisvl.query.filter import Num, Tag
 from redisvl.redis.connection import RedisConnectionFactory
-from ulid import ULID
 
 from langgraph.checkpoint.redis.aio import AsyncRedisSaver
 from langgraph.checkpoint.redis.ashallow import AsyncShallowRedisSaver
@@ -44,6 +43,7 @@ from langgraph.checkpoint.redis.message_exporter import (
 from langgraph.checkpoint.redis.shallow import ShallowRedisSaver
 from langgraph.checkpoint.redis.util import (
     EMPTY_ID_SENTINEL,
+    checkpoint_id_timestamp,
     from_storage_safe_id,
     from_storage_safe_str,
     to_storage_safe_id,
@@ -276,14 +276,11 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
         if before:
             before_checkpoint_id = get_checkpoint_id(before)
             if before_checkpoint_id:
-                try:
-                    before_ulid = ULID.from_str(before_checkpoint_id)
-                    before_ts = before_ulid.timestamp
+                before_ts = checkpoint_id_timestamp(before_checkpoint_id)
+                # An id that encodes no time (e.g. a uuid4) cannot be placed, so no filter.
+                if before_ts is not None:
                     # Use numeric range query: checkpoint_ts < before_ts
                     filter_expression.append(Num("checkpoint_ts") < before_ts)
-                except Exception:
-                    # If not a valid ULID, ignore the before filter
-                    pass
 
         # Combine all filter expressions
         combined_filter = filter_expression[0] if filter_expression else "*"
@@ -524,16 +521,12 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
             }
         }
 
-        # Extract timestamp from checkpoint_id (ULID)
+        # Extract timestamp from checkpoint_id (ULID or LangGraph's UUIDv6)
         checkpoint_ts = None
         if checkpoint_id:
-            try:
-                from ulid import ULID
-
-                ulid_obj = ULID.from_str(checkpoint_id)
-                checkpoint_ts = ulid_obj.timestamp  # milliseconds since epoch
-            except Exception:
-                # If not a valid ULID, use current time
+            checkpoint_ts = checkpoint_id_timestamp(checkpoint_id)
+            if checkpoint_ts is None:
+                # The id encodes no time, use current time
                 import time
 
                 checkpoint_ts = time.time() * 1000

@@ -26,7 +26,6 @@ from redisvl.index import AsyncSearchIndex
 from redisvl.query import FilterQuery
 from redisvl.query.filter import Num, Tag
 from redisvl.redis.connection import RedisConnectionFactory
-from ulid import ULID
 
 from langgraph.checkpoint.redis.base import (
     CHECKPOINT_PREFIX,
@@ -36,6 +35,7 @@ from langgraph.checkpoint.redis.base import (
     aexpire_with_retry,
 )
 from langgraph.checkpoint.redis.util import (
+    checkpoint_id_timestamp,
     to_storage_safe_id,
     to_storage_safe_str,
 )
@@ -200,17 +200,12 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         }
 
         try:
-            # Extract timestamp from checkpoint_id (ULID) or fallback to checkpoint's ts field
-            # Note: LangGraph may generate checkpoint IDs in different formats (ULID, UUIDv6, etc.)
-            # We try ULID first, then fall back gracefully without warnings (Issue #136)
+            # Extract timestamp from checkpoint_id (ULID or LangGraph's UUIDv6), or fall back
+            # to the checkpoint's ts field for ids that encode no time (Issue #136)
             checkpoint_ts = None
             if checkpoint["id"]:
-                try:
-                    ulid_obj = ULID.from_str(checkpoint["id"])
-                    checkpoint_ts = ulid_obj.timestamp  # milliseconds since epoch
-                except Exception:
-                    # Not a valid ULID - this is expected for UUIDv6 and other formats
-                    # Fall back to checkpoint's timestamp field or current time
+                checkpoint_ts = checkpoint_id_timestamp(checkpoint["id"])
+                if checkpoint_ts is None:
                     checkpoint_ts = self._extract_fallback_timestamp(checkpoint)
 
             # Store channel values inline in the checkpoint
@@ -311,14 +306,11 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         if before:
             before_checkpoint_id = get_checkpoint_id(before)
             if before_checkpoint_id:
-                try:
-                    before_ulid = ULID.from_str(before_checkpoint_id)
-                    before_ts = before_ulid.timestamp
+                before_ts = checkpoint_id_timestamp(before_checkpoint_id)
+                # An id that encodes no time (e.g. a uuid4) cannot be placed, so no filter.
+                if before_ts is not None:
                     # Use numeric range query: checkpoint_ts < before_ts
                     query_filter.append(Num("checkpoint_ts") < before_ts)
-                except Exception:
-                    # If not a valid ULID, ignore the before filter
-                    pass
 
         combined_filter = query_filter[0] if query_filter else "*"
         for expr in query_filter[1:]:
