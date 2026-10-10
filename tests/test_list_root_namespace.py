@@ -95,6 +95,53 @@ async def test_aget_state_history_excludes_subgraph_checkpoints(
     assert _history_steps(history) == expected
 
 
+def _before_middle(app, thread: dict) -> list:
+    for _ in range(3):
+        app.invoke({"count": 0}, thread)
+    history = list(app.get_state_history(thread))
+    middle = history[len(history) // 2]
+    return list(app.get_state_history(thread, before=middle.config))
+
+
+async def _abefore_middle(app, thread: dict) -> list:
+    for _ in range(3):
+        await app.ainvoke({"count": 0}, thread)
+    history = [s async for s in app.aget_state_history(thread)]
+    middle = history[len(history) // 2]
+    return [s async for s in app.aget_state_history(thread, before=middle.config)]
+
+
+def test_get_state_history_before_excludes_subgraph_checkpoints(
+    redis_url: str,
+) -> None:
+    """The namespace filter combines with ``before``."""
+    thread = {"configurable": {"thread_id": f"root-ns-{uuid.uuid4()}"}}
+    expected = _history_steps(_before_middle(_graph(InMemorySaver()), thread))
+
+    with RedisSaver.from_conn_string(redis_url) as saver:
+        saver.setup()
+        before = _before_middle(_graph(saver), thread)
+
+    assert {s.config["configurable"]["checkpoint_ns"] for s in before} == {""}
+    assert _history_steps(before) == expected
+
+
+@pytest.mark.asyncio
+async def test_aget_state_history_before_excludes_subgraph_checkpoints(
+    redis_url: str,
+) -> None:
+    """The namespace filter combines with ``before``."""
+    thread = {"configurable": {"thread_id": f"root-ns-{uuid.uuid4()}"}}
+    expected = _history_steps(await _abefore_middle(_graph(InMemorySaver()), thread))
+
+    async with AsyncRedisSaver.from_conn_string(redis_url) as saver:
+        await saver.asetup()
+        before = await _abefore_middle(_graph(saver), thread)
+
+    assert {s.config["configurable"]["checkpoint_ns"] for s in before} == {""}
+    assert _history_steps(before) == expected
+
+
 def test_list_filters_by_root_namespace(redis_url: str) -> None:
     thread_id = f"root-ns-{uuid.uuid4()}"
 
