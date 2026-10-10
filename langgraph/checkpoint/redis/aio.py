@@ -646,9 +646,10 @@ class AsyncRedisSaver(
             if run_id := config["configurable"].get("run_id"):
                 filter_expression.append(Tag("run_id") == to_storage_safe_id(run_id))
 
-            # Search for checkpoints with any namespace, including an empty
-            # string, while `checkpoint_id` has to have a value.
-            if checkpoint_ns := config["configurable"].get("checkpoint_ns"):
+            # An empty string is the root namespace and is filtered on like any
+            # other; only a config with no `checkpoint_ns` lists every namespace.
+            checkpoint_ns = config["configurable"].get("checkpoint_ns")
+            if checkpoint_ns is not None:
                 filter_expression.append(
                     Tag("checkpoint_ns") == to_storage_safe_str(checkpoint_ns)
                 )
