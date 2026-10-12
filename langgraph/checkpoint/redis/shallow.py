@@ -36,6 +36,7 @@ from langgraph.checkpoint.redis.util import (
     from_storage_safe_str,
     to_storage_safe_id,
     to_storage_safe_str,
+    unwrap_connection_errors,
 )
 
 # Constants
@@ -424,8 +425,9 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
 
     def setup(self) -> None:
         """Initialize the indices in Redis."""
-        self.checkpoints_index.create(overwrite=False)
-        self.checkpoint_writes_index.create(overwrite=False)
+        with unwrap_connection_errors():
+            self.checkpoints_index.create(overwrite=False)
+            self.checkpoint_writes_index.create(overwrite=False)
 
     def put_writes(
         self,
