@@ -25,6 +25,7 @@ from langgraph.checkpoint.redis.util import (
     safely_decode,
     to_storage_safe_id,
     to_storage_safe_str,
+    unwrap_connection_errors,
 )
 
 from .jsonplus_redis import JsonPlusRedisSerializer
@@ -316,8 +317,9 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
     def setup(self) -> None:
         """Initialize the indices in Redis."""
         # Create indexes in Redis
-        self.checkpoints_index.create(overwrite=False)
-        self.checkpoint_writes_index.create(overwrite=False)
+        with unwrap_connection_errors():
+            self.checkpoints_index.create(overwrite=False)
+            self.checkpoint_writes_index.create(overwrite=False)
 
     def _load_checkpoint(
         self,

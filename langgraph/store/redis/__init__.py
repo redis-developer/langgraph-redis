@@ -30,6 +30,7 @@ from redisvl.redis.connection import RedisConnectionFactory
 from redisvl.utils.token_escaper import TokenEscaper
 from ulid import ULID
 
+from langgraph.checkpoint.redis.util import unwrap_connection_errors
 from langgraph.store.redis.aio import AsyncRedisStore
 from langgraph.store.redis.base import (
     REDIS_KEY_SEPARATOR,
@@ -142,9 +143,10 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
         # Detect if we're connected to a Redis cluster
         self._detect_cluster_mode()
 
-        self.store_index.create(overwrite=False)
-        if self.index_config:
-            self.vector_index.create(overwrite=False)
+        with unwrap_connection_errors():
+            self.store_index.create(overwrite=False)
+            if self.index_config:
+                self.vector_index.create(overwrite=False)
 
     def batch(self, ops: Iterable[Op]) -> list[Result]:
         """Execute batch of operations."""

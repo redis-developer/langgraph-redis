@@ -58,6 +58,7 @@ from langgraph.checkpoint.redis.util import (
     from_storage_safe_str,
     to_storage_safe_id,
     to_storage_safe_str,
+    unwrap_connection_errors,
 )
 
 logger = logging.getLogger(__name__)
@@ -255,8 +256,9 @@ class AsyncRedisSaver(
         self.loop = asyncio.get_running_loop()
 
         self.create_indexes()
-        await self.checkpoints_index.create(overwrite=False)
-        await self.checkpoint_writes_index.create(overwrite=False)
+        with unwrap_connection_errors():
+            await self.checkpoints_index.create(overwrite=False)
+            await self.checkpoint_writes_index.create(overwrite=False)
 
         # Detect cluster mode if not explicitly set
         await self._detect_cluster_mode()

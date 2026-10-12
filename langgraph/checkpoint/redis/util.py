@@ -12,8 +12,11 @@ configured with decode_responses.
 """
 
 import uuid
-from typing import Any, Optional
+from contextlib import contextmanager
+from typing import Any, Iterator, Optional
 
+from redis.exceptions import ConnectionError as RedisConnectionError
+from redisvl.exceptions import RedisSearchError
 from ulid import ULID
 
 EMPTY_STRING_SENTINEL = "__empty__"
@@ -168,3 +171,22 @@ def safely_decode(obj: Any) -> Any:
     else:
         # For other types (int, float, bool, etc.), return as is
         return obj
+
+
+@contextmanager
+def unwrap_connection_errors() -> Iterator[None]:
+    """Re-raise a redis ConnectionError that redisvl wrapped in RedisSearchError.
+
+    redisvl 0.28 wraps every failure of ``SearchIndex.exists()`` — which
+    ``create()`` calls first — in ``RedisSearchError`` with the original
+    redis-py exception as ``__cause__``. A Redis that cannot be reached is
+    not a search error, and callers of ``setup()`` have always caught
+    ``redis.exceptions.ConnectionError`` for it, so surface that instead.
+    """
+    try:
+        yield
+    except RedisSearchError as e:
+        cause = e.__cause__
+        if isinstance(cause, RedisConnectionError):
+            raise cause from None
+        raise
