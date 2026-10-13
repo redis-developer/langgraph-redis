@@ -38,6 +38,7 @@ from langgraph.checkpoint.redis.util import (
     checkpoint_id_timestamp,
     to_storage_safe_id,
     to_storage_safe_str,
+    unwrap_connection_errors,
 )
 
 # Constants
@@ -146,8 +147,9 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         # (Issue #179).
         self.loop = asyncio.get_running_loop()
 
-        await self.checkpoints_index.create(overwrite=False)
-        await self.checkpoint_writes_index.create(overwrite=False)
+        with unwrap_connection_errors():
+            await self.checkpoints_index.create(overwrite=False)
+            await self.checkpoint_writes_index.create(overwrite=False)
 
     async def setup(self) -> None:  # type: ignore[override]
         """Set up the checkpoint saver asynchronously.

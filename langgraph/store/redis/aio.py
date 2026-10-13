@@ -29,6 +29,7 @@ from redisvl.redis.connection import RedisConnectionFactory
 from redisvl.utils.token_escaper import TokenEscaper
 from ulid import ULID
 
+from langgraph.checkpoint.redis.util import unwrap_connection_errors
 from langgraph.store.redis.base import (
     REDIS_KEY_SEPARATOR,
     STORE_PREFIX,
@@ -112,85 +113,6 @@ class AsyncRedisStore(
             vector_prefix=vector_prefix,
         )
 
-        # Update store_index to async version
-        from copy import deepcopy
-
-        store_schema = {
-            "index": {
-                "name": self.store_prefix,
-                "prefix": self.store_prefix + REDIS_KEY_SEPARATOR,
-                "storage_type": "json",
-            },
-            "fields": [
-                {"name": "prefix", "type": "text"},
-                {"name": "key", "type": "tag"},
-                {"name": "created_at", "type": "numeric"},
-                {"name": "updated_at", "type": "numeric"},
-                {"name": "ttl_minutes", "type": "numeric"},
-                {"name": "expires_at", "type": "numeric"},
-            ],
-        }
-        self.store_index = AsyncSearchIndex.from_dict(
-            store_schema, redis_client=self._redis
-        )
-
-        # Configure vector index if needed
-        if self.index_config:
-            # Create custom vector schema with instance prefix
-            vector_schema = {
-                "index": {
-                    "name": self.vector_prefix,
-                    "prefix": self.vector_prefix + REDIS_KEY_SEPARATOR,
-                    "storage_type": "json",
-                },
-                "fields": [
-                    {"name": "prefix", "type": "text"},
-                    {"name": "key", "type": "tag"},
-                    {"name": "field_name", "type": "tag"},
-                    {"name": "embedding", "type": "vector"},
-                    {"name": "created_at", "type": "numeric"},
-                    {"name": "updated_at", "type": "numeric"},
-                    {"name": "ttl_minutes", "type": "numeric"},
-                    {"name": "expires_at", "type": "numeric"},
-                ],
-            }
-            vector_fields = vector_schema.get("fields", [])
-            vector_field = None
-            for f in vector_fields:
-                if isinstance(f, dict) and f.get("name") == "embedding":
-                    vector_field = f
-                    break
-
-            if vector_field:
-                # Configure vector field with index config values
-                vector_field["attrs"] = {
-                    "algorithm": "flat",  # Default to flat
-                    "datatype": "float32",
-                    "dims": self.index_config["dims"],
-                    "distance_metric": {
-                        "cosine": "COSINE",
-                        "inner_product": "IP",
-                        "l2": "L2",
-                    }[
-                        _ensure_string_or_literal(
-                            self.index_config.get("distance_type", "cosine")
-                        )
-                    ],
-                }
-
-                # Apply any additional vector type config
-                if "ann_index_config" in self.index_config:
-                    vector_field["attrs"].update(self.index_config["ann_index_config"])
-
-            try:
-                self.vector_index = AsyncSearchIndex.from_dict(
-                    vector_schema, redis_client=self._redis
-                )
-            except Exception as e:
-                raise ValueError(
-                    f"Failed to create vector index with schema: {vector_schema}. Error: {str(e)}"
-                ) from e
-
     def configure_client(
         self,
         redis_url: Optional[str] = None,
@@ -228,9 +150,10 @@ class AsyncRedisStore(
             )
 
         # Create indices in Redis
-        await self.store_index.create(overwrite=False)
-        if self.index_config:
-            await self.vector_index.create(overwrite=False)
+        with unwrap_connection_errors():
+            await self.store_index.create(overwrite=False)
+            if self.index_config:
+                await self.vector_index.create(overwrite=False)
 
     async def _detect_cluster_mode(self) -> None:
         """Detect if the Redis client is a cluster client by inspecting its class."""
@@ -348,14 +271,21 @@ class AsyncRedisStore(
             yield store
 
     def create_indexes(self) -> None:
-        """Create async indices."""
+        """Async indices over the schemas BaseRedisStore built. Called from
+        BaseRedisStore.__init__, so the base never wraps this store's async
+        client in a sync SearchIndex (redisvl >= 0.28 refuses that)."""
         self.store_index = AsyncSearchIndex.from_dict(
-            self.SCHEMAS[0], redis_client=self._redis
+            self.store_schema, redis_client=self._redis
         )
-        if self.index_config:
-            self.vector_index = AsyncSearchIndex.from_dict(
-                self.SCHEMAS[1], redis_client=self._redis
-            )
+        if self.vector_schema is not None:
+            try:
+                self.vector_index = AsyncSearchIndex.from_dict(
+                    self.vector_schema, redis_client=self._redis
+                )
+            except Exception as e:
+                raise ValueError(
+                    f"Failed to create vector index with schema: {self.vector_schema}. Error: {str(e)}"
+                ) from e
 
     async def __aenter__(self) -> AsyncRedisStore:
         """Async context manager enter."""
