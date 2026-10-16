@@ -31,8 +31,9 @@ def checkpoint_id_timestamp(checkpoint_id: str) -> Optional[float]:
 
     A ULID returns ``ULID.timestamp``, the value the savers have always stored for one.
     LangGraph's own checkpoint ids are UUIDv6, whose 60-bit timestamp is returned in
-    milliseconds since the Unix epoch, the unit already stored for non-ULID ids. Any
-    other id (for example a uuid4) carries no time and returns None.
+    milliseconds since the Unix epoch, the unit already stored for non-ULID ids, to
+    whole microseconds. Any other id (for example a uuid4) carries no time and
+    returns None.
     """
     if not isinstance(checkpoint_id, str):
         return None
@@ -48,7 +49,10 @@ def checkpoint_id_timestamp(checkpoint_id: str) -> Optional[float]:
         return None
     n = parsed.int
     ticks = ((n >> 96) << 28) | (((n >> 80) & 0xFFFF) << 12) | ((n >> 64) & 0x0FFF)
-    return (ticks - _UUID_EPOCH_OFFSET) / 10_000
+    # Whole microseconds keep the value to 16 significant digits. RedisJSON can parse a
+    # 17-digit float one unit in the last place off, which can store a checkpoint's
+    # checkpoint_ts below the ``before`` bound computed here for the same id.
+    return ((ticks - _UUID_EPOCH_OFFSET) // 10) / 1000
 
 
 def to_storage_safe_str(value: str) -> str:

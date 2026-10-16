@@ -109,7 +109,9 @@ def test_checkpoint_id_timestamp_formats() -> None:
     from langgraph.checkpoint.redis.util import checkpoint_id_timestamp
 
     # LangGraph's uuid6 ids decode to milliseconds since the epoch, in order.
-    first, second = empty_checkpoint()["id"], empty_checkpoint()["id"]
+    first = empty_checkpoint()["id"]
+    time.sleep(0.001)  # ids made within one microsecond decode to the same value
+    second = empty_checkpoint()["id"]
     first_ts, second_ts = checkpoint_id_timestamp(first), checkpoint_id_timestamp(
         second
     )
@@ -230,3 +232,133 @@ async def test_alist_before_ulid_checkpoint(redis_url: str) -> None:
             ids[1],
             ids[0],
         ]
+
+
+# Five checkpoint ids LangGraph made on a Linux CI runner (run 38835913127), oldest
+# first; the last is the one get_state_history(before=...) returned there. Linux's
+# clock carries the 100 ns digit, so their timestamps need 17 significant digits.
+CI_IDS = [
+    "1f1c902d-58c6-6e18-bfff-3b1e1314fdf4",
+    "1f1c902d-58c8-616c-8000-2f9c6a1dbb6d",
+    "1f1c902d-58cd-69e9-8001-94923f4c07c0",
+    "1f1c902d-58d9-6471-8002-89e408eacaeb",
+    "1f1c902d-58da-60f2-8003-4602ef4666e2",
+]
+# `before` checkpoints printed by other failing CI runs, 12 to 15 Oct 2026.
+CI_BEFORE_IDS = [
+    "1f1c9088-894a-6ba6-8003-2b9b78b77676",
+    "1f1c9088-ed9c-66b9-8003-7fa526d3ec3e",
+    "1f1c908c-233d-6dd2-8003-4d8bc0be861f",
+    "1f1c902e-0e2b-60e1-8003-296b05e03f6e",
+    "1f1c7761-bce6-6221-8003-679fd903ee16",
+    "1f1c724c-e87a-6ae1-8003-54e0758e5421",
+    "1f1c724b-d02b-6bfd-8003-cea4a0430ec4",
+    "1f1c6aee-6a9b-6619-8003-c6e8706dd7ea",
+    "1f1c6af1-1f74-6952-8003-12a71ca320c0",
+    "1f1c5e63-efcb-659d-8003-f03b3060c16a",
+]
+
+
+def _put_ids(saver: RedisSaver, thread_id: str, ids: list[str]) -> None:
+    config: RunnableConfig = _thread_config(thread_id)
+    for step, checkpoint_id in enumerate(ids):
+        metadata: CheckpointMetadata = {"source": "loop", "step": step}
+        config = saver.put(config, _ulid_checkpoint(checkpoint_id), metadata, {})
+
+
+def _before(thread_id: str, checkpoint_id: str) -> RunnableConfig:
+    return {
+        "configurable": {
+            "thread_id": thread_id,
+            "checkpoint_ns": "",
+            "checkpoint_id": checkpoint_id,
+        }
+    }
+
+
+@pytest.mark.parametrize("checkpoint_id", CI_IDS[-1:] + CI_BEFORE_IDS)
+def test_stored_checkpoint_ts_is_the_before_bound(
+    redis_url: str, checkpoint_id: str
+) -> None:
+    """The checkpoint_ts Redis stores is the value list(before=...) compares with."""
+    from langgraph.checkpoint.redis.util import checkpoint_id_timestamp
+
+    thread_id = f"ts-{uuid.uuid4()}"
+    with RedisSaver.from_conn_string(redis_url) as saver:
+        saver.setup()
+        _put_ids(saver, thread_id, [checkpoint_id])
+        stored = saver._redis.json().get(
+            saver._make_redis_checkpoint_key_cached(thread_id, "", checkpoint_id)
+        )
+
+    assert stored["checkpoint_ts"] == checkpoint_id_timestamp(checkpoint_id)
+
+
+# CI_IDS[4] is the id Redis stores one unit in the last place low; CI_IDS[3] is a
+# control whose 17-digit timestamp it already stores exactly.
+@pytest.mark.parametrize("boundary", [4, 3])
+def test_list_before_excludes_the_before_checkpoint(
+    redis_url: str, boundary: int
+) -> None:
+    thread_id = f"bound-{uuid.uuid4()}"
+    with RedisSaver.from_conn_string(redis_url) as saver:
+        saver.setup()
+        _put_ids(saver, thread_id, CI_IDS)
+        thread = _thread_config(thread_id)
+        assert _list_ids(list(saver.list(thread))) == CI_IDS[::-1]
+
+        before = _before(thread_id, CI_IDS[boundary])
+        listed = _list_ids(list(saver.list(thread, before=before)))
+        assert listed == CI_IDS[boundary - 1 :: -1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", [4, 3])
+async def test_alist_before_excludes_the_before_checkpoint(
+    redis_url: str, boundary: int
+) -> None:
+    thread_id = f"abound-{uuid.uuid4()}"
+    async with AsyncRedisSaver.from_conn_string(redis_url) as saver:
+        await saver.asetup()
+        config: RunnableConfig = _thread_config(thread_id)
+        for step, checkpoint_id in enumerate(CI_IDS):
+            metadata: CheckpointMetadata = {"source": "loop", "step": step}
+            config = await saver.aput(
+                config, _ulid_checkpoint(checkpoint_id), metadata, {}
+            )
+        thread = _thread_config(thread_id)
+
+        before = _before(thread_id, CI_IDS[boundary])
+        listed = _list_ids([t async for t in saver.alist(thread, before=before)])
+        assert listed == CI_IDS[boundary - 1 :: -1]
+
+
+def test_shallow_list_before_excludes_the_before_checkpoint(redis_url: str) -> None:
+    thread_id = f"sbound-{uuid.uuid4()}"
+    metadata: CheckpointMetadata = {"source": "loop", "step": 1}
+    with ShallowRedisSaver.from_conn_string(redis_url) as saver:
+        saver.setup()
+        saver.put(_thread_config(thread_id), _ulid_checkpoint(CI_IDS[-1]), metadata, {})
+        thread = _thread_config(thread_id)
+        assert _list_ids(list(saver.list(thread))) == [CI_IDS[-1]]
+
+        before = _before(thread_id, CI_IDS[-1])
+        assert _list_ids(list(saver.list(thread, before=before))) == []
+
+
+@pytest.mark.asyncio
+async def test_ashallow_alist_before_excludes_the_before_checkpoint(
+    redis_url: str,
+) -> None:
+    thread_id = f"asbound-{uuid.uuid4()}"
+    metadata: CheckpointMetadata = {"source": "loop", "step": 1}
+    async with AsyncShallowRedisSaver.from_conn_string(redis_url) as saver:
+        await saver.asetup()
+        await saver.aput(
+            _thread_config(thread_id), _ulid_checkpoint(CI_IDS[-1]), metadata, {}
+        )
+        thread = _thread_config(thread_id)
+        assert _list_ids([t async for t in saver.alist(thread)]) == [CI_IDS[-1]]
+
+        before = _before(thread_id, CI_IDS[-1])
+        assert _list_ids([t async for t in saver.alist(thread, before=before)]) == []
