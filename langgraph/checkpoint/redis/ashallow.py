@@ -628,47 +628,42 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         safe_checkpoint_ns = to_storage_safe_str(checkpoint_ns)
         thread_zset_key = f"write_keys_zset:{thread_id}:{safe_checkpoint_ns}:shallow"
 
-        try:
-            # Check if we have any writes in the thread sorted set
-            write_count = await self._redis.zcard(thread_zset_key)
+        # Check if we have any writes in the thread sorted set
+        write_count = await self._redis.zcard(thread_zset_key)
 
-            if write_count == 0:
-                # No writes for this thread
-                return []
+        if write_count == 0:
+            # No writes for this thread
+            return []
 
-            # Get all write keys from the thread sorted set
-            write_keys = await self._redis.zrange(thread_zset_key, 0, -1)
+        # Get all write keys from the thread sorted set
+        write_keys = await self._redis.zrange(thread_zset_key, 0, -1)
 
-            if write_keys:
-                # All keys in the set belong to current checkpoint
-                decoded_keys = [
-                    key.decode() if isinstance(key, bytes) else key
-                    for key in write_keys
-                ]
+        if write_keys:
+            # All keys in the set belong to current checkpoint
+            decoded_keys = [
+                key.decode() if isinstance(key, bytes) else key for key in write_keys
+            ]
 
-                # Fetch all writes using pipeline
-                pipeline = self._redis.pipeline(transaction=False)
-                for key in decoded_keys:
-                    pipeline.json().get(key)
+            # Fetch all writes using pipeline
+            pipeline = self._redis.pipeline(transaction=False)
+            for key in decoded_keys:
+                pipeline.json().get(key)
 
-                results = await pipeline.execute()
+            results = await pipeline.execute()
 
-                # Build the writes dictionary
-                writes_dict: Dict[Tuple[str, str], Dict[str, Any]] = {}
+            # Build the writes dictionary
+            writes_dict: Dict[Tuple[str, str], Dict[str, Any]] = {}
 
-                for write_data in results:
-                    if write_data:
-                        task_id = write_data.get("task_id", "")
-                        idx = write_data.get("idx", 0)
-                        writes_dict[(task_id, idx)] = write_data
+            for write_data in results:
+                if write_data:
+                    task_id = write_data.get("task_id", "")
+                    idx = write_data.get("idx", 0)
+                    writes_dict[(task_id, idx)] = write_data
 
-                # Use base class method to deserialize
-                return BaseRedisSaver._load_writes(self.serde, writes_dict)
+            # Use base class method to deserialize
+            return BaseRedisSaver._load_writes(self.serde, writes_dict)
 
-        except Exception:
-            pass
-
-        # Return empty list if registry not available
+        # No write keys left in the registry
         return []
 
     def configure_client(
