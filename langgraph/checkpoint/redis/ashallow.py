@@ -639,7 +639,9 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         write_keys = await self._redis.zrange(thread_zset_key, 0, -1)
 
         if write_keys:
-            # All keys in the set belong to current checkpoint
+            # The registry is per thread and is not cleared when a new checkpoint
+            # is saved (Issue #133), so it can still hold writes made against
+            # earlier checkpoints. Only the writes for this checkpoint are pending.
             decoded_keys = [
                 key.decode() if isinstance(key, bytes) else key for key in write_keys
             ]
@@ -655,7 +657,7 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             writes_dict: Dict[Tuple[str, str], Dict[str, Any]] = {}
 
             for write_data in results:
-                if write_data:
+                if write_data and write_data.get("checkpoint_id") == checkpoint_id:
                     task_id = write_data.get("task_id", "")
                     idx = write_data.get("idx", 0)
                     writes_dict[(task_id, idx)] = write_data

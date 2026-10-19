@@ -516,8 +516,9 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         if checkpoint_id is None:
             return []
 
-        # Use thread-level registry that only contains current checkpoint writes
-        # All writes belong to the current checkpoint
+        # The thread-level registry is not cleared when a new checkpoint is saved
+        # (Issue #133), so it can still hold writes made against earlier
+        # checkpoints. Only the writes for this checkpoint are pending.
         # Use to_storage_safe_str for consistent key naming with delete_thread
         safe_checkpoint_ns = to_storage_safe_str(checkpoint_ns)
         thread_write_registry_key = (
@@ -543,7 +544,7 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         writes_dict: Dict[Tuple[str, str], Dict[str, Any]] = {}
 
         for write_data in results:
-            if write_data:
+            if write_data and write_data.get("checkpoint_id") == checkpoint_id:
                 task_id = write_data.get("task_id", "")
                 idx = write_data.get("idx", 0)
                 writes_dict[(task_id, idx)] = write_data

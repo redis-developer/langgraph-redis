@@ -451,17 +451,15 @@ def test_put_writes_persist_for_hitl_support(redis_url: str) -> None:
         writes2 = [("channel3", "value3")]
         saver.put_writes(result_config2, writes2, "task2")
 
-        # Verify all writes persist (for HITL support)
+        # Issue #133 fix: saving checkpoint2 must not delete checkpoint1's writes
+        stored_writes = saver._redis.keys(f"checkpoint_write:{thread_id}:*")
+        assert len(stored_writes) == 3
+
+        # Only checkpoint2's own writes are its pending writes
         retrieved = saver.get_tuple(result_config2)
         assert retrieved is not None
-
-        # Issue #133 fix: All writes should persist
-        pending_writes = retrieved.pending_writes
-        write_channels = {w[1] for w in pending_writes}
-        assert "channel3" in write_channels
-        # Old writes should also be present (for HITL support)
-        assert "channel1" in write_channels
-        assert "channel2" in write_channels
+        write_channels = {w[1] for w in retrieved.pending_writes}
+        assert write_channels == {"channel3"}
 
         # Verify that delete_thread properly cleans up all writes
         saver.delete_thread(thread_id)
