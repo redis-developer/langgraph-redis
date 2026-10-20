@@ -71,6 +71,14 @@ class AsyncRedisStore(
     ttl_config: Optional[TTLConfig] = None
     # Whether to assume the Redis server is a cluster; None triggers auto-detection
     cluster_mode: Optional[bool] = None
+    # The async store has ALWAYS written vectors as JSON documents — its
+    # _batch_put_ops has no hash branch — and before this class built its own
+    # schemas, the index storage type was hardcoded "json" here too. Honouring
+    # index["vector_storage_type"] now would hand existing async users who set
+    # "hash" a hash index over JSON data, which indexes nothing. Pinned until
+    # async hash writes and an index migration exist; the sync store, which
+    # does have the hash write path, keeps honouring the config.
+    _vector_storage_type: Optional[str] = "json"
 
     def __init__(
         self,

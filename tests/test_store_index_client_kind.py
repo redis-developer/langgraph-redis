@@ -58,6 +58,38 @@ def test_sync_store_builds_sync_indexes(redis_url: str) -> None:
 
 
 @pytest.mark.asyncio
+async def test_async_store_keeps_json_vector_storage(redis_url: str) -> None:
+    """The async store has always written vectors as JSON documents, and its
+    index storage type was hardcoded "json" before the schemas moved to the
+    base. Honouring index["vector_storage_type"]="hash" here would build a
+    hash index over JSON data — it would index nothing — and would break
+    existing async users who passed "hash" and got JSON anyway."""
+    store = AsyncRedisStore(
+        redis_url,
+        index={**_INDEX, "vector_storage_type": "hash"},  # type: ignore[typeddict-unknown-key]
+        store_prefix="kind_f",
+        vector_prefix="kind_fv",
+    )
+    assert store.vector_schema is not None
+    assert store.vector_schema["index"]["storage_type"] == "json"
+
+
+def test_sync_store_still_honours_the_configured_vector_storage(
+    redis_url: str,
+) -> None:
+    """Unchanged by the async pin above: the sync store has a hash write path
+    (`_batch_put_ops` buffers the vector), so "hash" means hash there."""
+    store = RedisStore(
+        redis_url,
+        index={**_INDEX, "vector_storage_type": "hash"},  # type: ignore[typeddict-unknown-key]
+        store_prefix="kind_g",
+        vector_prefix="kind_gv",
+    )
+    assert store.vector_schema is not None
+    assert store.vector_schema["index"]["storage_type"] == "hash"
+
+
+@pytest.mark.asyncio
 async def test_async_store_setup_on_unreachable_redis_raises_connection_error() -> None:
     """redisvl >= 0.28 wraps the connection failure inside create() in a
     RedisSearchError; setup() keeps surfacing redis-py's ConnectionError."""

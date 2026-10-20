@@ -124,6 +124,10 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
     # Whether to operate in Redis cluster mode; None triggers auto-detection
     cluster_mode: Optional[bool] = None
     SCHEMAS = SCHEMAS
+    # Storage type the vector index is forced to, overriding the caller's
+    # ``index["vector_storage_type"]``. None (the sync store) honours the
+    # config; AsyncRedisStore pins "json" — see the note on its override.
+    _vector_storage_type: Optional[str] = None
 
     supports_ttl: bool = True
     ttl_config: Optional[TTLConfig] = None
@@ -282,7 +286,11 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
         # Get storage type from index config, default to "json"
         # Cast to dict to safely access potential extra fields
         index_dict = dict(self.index_config)
-        vector_storage_type = index_dict.get("vector_storage_type", "json")
+        vector_storage_type = (
+            self._vector_storage_type
+            if self._vector_storage_type is not None
+            else index_dict.get("vector_storage_type", "json")
+        )
 
         vector_schema: Dict[str, Any] = {
             "index": {
