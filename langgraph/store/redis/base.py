@@ -124,6 +124,10 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
     # Whether to operate in Redis cluster mode; None triggers auto-detection
     cluster_mode: Optional[bool] = None
     SCHEMAS = SCHEMAS
+    # Storage type the vector index is forced to, overriding the caller's
+    # ``index["vector_storage_type"]``. None (the sync store) honours the
+    # config; AsyncRedisStore pins "json" — see the note on its override.
+    _vector_storage_type: Optional[str] = None
 
     supports_ttl: bool = True
     ttl_config: Optional[TTLConfig] = None
@@ -249,8 +253,19 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
                 (p, tokenize_path(p)) if p != "$" else (p, p) for p in fields
             ]
 
-        # Create custom schemas with instance prefixes
-        store_schema = {
+        # Build the schemas once, with the instance prefixes; the index objects
+        # themselves come from create_indexes(), which the async store overrides
+        # so an AsyncRedis client is never handed to a sync SearchIndex.
+        self.store_schema, self.vector_schema = self._build_schemas()
+        self.create_indexes()
+
+        # Note: set_client_info() should be called by concrete implementations
+        # after initialization to avoid async/sync conflicts
+
+    def _build_schemas(self) -> tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+        """The store schema and, when an index config is set, the vector schema,
+        both keyed on this instance's prefixes."""
+        store_schema: Dict[str, Any] = {
             "index": {
                 "name": self.store_prefix,
                 "prefix": self.store_prefix + REDIS_KEY_SEPARATOR,
@@ -265,71 +280,69 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
                 {"name": "expires_at", "type": "numeric"},
             ],
         }
+        if not self.index_config:
+            return store_schema, None
 
-        # Initialize search indices
-        self.store_index = SearchIndex.from_dict(store_schema, redis_client=self._redis)
+        # Get storage type from index config, default to "json"
+        # Cast to dict to safely access potential extra fields
+        index_dict = dict(self.index_config)
+        vector_storage_type = (
+            self._vector_storage_type
+            if self._vector_storage_type is not None
+            else index_dict.get("vector_storage_type", "json")
+        )
 
-        # Configure vector index if needed
-        if self.index_config:
-            # Get storage type from index config, default to "json"
-            # Cast to dict to safely access potential extra fields
-            index_dict = dict(self.index_config)
-            vector_storage_type = index_dict.get("vector_storage_type", "json")
+        vector_schema: Dict[str, Any] = {
+            "index": {
+                "name": self.vector_prefix,
+                "prefix": self.vector_prefix + REDIS_KEY_SEPARATOR,
+                "storage_type": vector_storage_type,
+            },
+            "fields": [
+                {"name": "prefix", "type": "text"},
+                {"name": "key", "type": "tag"},
+                {"name": "field_name", "type": "tag"},
+                {"name": "embedding", "type": "vector"},
+                {"name": "created_at", "type": "numeric"},
+                {"name": "updated_at", "type": "numeric"},
+                {"name": "ttl_minutes", "type": "numeric"},
+                {"name": "expires_at", "type": "numeric"},
+            ],
+        }
+        vector_field = next(
+            f
+            for f in vector_schema["fields"]
+            if isinstance(f, dict) and f.get("name") == "embedding"
+        )
+        vector_field["attrs"] = {
+            "algorithm": "flat",  # Default to flat
+            "datatype": "float32",
+            "dims": self.index_config["dims"],
+            # Map distance metrics to Redis-accepted literals
+            "distance_metric": {
+                "cosine": "COSINE",
+                "inner_product": "IP",
+                "l2": "L2",
+            }[_ensure_string_or_literal(index_dict.get("distance_type", "cosine"))],
+        }
+        # Apply any additional vector type config
+        if "ann_index_config" in index_dict:
+            vector_field["attrs"].update(index_dict["ann_index_config"])
+        return store_schema, vector_schema
 
-            # Create custom vector schema with instance prefix
-            vector_schema: Dict[str, Any] = {
-                "index": {
-                    "name": self.vector_prefix,
-                    "prefix": self.vector_prefix + REDIS_KEY_SEPARATOR,
-                    "storage_type": vector_storage_type,
-                },
-                "fields": [
-                    {"name": "prefix", "type": "text"},
-                    {"name": "key", "type": "tag"},
-                    {"name": "field_name", "type": "tag"},
-                    {"name": "embedding", "type": "vector"},
-                    {"name": "created_at", "type": "numeric"},
-                    {"name": "updated_at", "type": "numeric"},
-                    {"name": "ttl_minutes", "type": "numeric"},
-                    {"name": "expires_at", "type": "numeric"},
-                ],
-            }
+    def create_indexes(self) -> None:
+        """Instantiate the search indices for the built schemas.
 
-            vector_fields = vector_schema.get("fields", [])
-            vector_field = None
-            for f in vector_fields:
-                if isinstance(f, dict) and f.get("name") == "embedding":
-                    vector_field = f
-                    break
-
-            if vector_field:
-                # Configure vector field with index config values
-                vector_field["attrs"] = {
-                    "algorithm": "flat",  # Default to flat
-                    "datatype": "float32",
-                    "dims": self.index_config["dims"],
-                    # Map distance metrics to Redis-accepted literals
-                    "distance_metric": {
-                        "cosine": "COSINE",
-                        "inner_product": "IP",
-                        "l2": "L2",
-                    }[
-                        _ensure_string_or_literal(
-                            index_dict.get("distance_type", "cosine")
-                        )
-                    ],
-                }
-
-                # Apply any additional vector type config
-                if "ann_index_config" in index_dict:
-                    vector_field["attrs"].update(index_dict["ann_index_config"])
-
-            self.vector_index = SearchIndex.from_dict(
-                vector_schema, redis_client=self._redis
+        The sync store uses redisvl's SearchIndex; AsyncRedisStore overrides
+        this with AsyncSearchIndex. Construction only — nothing is created in
+        Redis until setup()."""
+        self.store_index = SearchIndex.from_dict(  # type: ignore[assignment]
+            self.store_schema, redis_client=self._redis
+        )
+        if self.vector_schema is not None:
+            self.vector_index = SearchIndex.from_dict(  # type: ignore[assignment]
+                self.vector_schema, redis_client=self._redis
             )
-
-        # Note: set_client_info() should be called by concrete implementations
-        # after initialization to avoid async/sync conflicts
 
     def set_client_info(self) -> None:
         """Set client info for Redis monitoring."""
