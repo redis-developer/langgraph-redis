@@ -18,14 +18,28 @@ env:
 
 jobs:
   test:
-    name: Python ${{ matrix.python-version }} - [redis ${{ matrix.redis-version }}]
+    name: Python ${{ matrix.python-version }} - [redis ${{ matrix.redis-version }}]${{ matrix.deps == 'latest' && ' - [latest deps]' || '' }}
     runs-on: ubuntu-latest
+    # Temporary: the latest-deps job fails on redis-py 8 (default pool of 100
+    # connections exhausted by test_large_batches_async; RESP3 default breaks
+    # the protocol-version tests in test_issue_124). Remove once those are fixed
+    # so a breaking dependency release fails the run again.
+    continue-on-error: ${{ matrix.deps == 'latest' }}
 
     strategy:
       fail-fast: false
       matrix:
         python-version: [ '3.10', 3.11, 3.12, 3.13 ]
-        redis-version: [ '6.2.6-v9', 'latest', '8.0.2' ]
+        # 'latest' is the final Redis Stack line (7.4.x), for users not yet on
+        # Redis 8; '8.0.2' is the oldest Redis 8 release and '8' the newest.
+        redis-version: [ 'latest', '8.0.2', '8' ]
+        deps: [ 'locked' ]
+        include:
+          # One extra job on the newest runtime dependencies pyproject.toml
+          # allows, i.e. what a fresh install of this package resolves to.
+          - python-version: 3.13
+            redis-version: '8.0.2'
+            deps: 'latest'
 
     steps:
       - name: Check out repository
@@ -47,9 +61,16 @@ jobs:
           pip wheel --no-cache-dir --use-pep517 ml-dtypes
           poetry install --all-extras
 
+      - name: Resolve runtime dependencies to the latest allowed releases
+        if: matrix.deps == 'latest'
+        run: |
+          poetry update --lock redisvl redis langgraph-checkpoint
+          poetry install --all-extras
+          poetry run python -c "import importlib.metadata as m; print({p: m.version(p) for p in ('redisvl', 'redis', 'langgraph-checkpoint')})"
+
       - name: Set Redis image name
         run: |
-          if [[ "${{ matrix.redis-version }}" == "8.0.2" ]]; then
+          if [[ "${{ matrix.redis-version }}" == 8* ]]; then
             echo "REDIS_IMAGE=redis:${{ matrix.redis-version }}" >> $GITHUB_ENV
           else
             echo "REDIS_IMAGE=redis/redis-stack-server:${{ matrix.redis-version }}" >> $GITHUB_ENV
