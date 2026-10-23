@@ -1,4 +1,4 @@
-"""Tests for issue #124: Support redis-py 7.x (Python 3.13 compatibility).
+"""Tests for redis-py compatibility on Python 3.13 and later.
 
 This test verifies that the library works correctly with redis-py 7.x,
 which includes fixes for Python 3.13's stricter isinstance() behavior.
@@ -37,38 +37,34 @@ class TestRedis7Compatibility:
         major, minor, patch = map(int, redis_version.split(".")[:3])
         assert major >= 5, f"redis-py {redis_version} is too old, need >= 5.2.1"
 
-    def test_get_protocol_version_sync_client(self) -> None:
+    @pytest.mark.parametrize("protocol", [2, 3])
+    def test_get_protocol_version_sync_client(self, protocol: int) -> None:
         """Test that get_protocol_version works with sync Redis client.
 
         This was the function causing TypeError on Python 3.13 before the fix.
         """
-        client = redis.Redis()
+        client = redis.Redis(protocol=protocol)
         try:
             # This should not raise TypeError on Python 3.13
             version = get_protocol_version(client)
-            assert version in (2, 3), f"Unexpected protocol version: {version}"
+            assert version == protocol
         finally:
             client.close()
 
-    def test_get_protocol_version_async_client(self) -> None:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("protocol", [2, 3])
+    async def test_get_protocol_version_async_client(self, protocol: int) -> None:
         """Test that get_protocol_version works with async Redis client.
 
         This was the function causing TypeError on Python 3.13 before the fix.
         """
-        client = aredis.Redis()
+        client = aredis.Redis(protocol=protocol)
         try:
             # This should not raise TypeError on Python 3.13
             version = get_protocol_version(client)
-            assert version in (2, 3), f"Unexpected protocol version: {version}"
+            assert version == protocol
         finally:
-            # Async client cleanup
-            import asyncio
-
-            try:
-                asyncio.get_event_loop().run_until_complete(client.aclose())
-            except RuntimeError:
-                # Event loop may not be available in sync test
-                pass
+            await client.aclose()
 
 
 class TestRedis7WithCheckpointer:
