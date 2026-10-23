@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     # Temporary: the latest-deps job fails on redis-py 8 (default pool of 100
     # connections exhausted by test_large_batches_async; RESP3 default breaks
-    # the protocol-version tests in test_issue_124). Remove once those are fixed
+    # the protocol-version tests in test_redis_py_compatibility). Remove once those are fixed
     # so a breaking dependency release fails the run again.
     continue-on-error: ${{ matrix.deps == 'latest' }}
 
