@@ -304,6 +304,8 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
                     query_filter.append(Tag("thread_id") == to_storage_safe_id(value))
                 elif key == "run_id":
                     query_filter.append(Tag("run_id") == to_storage_safe_id(value))
+                else:
+                    raise ValueError(f"Unsupported filter key: {key}")
 
         if before:
             before_checkpoint_id = get_checkpoint_id(before)
@@ -324,11 +326,8 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             return_fields=[
                 "thread_id",
                 "checkpoint_ns",
-                "checkpoint_id",
-                "source",
-                "step",
-                "score",
-                "ts",
+                "$.checkpoint",
+                "$.metadata",
             ],
             num_results=limit or 100,  # Set higher limit to retrieve more results
             sort_by=("checkpoint_id", "DESC"),
@@ -336,30 +335,47 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
 
         results = await self.checkpoints_index.search(query)
         for doc in results.docs:
+            thread_id = cast(str, getattr(doc, "thread_id", ""))
+            checkpoint_ns = cast(str, getattr(doc, "checkpoint_ns", ""))
+
+            # Channel values are stored inline in the checkpoint, as list() reads them
+            checkpoint = json.loads(doc["$.checkpoint"])
+            channel_values: Dict[str, Any] = checkpoint.get("channel_values", {})
+            channel_values = self._deserialize_channel_values(channel_values)
+
+            # aput stores the metadata as a JSON string
+            metadata = json.loads(getattr(doc, "$.metadata", "{}"))
+            if isinstance(metadata, str):
+                metadata = json.loads(metadata)
+            sanitized_metadata = {
+                k.replace("\u0000", ""): (
+                    v.replace("\u0000", "") if isinstance(v, str) else v
+                )
+                for k, v in metadata.items()
+            }
+
+            checkpoint_param = self._load_checkpoint(
+                checkpoint,
+                channel_values,
+                [],  # No pending_sends in shallow mode
+            )
+
+            pending_writes = await self._aload_pending_writes(
+                thread_id, checkpoint_ns, checkpoint_param["id"]
+            )
+
             yield CheckpointTuple(
                 config={
                     "configurable": {
-                        "thread_id": getattr(doc, "thread_id", ""),
-                        "checkpoint_ns": getattr(doc, "checkpoint_ns", ""),
-                        "checkpoint_id": getattr(doc, "checkpoint_id", ""),
+                        "thread_id": thread_id,
+                        "checkpoint_ns": checkpoint_ns,
+                        "checkpoint_id": checkpoint_param["id"],
                     }
                 },
-                checkpoint={
-                    "v": 1,
-                    "ts": getattr(doc, "ts", ""),
-                    "id": getattr(doc, "checkpoint_id", ""),
-                    "channel_values": {},
-                    "channel_versions": {},
-                    "versions_seen": {},
-                    "pending_sends": [],
-                },
-                metadata={
-                    "source": getattr(doc, "source", "input"),
-                    "step": int(getattr(doc, "step", 0)),
-                    "writes": {},
-                    "score": float(getattr(doc, "score", 0)),
-                },
-                pending_writes=[],
+                checkpoint=checkpoint_param,
+                metadata=cast(CheckpointMetadata, sanitized_metadata),
+                parent_config=None,
+                pending_writes=pending_writes,
             )
 
     async def aget_tuple(self, config: RunnableConfig) -> Optional[CheckpointTuple]:
