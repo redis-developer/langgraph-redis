@@ -55,6 +55,9 @@ logger = logging.getLogger(__name__)
 REDIS_KEY_SEPARATOR = ":"
 STORE_PREFIX = "store"
 STORE_VECTOR_PREFIX = "store_vectors"
+# RediSearch returns 10 documents unless a query asks for more. Reads that need
+# every match (batched gets, list_namespaces) fetch them in pages of this size.
+STORE_SEARCH_PAGE_SIZE = 1000
 
 # Schemas for Redis Search indices
 SCHEMAS = [
