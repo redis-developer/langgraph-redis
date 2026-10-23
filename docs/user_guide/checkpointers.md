@@ -155,6 +155,48 @@ saver = AsyncRedisSaver(redis_client=client)
 await saver.asetup()
 ```
 
+For standalone Redis workloads that may schedule more concurrent operations
+than the connection pool can serve at once, use a bounded
+`BlockingConnectionPool`. When all connections are busy, additional operations
+wait for a connection instead of failing immediately with
+`MaxConnectionsError`:
+
+```python
+from redis.asyncio import BlockingConnectionPool, Redis as AsyncRedis
+from langgraph.checkpoint.redis import AsyncRedisSaver
+
+pool = BlockingConnectionPool.from_url(
+    "redis://localhost:6379",
+    max_connections=20,
+    timeout=5,
+)
+client = AsyncRedis(connection_pool=pool)
+
+try:
+    async with AsyncRedisSaver.from_conn_string(redis_client=client) as saver:
+        graph = builder.compile(checkpointer=saver)
+        result = await graph.ainvoke(inputs, config)
+finally:
+    await client.aclose()
+    await pool.disconnect()
+```
+
+Choose `max_connections` based on the concurrency your Redis deployment can
+support. The `timeout` applies to each attempt to acquire a connection from the
+pool; if no connection becomes available within that interval, redis-py raises
+a connection error. It is not a timeout for the complete saver operation.
+
+This provides connection-level backpressure, but it does not limit how many
+asyncio tasks the application creates. Applications that can schedule an
+unbounded number of tasks should also use an application-level concurrency
+limit, such as an `asyncio.Semaphore` or a bounded worker queue.
+
+`BlockingConnectionPool` is for standalone Redis clients. Redis Cluster and
+Redis Sentinel use topology-specific connection management; for those
+deployments, inject the appropriate async client and configure the limits it
+supports. Because the client in this example is supplied by the application,
+the application is also responsible for closing it and disconnecting its pool.
+
 ### Async Operations
 
 The async methods mirror the sync API:
