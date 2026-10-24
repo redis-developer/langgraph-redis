@@ -22,6 +22,7 @@ from langgraph.checkpoint.base import (
 )
 from redis.asyncio import BlockingConnectionPool, Redis
 from redis.exceptions import ConnectionError as RedisConnectionError
+from redisvl.exceptions import RedisVLError
 
 from langgraph.checkpoint.redis import BaseRedisSaver
 from langgraph.checkpoint.redis.aio import AsyncRedisSaver
@@ -688,6 +689,39 @@ async def test_blocking_pool_applies_backpressure(
             await pool.release(connection)
 
         result = await asyncio.wait_for(put_task, timeout=2)
+        assert result["configurable"]["thread_id"] == "thread-1"
+
+
+@pytest.mark.asyncio
+async def test_blocking_pool_timeout_surfaces_redisvl_error(
+    redis_url: str, test_data: dict[str, Any]
+) -> None:
+    """A pool timeout preserves the underlying redis-py connection error."""
+    async with _blocking_pool_saver(redis_url, max_connections=1, timeout=0.1) as (
+        saver,
+        pool,
+    ):
+        connection = await pool.get_connection()
+
+        try:
+            with pytest.raises(RedisVLError) as exc_info:
+                await saver.aput(
+                    test_data["configs"][0],
+                    test_data["checkpoints"][0],
+                    test_data["metadata"][0],
+                    {},
+                )
+        finally:
+            await pool.release(connection)
+
+        assert isinstance(exc_info.value.__cause__, RedisConnectionError)
+
+        result = await saver.aput(
+            test_data["configs"][0],
+            test_data["checkpoints"][0],
+            test_data["metadata"][0],
+            {},
+        )
         assert result["configurable"]["thread_id"] == "thread-1"
 
 

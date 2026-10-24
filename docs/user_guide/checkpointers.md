@@ -184,7 +184,9 @@ finally:
 Choose `max_connections` based on the concurrency your Redis deployment can
 support. The `timeout` applies to each attempt to acquire a connection from the
 pool; if no connection becomes available within that interval, redis-py raises
-a connection error. It is not a timeout for the complete saver operation.
+a connection error internally. During `AsyncRedisSaver.aput()`, RedisVL wraps
+that error in `RedisVLError` and preserves the original connection error as its
+cause. It is not a timeout for the complete saver operation.
 
 This provides connection-level backpressure, but it does not limit how many
 asyncio tasks the application creates. Applications that can schedule an
