@@ -5,7 +5,8 @@ import base64
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, AsyncGenerator, Dict, List, Literal
+from contextlib import asynccontextmanager
+from typing import Any, AsyncGenerator, AsyncIterator, Dict, List, Literal
 from uuid import uuid4
 
 import pytest
@@ -19,8 +20,9 @@ from langgraph.checkpoint.base import (
     create_checkpoint,
     empty_checkpoint,
 )
-from redis.asyncio import Redis
+from redis.asyncio import BlockingConnectionPool, Redis
 from redis.exceptions import ConnectionError as RedisConnectionError
+from redisvl.exceptions import RedisVLError
 
 from langgraph.checkpoint.redis import BaseRedisSaver
 from langgraph.checkpoint.redis.aio import AsyncRedisSaver
@@ -581,10 +583,30 @@ async def test_large_batches(redis_url: str, test_data: dict[str, Any]) -> None:
             assert len(results) == M * N
 
 
+@asynccontextmanager
+async def _blocking_pool_saver(
+    redis_url: str, *, max_connections: int, timeout: float
+) -> AsyncIterator[tuple[AsyncRedisSaver, BlockingConnectionPool]]:
+    pool = BlockingConnectionPool.from_url(
+        redis_url, max_connections=max_connections, timeout=timeout
+    )
+    client = Redis(connection_pool=pool)
+
+    try:
+        async with AsyncRedisSaver.from_conn_string(redis_client=client) as saver:
+            yield saver, pool
+    finally:
+        await client.aclose()
+        await pool.disconnect()
+
+
 @pytest.mark.asyncio
 async def test_large_batches_async(redis_url: str, test_data: dict[str, Any]) -> None:
     """Test handling large numbers of async operations."""
-    async with AsyncRedisSaver.from_conn_string(redis_url) as saver:
+    async with _blocking_pool_saver(redis_url, max_connections=10, timeout=30) as (
+        saver,
+        _,
+    ):
         await saver.asetup()
 
         N = 1000
@@ -613,22 +635,94 @@ async def test_large_batches_async(redis_url: str, test_data: dict[str, Any]) ->
                     )
                 )
 
+        put_tasks = [asyncio.create_task(coro) for coro in coros]
         try:
-            put_results = await asyncio.gather(*coros)
-            assert len(put_results) == M * N
+            put_results = await asyncio.gather(*put_tasks)
+        finally:
+            for task in put_tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*put_tasks, return_exceptions=True)
 
-            # Verify we can retrieve using the configs returned from put
-            verify_coros = []
-            for result_config in put_results:
-                verify_coros.append(saver.aget_tuple(result_config))
+        assert len(put_results) == M * N
 
-            verify_results = await asyncio.gather(*verify_coros)
+        # Verify we can retrieve using the configs returned from put
+        verify_tasks = [
+            asyncio.create_task(saver.aget_tuple(result_config))
+            for result_config in put_results
+        ]
+        try:
+            verify_results = await asyncio.gather(*verify_tasks)
+        finally:
+            for task in verify_tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*verify_tasks, return_exceptions=True)
 
-            assert len(verify_results) == M * N
-            assert all(r is not None for r in verify_results)
+        assert len(verify_results) == M * N
+        assert all(r is not None for r in verify_results)
 
-        except Exception as e:
-            pytest.fail(f"Failed to process async batch: {str(e)}")
+
+@pytest.mark.asyncio
+async def test_blocking_pool_applies_backpressure(
+    redis_url: str, test_data: dict[str, Any]
+) -> None:
+    """An async checkpoint write waits until a pooled connection is available."""
+    async with _blocking_pool_saver(redis_url, max_connections=1, timeout=1) as (
+        saver,
+        pool,
+    ):
+        connection = await pool.get_connection()
+        put_task = asyncio.create_task(
+            saver.aput(
+                test_data["configs"][0],
+                test_data["checkpoints"][0],
+                test_data["metadata"][0],
+                {},
+            )
+        )
+
+        try:
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(asyncio.shield(put_task), timeout=0.1)
+        finally:
+            await pool.release(connection)
+
+        result = await asyncio.wait_for(put_task, timeout=2)
+        assert result["configurable"]["thread_id"] == "thread-1"
+
+
+@pytest.mark.asyncio
+async def test_blocking_pool_timeout_surfaces_redisvl_error(
+    redis_url: str, test_data: dict[str, Any]
+) -> None:
+    """A pool timeout preserves the underlying redis-py connection error."""
+    async with _blocking_pool_saver(redis_url, max_connections=1, timeout=0.1) as (
+        saver,
+        pool,
+    ):
+        connection = await pool.get_connection()
+
+        try:
+            with pytest.raises(RedisVLError) as exc_info:
+                await saver.aput(
+                    test_data["configs"][0],
+                    test_data["checkpoints"][0],
+                    test_data["metadata"][0],
+                    {},
+                )
+        finally:
+            await pool.release(connection)
+
+        assert isinstance(exc_info.value.__cause__, RedisConnectionError)
+
+        result = await saver.aput(
+            test_data["configs"][0],
+            test_data["checkpoints"][0],
+            test_data["metadata"][0],
+            {},
+        )
+        assert result["configurable"]["thread_id"] == "thread-1"
 
 
 @tool
