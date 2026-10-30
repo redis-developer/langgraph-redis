@@ -210,7 +210,9 @@ def test_batch_get_ops_ttl_refresh(store):
     mock_redis_doc = MagicMock()
     mock_redis_doc.json = json.dumps(mock_doc_data)
     mock_redis_doc.id = store_doc_id
-    store.store_index.search = MagicMock(return_value=MagicMock(docs=[mock_redis_doc]))
+    store.store_index.search = MagicMock(
+        return_value=MagicMock(docs=[mock_redis_doc], total=1)
+    )
 
     # Mock client.ttl to control TTL refresh logic
     client.ttl_calls.clear()
@@ -346,7 +348,9 @@ def test_batch_list_namespaces_ops_behavior(store):
     mock_doc3 = MagicMock(prefix="test.images.public")
     mock_doc4 = MagicMock(prefix="prod.documents.public")
 
-    mock_search_result = MagicMock(docs=[mock_doc1, mock_doc2, mock_doc3, mock_doc4])
+    mock_search_result = MagicMock(
+        docs=[mock_doc1, mock_doc2, mock_doc3, mock_doc4], total=4
+    )
     store.store_index.search = MagicMock(return_value=mock_search_result)
 
     list_ops = [

@@ -35,6 +35,7 @@ from langgraph.store.redis.aio import AsyncRedisStore
 from langgraph.store.redis.base import (
     REDIS_KEY_SEPARATOR,
     STORE_PREFIX,
+    STORE_SEARCH_PAGE_SIZE,
     STORE_VECTOR_PREFIX,
     BaseRedisStore,
     RedisDocument,
@@ -193,6 +194,20 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
             self.cluster_mode = False
             logger.info("Redis standalone client detected for RedisStore.")
 
+    def _search_all(self, query: Query) -> list[Any]:
+        """Return every document in the store index that matches ``query``.
+
+        Asks for STORE_SEARCH_PAGE_SIZE documents and, if more match, searches again
+        asking for all of them. The documents all come from one search, not offset
+        pages, which can repeat or skip documents when the index changes between them.
+        """
+        num = STORE_SEARCH_PAGE_SIZE
+        while True:
+            res = self.store_index.search(query.paging(0, num))
+            if len(res.docs) >= res.total or res.total <= num:
+                return res.docs
+            num = res.total
+
     def _batch_list_namespaces_ops(
         self,
         list_ops: Sequence[tuple[int, ListNamespacesOp]],
@@ -220,11 +235,10 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
 
             # Execute search with return_fields=["prefix"] to get just namespaces
             query = FilterQuery(filter_expression=base_query, return_fields=["prefix"])
-            res = self.store_index.search(query)
 
             # Extract unique namespaces
             namespaces = set()
-            for doc in res.docs:
+            for doc in self._search_all(query):
                 if hasattr(doc, "prefix"):
                     ns = tuple(_token_unescaper.unescape(doc.prefix).split("."))
                     # Apply max_depth if specified
@@ -252,11 +266,10 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
         )  # Track keys that need TTL refreshed by op index
 
         for query, _, namespace, items in self._get_batch_GET_ops_queries(get_ops):
-            res = self.store_index.search(Query(query))
             # Parse JSON from each document
             key_to_row = {
                 json.loads(doc.json)["key"]: (json.loads(doc.json), doc.id)
-                for doc in res.docs
+                for doc in self._search_all(Query(query))
             }
 
             for idx, key in items:
