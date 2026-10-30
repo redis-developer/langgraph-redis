@@ -1407,7 +1407,12 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
         registry_has_writes: bool,
     ) -> List[PendingWrite]:
         """Load pending writes with registry optimization and fallback."""
-        if not checkpoint_has_writes:
+        # The has_writes flag can be stale. LangGraph runs put() and put_writes()
+        # for the same checkpoint concurrently, and when the writes land first,
+        # put() stores the document again with has_writes=False. The registry
+        # records every write, so ask it whenever there is one, as
+        # _aload_pending_writes does; the flag only skips the search fallback.
+        if not checkpoint_has_writes and not self._key_registry:
             return []
 
         # FAST PATH: Try sorted set registry first
