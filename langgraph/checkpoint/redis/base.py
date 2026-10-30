@@ -14,6 +14,7 @@ from langgraph.checkpoint.base import (
     BaseCheckpointSaver,
     Checkpoint,
     CheckpointMetadata,
+    CheckpointTuple,
     PendingWrite,
 )
 from langgraph.checkpoint.serde.base import SerializerProtocol
@@ -22,6 +23,8 @@ from redisvl.query import FilterQuery
 from redisvl.query.filter import Tag
 
 from langgraph.checkpoint.redis.util import (
+    from_storage_safe_id,
+    from_storage_safe_str,
     safely_decode,
     to_storage_safe_id,
     to_storage_safe_str,
@@ -922,6 +925,91 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
             "task_id": task_id,
             "idx": idx,
         }
+
+    @staticmethod
+    def _partition_prune_candidates(
+        checkpoint_docs: Sequence[Any], keep_last: int
+    ) -> Tuple[List[Any], List[Any], set[str]]:
+        """Split checkpoint documents into retained and eviction candidates."""
+        by_ns: Dict[str, List[Any]] = {}
+        for doc in checkpoint_docs:
+            namespace = getattr(doc, "checkpoint_ns", "")
+            by_ns.setdefault(namespace, []).append(doc)
+
+        retained: List[Any] = []
+        eviction_candidates: List[Any] = []
+        fully_evicted_ns: set[str] = set()
+        for namespace, namespace_docs in by_ns.items():
+            sorted_docs = sorted(
+                namespace_docs,
+                key=lambda doc: getattr(doc, "checkpoint_id", ""),
+                reverse=True,
+            )
+            retained.extend(sorted_docs[:keep_last])
+            namespace_candidates = sorted_docs[keep_last:]
+            eviction_candidates.extend(namespace_candidates)
+            if len(namespace_candidates) == len(namespace_docs):
+                fully_evicted_ns.add(namespace)
+
+        return retained, eviction_candidates, fully_evicted_ns
+
+    @staticmethod
+    def _prune_config_for_doc(thread_id: str, doc: Any) -> RunnableConfig:
+        """Build a checkpoint lookup config from a search document."""
+        return {
+            "configurable": {
+                "thread_id": thread_id,
+                "checkpoint_ns": from_storage_safe_str(
+                    getattr(doc, "checkpoint_ns", "")
+                ),
+                "checkpoint_id": from_storage_safe_id(
+                    getattr(doc, "checkpoint_id", "")
+                ),
+            }
+        }
+
+    @staticmethod
+    def _advance_delta_prune_dependencies(
+        checkpoint_tuple: CheckpointTuple,
+        remaining: Optional[set[str]],
+        protected: set[Tuple[str, str]],
+    ) -> Tuple[set[str], Optional[RunnableConfig]]:
+        """Protect one checkpoint and advance DeltaChannel reconstruction state."""
+        if remaining is None:
+            counters = checkpoint_tuple.metadata.get("counters_since_delta_snapshot")
+            unresolved = set(counters) if isinstance(counters, dict) else set()
+        else:
+            unresolved = set(remaining)
+
+        configurable = checkpoint_tuple.config["configurable"]
+        protected.add(
+            (
+                to_storage_safe_str(configurable.get("checkpoint_ns", "")),
+                to_storage_safe_id(configurable["checkpoint_id"]),
+            )
+        )
+        unresolved.difference_update(checkpoint_tuple.checkpoint["channel_values"])
+        parent_config = checkpoint_tuple.parent_config if unresolved else None
+        return unresolved, parent_config
+
+    @staticmethod
+    def _finalize_prune_candidates(
+        eviction_candidates: Sequence[Any],
+        fully_evicted_ns: set[str],
+        protected: set[Tuple[str, str]],
+    ) -> Tuple[List[Any], set[str]]:
+        """Remove protected DeltaChannel history from the eviction plan."""
+        to_evict = [
+            doc
+            for doc in eviction_candidates
+            if (
+                getattr(doc, "checkpoint_ns", ""),
+                getattr(doc, "checkpoint_id", ""),
+            )
+            not in protected
+        ]
+        protected_namespaces = {namespace for namespace, _ in protected}
+        return to_evict, fully_evicted_ns - protected_namespaces
 
     def _make_redis_checkpoint_key(
         self, thread_id: str, checkpoint_ns: str, checkpoint_id: str
