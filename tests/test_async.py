@@ -672,7 +672,7 @@ async def test_blocking_pool_applies_backpressure(
         saver,
         pool,
     ):
-        connection = await pool.get_connection()
+        connection = await pool.get_connection(command_name="SET")
         put_task = asyncio.create_task(
             saver.aput(
                 test_data["configs"][0],
@@ -701,7 +701,7 @@ async def test_blocking_pool_timeout_surfaces_redisvl_error(
         saver,
         pool,
     ):
-        connection = await pool.get_connection()
+        connection = await pool.get_connection(command_name="SET")
 
         try:
             with pytest.raises(RedisVLError) as exc_info:
