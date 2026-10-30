@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-from collections import defaultdict
 from contextlib import contextmanager
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple, Union, cast
 
@@ -1667,7 +1666,8 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
 
         Retains the most-recent checkpoints **per checkpoint namespace** and
         removes the rest, along with their associated write keys and
-        key-registry sorted sets.
+        key-registry sorted sets.  Ancestors needed to reconstruct a retained
+        ``DeltaChannel`` are also retained through its nearest stored snapshot.
 
         Each namespace (root ``""`` and any subgraph namespaces) is treated as
         an independent checkpoint chain.  Channel values are stored inline
@@ -1682,6 +1682,7 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
             keep_last: Optional override — number of recent checkpoints to
                 retain per namespace.  When provided, takes precedence over
                 ``strategy``.  Use ``keep_last=0`` to remove all checkpoints.
+                Delta-channel dependencies may cause more checkpoints to remain.
             max_results: Maximum number of checkpoints fetched from the index
                 per thread in a single query.  Defaults to 10 000.
         """
@@ -1714,29 +1715,39 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
             if not checkpoint_results.docs:
                 continue
 
-            # Group by namespace — each namespace is an independent checkpoint chain
-            # (root graph vs. subgraph checkpoints must be evicted independently).
-            by_ns: Dict[str, list] = defaultdict(list)
-            for doc in checkpoint_results.docs:
-                ns = getattr(doc, "checkpoint_ns", "")
-                by_ns[ns].append(doc)
-
             # Within each namespace sort newest-first (ULIDs are lex time-ordered)
             # and collect checkpoints that fall outside the keep_last window.
-            to_evict = []
             # Track namespaces where every checkpoint is evicted so we can clean
             # up the checkpoint_latest:{thread}:{ns} pointer key too.
-            fully_evicted_ns: set = set()
-            for ns, ns_docs in by_ns.items():
-                ns_sorted = sorted(
-                    ns_docs,
-                    key=lambda d: getattr(d, "checkpoint_id", ""),
-                    reverse=True,
+            retained, eviction_candidates, fully_evicted_ns = (
+                self._partition_prune_candidates(checkpoint_results.docs, keep_last)
+            )
+
+            if not eviction_candidates:
+                continue
+
+            # DeltaChannel checkpoints normally omit their accumulated value. Their
+            # metadata names the channels that must be rebuilt by walking ancestors.
+            # Preserve that parent path through the nearest stored value for every
+            # such channel. A stored _DeltaSnapshot (or a pre-delta plain value) is a
+            # complete seed, so checkpoints older than it can still be pruned.
+            protected: set[tuple[str, str]] = set()
+            for doc in retained:
+                checkpoint_tuple = self.get_tuple(
+                    self._prune_config_for_doc(thread_id, doc)
                 )
-                ns_evicted = ns_sorted[keep_last:]
-                to_evict.extend(ns_evicted)
-                if len(ns_evicted) == len(ns_docs):  # nothing left in this namespace
-                    fully_evicted_ns.add(ns)
+                remaining: Optional[set[str]] = None
+                while checkpoint_tuple is not None:
+                    remaining, parent_config = self._advance_delta_prune_dependencies(
+                        checkpoint_tuple, remaining, protected
+                    )
+                    if parent_config is None:
+                        break
+                    checkpoint_tuple = self.get_tuple(parent_config)
+
+            to_evict, fully_evicted_ns = self._finalize_prune_candidates(
+                eviction_candidates, fully_evicted_ns, protected
+            )
 
             if not to_evict:
                 continue
