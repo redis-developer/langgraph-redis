@@ -177,3 +177,112 @@ async def test_sequential_aget_more_than_ten_keys(astore: AsyncRedisStore) -> No
     results = [await astore.aget(ns, f"k{i:02d}") for i in range(15)]
 
     assert [r.value["i"] for r in results] == list(range(15))
+
+
+# the index changing between reads
+
+
+def _delete_after_first_search(
+    monkeypatch: pytest.MonkeyPatch, store: RedisStore
+) -> list:
+    """After the store's first index search returns, delete the first document it returned.
+
+    This makes the index change between the reads of a single store call. The deleted
+    document is appended to the returned list.
+    """
+    deleted: list = []
+    search = store.store_index.search
+
+    def search_then_delete(*args, **kwargs):
+        res = search(*args, **kwargs)
+        if not deleted:
+            doc_id = res.docs[0].id
+            deleted.append(store._redis.json().get(doc_id))
+            store._redis.delete(doc_id)
+        return res
+
+    monkeypatch.setattr(store.store_index, "search", search_then_delete)
+    return deleted
+
+
+def _adelete_after_first_search(
+    monkeypatch: pytest.MonkeyPatch, astore: AsyncRedisStore
+) -> list:
+    """Async version of _delete_after_first_search."""
+    deleted: list = []
+    search = astore.store_index.search
+
+    async def search_then_delete(*args, **kwargs):
+        res = await search(*args, **kwargs)
+        if not deleted:
+            doc_id = res.docs[0].id
+            deleted.append(await astore._redis.json().get(doc_id))
+            await astore._redis.delete(doc_id)
+        return res
+
+    monkeypatch.setattr(astore.store_index, "search", search_then_delete)
+    return deleted
+
+
+def test_list_namespaces_with_a_delete_between_reads(
+    store: RedisStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    namespaces = _user_namespaces(1005)
+    store.batch([PutOp(ns, "profile", {"name": ns[-1]}) for ns in namespaces])
+    deleted = _delete_after_first_search(monkeypatch, store)
+
+    result = store.list_namespaces(limit=2000)
+
+    # Every namespace that existed for the whole call is listed.
+    gone = ("memories", deleted[0]["value"]["name"])
+    assert set(namespaces) - {gone} <= set(result)
+
+
+@pytest.mark.asyncio
+async def test_alist_namespaces_with_a_delete_between_reads(
+    astore: AsyncRedisStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    namespaces = _user_namespaces(1005)
+    await astore.abatch([PutOp(ns, "profile", {"name": ns[-1]}) for ns in namespaces])
+    deleted = _adelete_after_first_search(monkeypatch, astore)
+
+    result = await astore.alist_namespaces(limit=2000)
+
+    # Every namespace that existed for the whole call is listed.
+    gone = ("memories", deleted[0]["value"]["name"])
+    assert set(namespaces) - {gone} <= set(result)
+
+
+def test_batch_get_with_a_delete_between_reads(
+    store: RedisStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ns = ("docs",)
+    store.batch([PutOp(ns, f"k{i:04d}", {"i": i}) for i in range(1005)])
+    deleted = _delete_after_first_search(monkeypatch, store)
+
+    results = store.batch([GetOp(ns, f"k{i:04d}") for i in range(1005)])
+
+    # Every key that existed for the whole call is found.
+    gone = int(deleted[0]["key"][1:])
+    found = [r.value["i"] if r else None for r in results]
+    assert [v for i, v in enumerate(found) if i != gone] == [
+        i for i in range(1005) if i != gone
+    ]
+
+
+@pytest.mark.asyncio
+async def test_abatch_get_with_a_delete_between_reads(
+    astore: AsyncRedisStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ns = ("docs",)
+    await astore.abatch([PutOp(ns, f"k{i:04d}", {"i": i}) for i in range(1005)])
+    deleted = _adelete_after_first_search(monkeypatch, astore)
+
+    results = await astore.abatch([GetOp(ns, f"k{i:04d}") for i in range(1005)])
+
+    # Every key that existed for the whole call is found.
+    gone = int(deleted[0]["key"][1:])
+    found = [r.value["i"] if r else None for r in results]
+    assert [v for i, v in enumerate(found) if i != gone] == [
+        i for i in range(1005) if i != gone
+    ]

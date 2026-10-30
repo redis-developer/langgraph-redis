@@ -396,17 +396,18 @@ class AsyncRedisStore(
         ).result()
 
     async def _search_all(self, query: Query) -> list[Any]:
-        """Return every document in the store index that matches ``query``."""
-        docs: list[Any] = []
-        offset = 0
+        """Return every document in the store index that matches ``query``.
+
+        Asks for STORE_SEARCH_PAGE_SIZE documents and, if more match, searches again
+        asking for all of them. The documents all come from one search, not offset
+        pages, which can repeat or skip documents when the index changes between them.
+        """
+        num = STORE_SEARCH_PAGE_SIZE
         while True:
-            res = await self.store_index.search(
-                query.paging(offset, STORE_SEARCH_PAGE_SIZE)
-            )
-            docs.extend(res.docs)
-            if len(res.docs) < STORE_SEARCH_PAGE_SIZE:
-                return docs
-            offset += STORE_SEARCH_PAGE_SIZE
+            res = await self.store_index.search(query.paging(0, num))
+            if len(res.docs) >= res.total or res.total <= num:
+                return res.docs
+            num = res.total
 
     async def _batch_get_ops(
         self,
