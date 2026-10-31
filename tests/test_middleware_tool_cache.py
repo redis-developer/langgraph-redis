@@ -896,6 +896,50 @@ class TestToolMessageRoundTrip:
         assert restored.tool_call_id == "call_9"
 
     @pytest.mark.asyncio
+    async def test_error_tool_message_is_not_cached(self) -> None:
+        from langgraph.middleware.redis.tool_cache import ToolResultCacheMiddleware
+
+        client, store = _make_dict_backed_client()
+        middleware = ToolResultCacheMiddleware(ToolCacheConfig(redis_client=client))
+        await middleware._ensure_initialized_async()
+
+        error = LangChainToolMessage(
+            content="boom", name="calc", tool_call_id="call_1", status="error"
+        )
+
+        async def handler(request: ToolCallRequest) -> LangChainToolMessage:
+            return error
+
+        request = _make_tool_call_request("calc", args={"q": "1/0"})
+        result = await middleware.awrap_tool_call(request, handler)
+
+        assert result is error
+        assert store == {}
+        client.set.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_command_result_is_not_cached(self) -> None:
+        from langgraph.types import Command
+
+        from langgraph.middleware.redis.tool_cache import ToolResultCacheMiddleware
+
+        client, store = _make_dict_backed_client()
+        middleware = ToolResultCacheMiddleware(ToolCacheConfig(redis_client=client))
+        await middleware._ensure_initialized_async()
+
+        command = Command(update={"notes": ["a"]})
+
+        async def handler(request: ToolCallRequest) -> Command:
+            return command
+
+        request = _make_tool_call_request("note", args={"text": "a"})
+        result = await middleware.awrap_tool_call(request, handler)
+
+        assert result is command
+        assert store == {}
+        client.set.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_plain_json_results_still_round_trip(self) -> None:
         """Control: dict and str results behave as before."""
         from langgraph.middleware.redis.tool_cache import ToolResultCacheMiddleware

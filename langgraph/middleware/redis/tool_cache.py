@@ -292,6 +292,20 @@ class ToolResultCacheMiddleware(AsyncRedisMiddleware):
         args_str = json.dumps(effective_args, sort_keys=True)
         return f"{self._config.name}:{tool_name}:{args_str}"
 
+    @staticmethod
+    def _is_result_cacheable(result: Any) -> bool:
+        """Return False for results that must be passed through uncached.
+
+        A ``Command`` cannot be rebuilt from the cache (only a ToolMessage is
+        returned on a hit), and a ``ToolMessage`` with ``status="error"``
+        should not be replayed as if the call had succeeded.
+        """
+        if isinstance(result, Command):
+            return False
+        if isinstance(result, LangChainToolMessage) and result.status == "error":
+            return False
+        return True
+
     def _serialize_tool_result(self, value: Any) -> str:
         """Serialize a tool result to a JSON string for caching.
 
@@ -434,6 +448,11 @@ class ToolResultCacheMiddleware(AsyncRedisMiddleware):
 
         # Cache miss - call handler
         result = await handler(request)
+
+        # Do not cache results that cannot be replayed faithfully: a Command
+        # carries state updates / routing, and an error should be retried.
+        if not self._is_result_cacheable(result):
+            return result
 
         # Store in cache using Redis SET with optional TTL
         try:
