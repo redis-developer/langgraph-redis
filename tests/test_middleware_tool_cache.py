@@ -1,5 +1,6 @@
 """Unit tests for ToolResultCacheMiddleware."""
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -808,3 +809,134 @@ class TestBuildCacheKeyWithIgnoredArgs:
         req = _make_tool_call_request("search", args={"query": "x", "request_id": "r1"})
         key = mw._build_cache_key(req)
         assert "request_id" in key
+
+
+def _make_dict_backed_client() -> tuple[AsyncMock, dict]:
+    """An AsyncMock Redis client whose get/set use an in-memory dict."""
+    store: dict = {}
+
+    async def _get(key: str):
+        return store.get(key)
+
+    async def _set(key: str, value: str, ex: int | None = None):
+        store[key] = value.encode("utf-8")
+
+    client = AsyncMock()
+    client.get = AsyncMock(side_effect=_get)
+    client.set = AsyncMock(side_effect=_set)
+    return client, store
+
+
+class TestToolMessageRoundTrip:
+    """Cached tool results must come back as the original content."""
+
+    @pytest.mark.asyncio
+    async def test_serialize_deserialize_real_tool_message(self) -> None:
+        from langgraph.middleware.redis.tool_cache import ToolResultCacheMiddleware
+
+        middleware = ToolResultCacheMiddleware(
+            ToolCacheConfig(redis_client=AsyncMock())
+        )
+        original = LangChainToolMessage(
+            content="the answer is 42", name="calc", tool_call_id="call_1"
+        )
+
+        stored = middleware._serialize_tool_result(original)
+        restored = middleware._deserialize_tool_result(stored, "calc", "call_2")
+
+        assert isinstance(restored, LangChainToolMessage)
+        assert restored.content == "the answer is 42"
+        assert restored.tool_call_id == "call_2"
+
+    @pytest.mark.asyncio
+    async def test_awrap_tool_call_miss_then_hit_returns_original_content(
+        self,
+    ) -> None:
+        from langgraph.middleware.redis.tool_cache import ToolResultCacheMiddleware
+
+        client, store = _make_dict_backed_client()
+        middleware = ToolResultCacheMiddleware(ToolCacheConfig(redis_client=client))
+        await middleware._ensure_initialized_async()
+
+        calls = []
+
+        async def handler(request: ToolCallRequest) -> LangChainToolMessage:
+            calls.append(request)
+            return LangChainToolMessage(
+                content="the answer is 42", name="calc", tool_call_id="call_1"
+            )
+
+        request = _make_tool_call_request("calc", args={"q": "6*7"})
+        miss = await middleware.awrap_tool_call(request, handler)
+        hit = await middleware.awrap_tool_call(request, handler)
+
+        assert len(calls) == 1
+        assert len(store) == 1
+        assert miss.content == "the answer is 42"
+        assert isinstance(hit, LangChainToolMessage)
+        assert hit.content == miss.content
+
+    @pytest.mark.asyncio
+    async def test_old_envelope_entry_deserializes_to_real_content(self) -> None:
+        """Entries written before the fix hold the LangChain envelope."""
+        from langgraph.middleware.redis.tool_cache import ToolResultCacheMiddleware
+
+        middleware = ToolResultCacheMiddleware(
+            ToolCacheConfig(redis_client=AsyncMock())
+        )
+        old_entry = json.dumps(
+            LangChainToolMessage(
+                content="the answer is 42", name="calc", tool_call_id="call_1"
+            ).to_json()
+        )
+
+        restored = middleware._deserialize_tool_result(old_entry, "calc", "call_9")
+
+        assert restored.content == "the answer is 42"
+        assert restored.tool_call_id == "call_9"
+
+    @pytest.mark.asyncio
+    async def test_plain_json_results_still_round_trip(self) -> None:
+        """Control: dict and str results behave as before."""
+        from langgraph.middleware.redis.tool_cache import ToolResultCacheMiddleware
+
+        middleware = ToolResultCacheMiddleware(
+            ToolCacheConfig(redis_client=AsyncMock())
+        )
+
+        as_dict = middleware._deserialize_tool_result(
+            middleware._serialize_tool_result({"content": "hello"}), "t", "c1"
+        )
+        as_str = middleware._deserialize_tool_result(
+            middleware._serialize_tool_result("plain text"), "t", "c2"
+        )
+        other_dict = middleware._deserialize_tool_result(
+            middleware._serialize_tool_result({"result": "cached"}), "t", "c3"
+        )
+
+        assert as_dict.content == "hello"
+        assert as_str.content == "plain text"
+        assert json.loads(other_dict.content) == {"result": "cached"}
+
+    @pytest.mark.asyncio
+    async def test_envelope_shaped_dict_from_another_class_is_unchanged(
+        self,
+    ) -> None:
+        """Only a serialized ToolMessage is unwrapped, not any lc-shaped dict."""
+        from langgraph.middleware.redis.tool_cache import ToolResultCacheMiddleware
+
+        middleware = ToolResultCacheMiddleware(
+            ToolCacheConfig(redis_client=AsyncMock())
+        )
+        value = {
+            "lc": 1,
+            "type": "constructor",
+            "id": ["my_pkg", "Report"],
+            "kwargs": {"content": "inner"},
+        }
+
+        restored = middleware._deserialize_tool_result(
+            middleware._serialize_tool_result(value), "t", "c1"
+        )
+
+        assert json.loads(restored.content) == value

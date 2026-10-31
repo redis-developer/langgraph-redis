@@ -345,7 +345,21 @@ class ToolResultCacheMiddleware(AsyncRedisMiddleware):
 
         # Extract content from the parsed result
         if isinstance(parsed, dict):
-            content = parsed.get("content", json.dumps(parsed))
+            kwargs = parsed.get("kwargs")
+            lc_id = parsed.get("id")
+            if (
+                parsed.get("lc") == 1
+                and parsed.get("type") == "constructor"
+                and isinstance(lc_id, list)
+                and lc_id[-1:] == ["ToolMessage"]
+                and isinstance(kwargs, dict)
+                and "content" in kwargs
+            ):
+                # LangChain serialization envelope (ToolMessage.to_json()):
+                # the content lives under "kwargs".
+                content = kwargs["content"]
+            else:
+                content = parsed.get("content", json.dumps(parsed))
         elif isinstance(parsed, str):
             content = parsed
         else:
