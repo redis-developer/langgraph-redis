@@ -473,6 +473,36 @@ class TestToolCachePositiveHits:
             assert call_count[0] == 1, "Identical args should hit cache"
 
     @pytest.mark.asyncio
+    async def test_cache_hit_returns_the_original_content(self, redis_url: str) -> None:
+        """A hit must return the tool's content, not the stored JSON."""
+        config = ToolCacheConfig(
+            redis_url=redis_url,
+            name="test_tool_hit_content",
+            ttl_seconds=60,
+        )
+
+        async with ToolResultCacheMiddleware(config) as middleware:
+
+            async def handler(request):
+                return LangChainToolMessage(
+                    content="App details result",
+                    name="get_app_details",
+                    tool_call_id=_extract_tool_call_id(request),
+                )
+
+            req = {
+                "tool_name": "get_app_details",
+                "args": {"app_name": "SOMEAPP"},
+                "id": "c1",
+            }
+            miss = await middleware.awrap_tool_call(req, handler)
+            hit = await middleware.awrap_tool_call({**req, "id": "c2"}, handler)
+
+            assert miss.content == "App details result"
+            assert hit.content == "App details result"
+            assert hit.tool_call_id == "c2"
+
+    @pytest.mark.asyncio
     async def test_different_key_order_same_values_cached(self, redis_url: str) -> None:
         """Args with different key insertion order but same values should cache hit.
 
