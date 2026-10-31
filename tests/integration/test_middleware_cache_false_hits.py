@@ -503,6 +503,46 @@ class TestToolCachePositiveHits:
             assert hit.tool_call_id == "c2"
 
     @pytest.mark.asyncio
+    async def test_error_result_is_not_cached(self, redis_url: str) -> None:
+        """A failed call must run again, not be replayed from the cache."""
+        config = ToolCacheConfig(
+            redis_url=redis_url,
+            name="test_tool_error_not_cached",
+            ttl_seconds=60,
+        )
+
+        async with ToolResultCacheMiddleware(config) as middleware:
+            call_count = [0]
+
+            async def handler(request):
+                call_count[0] += 1
+                if call_count[0] == 1:
+                    return LangChainToolMessage(
+                        content="upstream timeout",
+                        name="get_app_details",
+                        tool_call_id=_extract_tool_call_id(request),
+                        status="error",
+                    )
+                return LangChainToolMessage(
+                    content="App details result",
+                    name="get_app_details",
+                    tool_call_id=_extract_tool_call_id(request),
+                )
+
+            req = {
+                "tool_name": "get_app_details",
+                "args": {"app_name": "SOMEAPP"},
+                "id": "c1",
+            }
+            first = await middleware.awrap_tool_call(req, handler)
+            second = await middleware.awrap_tool_call({**req, "id": "c2"}, handler)
+
+            assert first.status == "error"
+            assert call_count[0] == 2, "An error result should not be cached"
+            assert second.status == "success"
+            assert second.content == "App details result"
+
+    @pytest.mark.asyncio
     async def test_different_key_order_same_values_cached(self, redis_url: str) -> None:
         """Args with different key insertion order but same values should cache hit.
 
