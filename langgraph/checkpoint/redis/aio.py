@@ -2058,6 +2058,8 @@ class AsyncRedisSaver(
         key-registry sorted sets.  Ancestors needed to reconstruct a retained
         ``DeltaChannel`` are also retained through its nearest stored snapshot.
         Pruning does not refresh TTLs, even when ``refresh_on_read`` is enabled.
+        A cycle in required ancestry raises ``ValueError`` before any keys for
+        that thread are deleted.
 
         Each namespace (root ``""`` and any subgraph namespaces) is treated as
         an independent checkpoint chain.  Channel values are stored inline
@@ -2119,20 +2121,37 @@ class AsyncRedisSaver(
             # Preserve the ancestor path required to reconstruct retained
             # DeltaChannels, stopping independently for each channel at its nearest
             # stored snapshot (or pre-delta plain value).
-            protected: set[tuple[str, str]] = set()
-            for doc in retained:
-                config = self._prune_config_for_doc(thread_id, doc)
+            retained_configs = [
+                self._prune_config_for_doc(thread_id, doc) for doc in retained
+            ]
+            starting_checkpoints = {
+                self._prune_checkpoint_identity(config) for config in retained_configs
+            }
+            # Fetch each summary once per thread in this call. Starting checkpoints
+            # need metadata on their first visit, even when reached as ancestors.
+            checkpoint_cache: Dict[Tuple[str, str], Optional[_PruneCheckpoint]] = {}
+            protected: set[Tuple[str, str]] = set()
+            for config in retained_configs:
                 remaining: Optional[set[str]] = None
+                visited: set[Tuple[str, str]] = set()
                 while config is not None:
-                    checkpoint = await self._aread_prune_checkpoint(
-                        config, include_metadata=remaining is None
-                    )
+                    identity = self._prune_checkpoint_identity(config)
+                    if identity in visited:
+                        raise ValueError(
+                            f"Cyclic checkpoint ancestry for thread {thread_id!r} at {identity!r}"
+                        )
+                    visited.add(identity)
+                    if identity not in checkpoint_cache:
+                        checkpoint_cache[identity] = await self._aread_prune_checkpoint(
+                            config, include_metadata=identity in starting_checkpoints
+                        )
+                    checkpoint = checkpoint_cache[identity]
                     if checkpoint is None:
                         break
-                    remaining, parent_config = self._advance_delta_prune_dependencies(
-                        config, checkpoint, remaining, protected
+                    protected.add(identity)
+                    remaining, config = self._advance_delta_prune_dependencies(
+                        config, checkpoint, remaining
                     )
-                    config = parent_config
 
             to_evict, fully_evicted_ns = self._finalize_prune_candidates(
                 eviction_candidates, fully_evicted_ns, protected

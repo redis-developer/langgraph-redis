@@ -992,6 +992,15 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         }
 
     @staticmethod
+    def _prune_checkpoint_identity(config: RunnableConfig) -> Tuple[str, str]:
+        """Identify a checkpoint within the current thread's pruning operation."""
+        configurable = config["configurable"]
+        return (
+            to_storage_safe_str(configurable.get("checkpoint_ns", "")),
+            to_storage_safe_id(configurable["checkpoint_id"]),
+        )
+
+    @staticmethod
     def _parse_prune_checkpoint(results: Sequence[Any]) -> Optional[_PruneCheckpoint]:
         """Parse field-only JSONPath replies without reviving any channel values."""
         channel_names_reply, parent_id_reply, *metadata_replies = results
@@ -1003,7 +1012,7 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
                     continue
                 raise reply
         # A None command reply means the key expired, possibly between commands.
-        # Metadata is only requested at the start of each retained checkpoint's walk.
+        # Metadata is only requested for retained starting checkpoints.
         if parent_id_reply is None or any(reply is None for reply in metadata_replies):
             return None
 
@@ -1046,27 +1055,15 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         config: RunnableConfig,
         checkpoint: _PruneCheckpoint,
         remaining: Optional[set[str]],
-        protected: set[Tuple[str, str]],
     ) -> Tuple[set[str], Optional[RunnableConfig]]:
-        """Protect one checkpoint and advance DeltaChannel reconstruction state."""
-        if remaining is None:
-            unresolved = set(checkpoint.delta_channels)
-        else:
-            unresolved = set(remaining)
-
-        configurable = config["configurable"]
-        protected.add(
-            (
-                to_storage_safe_str(configurable.get("checkpoint_ns", "")),
-                to_storage_safe_id(configurable["checkpoint_id"]),
-            )
-        )
+        """Resolve stored channels and find the next ancestor needed by this walk."""
+        unresolved = set(checkpoint.delta_channels if remaining is None else remaining)
         unresolved.difference_update(checkpoint.channel_names)
         parent_config: Optional[RunnableConfig] = None
         if unresolved and checkpoint.parent_checkpoint_id:
             parent_config = {
                 "configurable": {
-                    **configurable,
+                    **config["configurable"],
                     "checkpoint_id": checkpoint.parent_checkpoint_id,
                 }
             }
