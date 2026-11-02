@@ -20,6 +20,8 @@ jobs:
   test:
     name: Python ${{ matrix.python-version }} - [redis ${{ matrix.redis-version }}]${{ matrix.deps == 'latest' && ' - [latest deps]' || '' }}
     runs-on: ubuntu-latest
+    # Upstream dependency changes are advisory on PRs; nightly runs still fail.
+    continue-on-error: ${{ matrix.deps == 'latest' && github.event_name == 'pull_request' }}
 
     strategy:
       fail-fast: false
