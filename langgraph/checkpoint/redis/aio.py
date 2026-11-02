@@ -44,6 +44,7 @@ from langgraph.checkpoint.redis.base import (
     CHECKPOINT_WRITE_PREFIX,
     REDIS_KEY_SEPARATOR,
     BaseRedisSaver,
+    _PruneCheckpoint,
     aexpire_with_retry,
     apersist_with_retry,
 )
@@ -2030,6 +2031,18 @@ class AsyncRedisSaver(
                 pipeline.delete(key)
             await pipeline.execute()
 
+    async def _aread_prune_checkpoint(
+        self, config: RunnableConfig, *, include_metadata: bool
+    ) -> Optional[_PruneCheckpoint]:
+        """Read pruning dependencies without loading values or refreshing TTLs."""
+        async with self._redis.pipeline(transaction=False) as pipeline:
+            self._queue_prune_checkpoint_read(
+                pipeline, config, include_metadata=include_metadata
+            )
+            return self._parse_prune_checkpoint(
+                await pipeline.execute(raise_on_error=False)
+            )
+
     async def aprune(
         self,
         thread_ids: Sequence[str],
@@ -2044,6 +2057,7 @@ class AsyncRedisSaver(
         removes the rest, along with their associated write keys and
         key-registry sorted sets.  Ancestors needed to reconstruct a retained
         ``DeltaChannel`` are also retained through its nearest stored snapshot.
+        Pruning does not refresh TTLs, even when ``refresh_on_read`` is enabled.
 
         Each namespace (root ``""`` and any subgraph namespaces) is treated as
         an independent checkpoint chain.  Channel values are stored inline
@@ -2107,17 +2121,18 @@ class AsyncRedisSaver(
             # stored snapshot (or pre-delta plain value).
             protected: set[tuple[str, str]] = set()
             for doc in retained:
-                checkpoint_tuple = await self.aget_tuple(
-                    self._prune_config_for_doc(thread_id, doc)
-                )
+                config = self._prune_config_for_doc(thread_id, doc)
                 remaining: Optional[set[str]] = None
-                while checkpoint_tuple is not None:
-                    remaining, parent_config = self._advance_delta_prune_dependencies(
-                        checkpoint_tuple, remaining, protected
+                while config is not None:
+                    checkpoint = await self._aread_prune_checkpoint(
+                        config, include_metadata=remaining is None
                     )
-                    if parent_config is None:
+                    if checkpoint is None:
                         break
-                    checkpoint_tuple = await self.aget_tuple(parent_config)
+                    remaining, parent_config = self._advance_delta_prune_dependencies(
+                        config, checkpoint, remaining, protected
+                    )
+                    config = parent_config
 
             to_evict, fully_evicted_ns = self._finalize_prune_candidates(
                 eviction_candidates, fully_evicted_ns, protected
