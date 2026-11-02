@@ -26,14 +26,16 @@ jobs:
       matrix:
         python-version: [ '3.10', 3.11, 3.12, 3.13 ]
         # 'latest' is the final Redis Stack line (7.4.x), for users not yet on
-        # Redis 8; '8.0.2' is the oldest Redis 8 we test and '8' the newest.
-        redis-version: [ 'latest', '8.0.2', '8' ]
+        # Redis 8; '8.2' is the oldest Redis 8 we test and '8' the newest.
+        redis-version: [ 'latest', '8.2', '8' ]
         deps: [ 'locked' ]
         include:
           # One extra job on the newest redisvl, redis and langgraph-checkpoint
           # that pyproject.toml allows; every other package stays locked.
+          # Match the locked Python 3.13 / Redis 8 job to isolate dependency
+          # changes while testing against the newest Redis 8.
           - python-version: 3.13
-            redis-version: '8.0.2'
+            redis-version: '8'
             deps: 'latest'
 
     steps:
