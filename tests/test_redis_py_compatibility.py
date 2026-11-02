@@ -1,7 +1,10 @@
-"""Tests for redis-py compatibility on Python 3.13 and later.
+"""Tests for redis-py compatibility across supported Python versions.
 
-This test verifies that the library works correctly with redis-py 7.x,
-which includes fixes for Python 3.13's stricter isinstance() behavior.
+Tests cover protocol configuration and basic synchronous and asynchronous
+checkpointer and store operations.
+
+Originally added to verify redis-py 7.x support after a get_protocol_version()
+TypeError was reported on Python 3.13.
 
 See: https://github.com/redis/redis-py/issues/3501
 See: https://github.com/redis/redis-py/pull/3510
@@ -23,8 +26,17 @@ from langgraph.store.redis import RedisStore
 from langgraph.store.redis.aio import AsyncRedisStore
 
 
-class TestRedis7Compatibility:
-    """Test suite for redis-py 7.x compatibility with Python 3.13+."""
+# redis-py 8 leaves the protocol configuration unset by default; earlier
+# supported releases configure RESP2. These tests inspect configuration only.
+_PROTOCOL_CASES = [
+    pytest.param(None, None if redis.VERSION >= (8, 0, 0) else 2, id="default"),
+    pytest.param(2, 2, id="resp2"),
+    pytest.param(3, 3, id="resp3"),
+]
+
+
+class TestRedisPyCompatibility:
+    """Test redis-py version information and protocol configuration."""
 
     def test_redis_version_info(self) -> None:
         """Log redis-py version for debugging."""
@@ -37,38 +49,42 @@ class TestRedis7Compatibility:
         major, minor, patch = map(int, redis_version.split(".")[:3])
         assert major >= 5, f"redis-py {redis_version} is too old, need >= 5.2.1"
 
-    @pytest.mark.parametrize("protocol", [2, 3])
-    def test_get_protocol_version_sync_client(self, protocol: int) -> None:
-        """Test that get_protocol_version works with sync Redis client.
+    @pytest.mark.parametrize("protocol,expected_protocol", _PROTOCOL_CASES)
+    def test_get_protocol_version_sync_client(
+        self, protocol: int | None, expected_protocol: int | None
+    ) -> None:
+        """Read the exact sync protocol configuration without connecting.
 
         This was the function causing TypeError on Python 3.13 before the fix.
         """
-        client = redis.Redis(protocol=protocol)
+        client = redis.Redis() if protocol is None else redis.Redis(protocol=protocol)
         try:
             # This should not raise TypeError on Python 3.13
             version = get_protocol_version(client)
-            assert version == protocol
+            assert version == expected_protocol
         finally:
             client.close()
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("protocol", [2, 3])
-    async def test_get_protocol_version_async_client(self, protocol: int) -> None:
-        """Test that get_protocol_version works with async Redis client.
+    @pytest.mark.parametrize("protocol,expected_protocol", _PROTOCOL_CASES)
+    async def test_get_protocol_version_async_client(
+        self, protocol: int | None, expected_protocol: int | None
+    ) -> None:
+        """Read the exact async protocol configuration without connecting.
 
         This was the function causing TypeError on Python 3.13 before the fix.
         """
-        client = aredis.Redis(protocol=protocol)
+        client = aredis.Redis() if protocol is None else aredis.Redis(protocol=protocol)
         try:
             # This should not raise TypeError on Python 3.13
             version = get_protocol_version(client)
-            assert version == protocol
+            assert version == expected_protocol
         finally:
             await client.aclose()
 
 
-class TestRedis7WithCheckpointer:
-    """Test checkpointer functionality with redis-py 7.x compatibility."""
+class TestRedisPyWithCheckpointer:
+    """Test checkpointer functionality with the installed redis-py version."""
 
     @pytest.fixture
     def saver(self, redis_url: str) -> Iterator[RedisSaver]:
@@ -149,8 +165,8 @@ class TestRedis7WithCheckpointer:
         assert retrieved.checkpoint["id"] == checkpoint["id"]
 
 
-class TestRedis7WithStore:
-    """Test store functionality with redis-py 7.x compatibility."""
+class TestRedisPyWithStore:
+    """Test store functionality with the installed redis-py version."""
 
     @pytest.fixture
     def store(self, redis_url: str) -> Iterator[RedisStore]:
