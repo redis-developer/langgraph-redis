@@ -30,8 +30,8 @@ jobs:
         redis-version: [ 'latest', '8.0.2', '8' ]
         deps: [ 'locked' ]
         include:
-          # One extra job on the newest runtime dependencies pyproject.toml
-          # allows, i.e. what a fresh install of this package resolves to.
+          # One extra job on the newest redisvl, redis and langgraph-checkpoint
+          # that pyproject.toml allows; every other package stays locked.
           - python-version: 3.13
             redis-version: '8.0.2'
             deps: 'latest'
