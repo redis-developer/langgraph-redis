@@ -294,17 +294,16 @@ class ToolResultCacheMiddleware(AsyncRedisMiddleware):
 
     @staticmethod
     def _is_result_cacheable(result: Any) -> bool:
-        """Return False for results that must be passed through uncached.
+        """Return True only for results a cache hit can replay faithfully.
 
-        A ``Command`` cannot be rebuilt from the cache (only a ToolMessage is
-        returned on a hit), and a ``ToolMessage`` with ``status="error"``
-        should not be replayed as if the call had succeeded.
+        A hit always returns a single ToolMessage, so only a successful
+        ``ToolMessage`` or a ``str``/``dict`` result is cached. A ``Command``,
+        a ``list[Command | ToolMessage]``, a ``ToolMessage`` with
+        ``status="error"`` and anything else pass through uncached.
         """
-        if isinstance(result, Command):
-            return False
-        if isinstance(result, LangChainToolMessage) and result.status == "error":
-            return False
-        return True
+        if isinstance(result, LangChainToolMessage):
+            return result.status != "error"
+        return isinstance(result, (str, dict))
 
     def _serialize_tool_result(self, value: Any) -> str:
         """Serialize a tool result to a JSON string for caching.
@@ -450,7 +449,8 @@ class ToolResultCacheMiddleware(AsyncRedisMiddleware):
         result = await handler(request)
 
         # Do not cache results that cannot be replayed faithfully: a Command
-        # carries state updates / routing, and an error should be retried.
+        # or a list carries state updates / routing, and an error should be
+        # retried.
         if not self._is_result_cacheable(result):
             return result
 

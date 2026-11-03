@@ -12,6 +12,7 @@ These tests use TestContainers to spin up a real Redis instance.
 import pytest
 from langchain_core.messages import ToolMessage as LangChainToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
+from langgraph.types import Command
 from testcontainers.redis import RedisContainer
 
 from langgraph.middleware.redis import (
@@ -435,9 +436,9 @@ class TestToolCacheFalseHitPrevention:
 class TestToolCachePositiveHits:
     """Tests that identical tool calls DO return cached results."""
 
-    @pytest.mark.asyncio
-    async def test_same_args_same_tool_is_cached(self, redis_url: str) -> None:
-        """Two calls with identical args should use cache."""
+    @pytest.fixture
+    async def tool_cache(self, redis_url: str):
+        """A tool cache middleware on real Redis, closed after each test."""
         config = ToolCacheConfig(
             redis_url=redis_url,
             name="test_tool_exact_hit",
@@ -446,101 +447,120 @@ class TestToolCachePositiveHits:
         )
 
         async with ToolResultCacheMiddleware(config) as middleware:
-            call_count = [0]
-
-            async def handler(request):
-                call_count[0] += 1
-                return LangChainToolMessage(
-                    content="App details result",
-                    name="get_app_details",
-                    tool_call_id=_extract_tool_call_id(request),
-                )
-
-            req = {
-                "tool_name": "get_app_details",
-                "args": {"app_name": "SOMEAPP"},
-                "id": "c1",
-            }
-            await middleware.awrap_tool_call(req, handler)
-
-            req2 = {
-                "tool_name": "get_app_details",
-                "args": {"app_name": "SOMEAPP"},
-                "id": "c2",
-            }
-            await middleware.awrap_tool_call(req2, handler)
-
-            assert call_count[0] == 1, "Identical args should hit cache"
+            yield middleware
 
     @pytest.mark.asyncio
-    async def test_cache_hit_returns_the_original_content(self, redis_url: str) -> None:
-        """A hit must return the tool's content, not the stored JSON."""
-        config = ToolCacheConfig(
-            redis_url=redis_url,
-            name="test_tool_hit_content",
-            ttl_seconds=60,
-        )
+    async def test_same_args_same_tool_is_cached(self, tool_cache) -> None:
+        """Two calls with identical args should use cache."""
+        call_count = [0]
 
-        async with ToolResultCacheMiddleware(config) as middleware:
+        async def handler(request):
+            call_count[0] += 1
+            return LangChainToolMessage(
+                content="App details result",
+                name="get_app_details",
+                tool_call_id=_extract_tool_call_id(request),
+            )
 
-            async def handler(request):
-                return LangChainToolMessage(
-                    content="App details result",
-                    name="get_app_details",
-                    tool_call_id=_extract_tool_call_id(request),
-                )
+        req = {
+            "tool_name": "get_app_details",
+            "args": {"app_name": "SOMEAPP"},
+            "id": "c1",
+        }
+        miss = await tool_cache.awrap_tool_call(req, handler)
 
-            req = {
-                "tool_name": "get_app_details",
-                "args": {"app_name": "SOMEAPP"},
-                "id": "c1",
-            }
-            miss = await middleware.awrap_tool_call(req, handler)
-            hit = await middleware.awrap_tool_call({**req, "id": "c2"}, handler)
+        req2 = {
+            "tool_name": "get_app_details",
+            "args": {"app_name": "SOMEAPP"},
+            "id": "c2",
+        }
+        hit = await tool_cache.awrap_tool_call(req2, handler)
 
-            assert miss.content == "App details result"
-            assert hit.content == "App details result"
-            assert hit.tool_call_id == "c2"
+        assert call_count[0] == 1, "Identical args should hit cache"
+        assert miss.content == "App details result"
+        assert hit.content == "App details result"
+        assert hit.tool_call_id == "c2"
 
     @pytest.mark.asyncio
-    async def test_error_result_is_not_cached(self, redis_url: str) -> None:
+    async def test_error_result_is_not_cached(self, tool_cache) -> None:
         """A failed call must run again, not be replayed from the cache."""
-        config = ToolCacheConfig(
-            redis_url=redis_url,
-            name="test_tool_error_not_cached",
-            ttl_seconds=60,
-        )
+        call_count = [0]
 
-        async with ToolResultCacheMiddleware(config) as middleware:
-            call_count = [0]
-
-            async def handler(request):
-                call_count[0] += 1
-                if call_count[0] == 1:
-                    return LangChainToolMessage(
-                        content="upstream timeout",
-                        name="get_app_details",
-                        tool_call_id=_extract_tool_call_id(request),
-                        status="error",
-                    )
+        async def handler(request):
+            call_count[0] += 1
+            if call_count[0] == 1:
                 return LangChainToolMessage(
-                    content="App details result",
+                    content="upstream timeout",
                     name="get_app_details",
                     tool_call_id=_extract_tool_call_id(request),
+                    status="error",
                 )
+            return LangChainToolMessage(
+                content="App details result",
+                name="get_app_details",
+                tool_call_id=_extract_tool_call_id(request),
+            )
 
-            req = {
-                "tool_name": "get_app_details",
-                "args": {"app_name": "SOMEAPP"},
-                "id": "c1",
-            }
-            first = await middleware.awrap_tool_call(req, handler)
-            second = await middleware.awrap_tool_call({**req, "id": "c2"}, handler)
+        req = {
+            "tool_name": "get_app_details",
+            "args": {"app_name": "SOMEAPP"},
+            "id": "c1",
+        }
+        first = await tool_cache.awrap_tool_call(req, handler)
+        second = await tool_cache.awrap_tool_call({**req, "id": "c2"}, handler)
 
-            assert first.status == "error"
-            assert call_count[0] == 2, "An error result should not be cached"
-            assert second.status == "success"
-            assert second.content == "App details result"
+        assert first.status == "error"
+        assert call_count[0] == 2, "An error result should not be cached"
+        assert second.status == "success"
+        assert second.content == "App details result"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "make_result",
+        [
+            lambda tool_call_id: Command(
+                update={
+                    "messages": [
+                        LangChainToolMessage(content="noted", tool_call_id=tool_call_id)
+                    ]
+                }
+            ),
+            lambda tool_call_id: [
+                Command(update={"notes": ["a"]}),
+                LangChainToolMessage(content="noted", tool_call_id=tool_call_id),
+            ],
+            lambda tool_call_id: [
+                LangChainToolMessage(
+                    content="upstream timeout",
+                    tool_call_id=tool_call_id,
+                    status="error",
+                )
+            ],
+        ],
+        ids=["command", "list_with_command", "list_with_error_tool_message"],
+    )
+    async def test_uncacheable_result_is_passed_through_uncached(
+        self, tool_cache, async_client, make_result
+    ) -> None:
+        """A result a cache hit cannot replay must run every time and not be stored."""
+        results = []
+
+        async def handler(request):
+            results.append(make_result(_extract_tool_call_id(request)))
+            return results[-1]
+
+        req = {
+            "tool_name": "get_app_details",
+            "args": {"app_name": "SOMEAPP"},
+            "id": "c1",
+        }
+        first = await tool_cache.awrap_tool_call(req, handler)
+        second = await tool_cache.awrap_tool_call({**req, "id": "c2"}, handler)
+
+        assert len(results) == 2, "An uncacheable result should not be cached"
+        assert first is results[0]
+        assert second is results[1]
+        assert await async_client.keys("test_tool_exact_hit:*") == []
 
     @pytest.mark.asyncio
     async def test_different_key_order_same_values_cached(self, redis_url: str) -> None:
