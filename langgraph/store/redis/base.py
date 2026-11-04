@@ -63,6 +63,7 @@ SCHEMAS = [
             "name": "store",
             "prefix": STORE_PREFIX + REDIS_KEY_SEPARATOR,
             "storage_type": "json",
+            "stopwords": [],
         },
         "fields": [
             {"name": "prefix", "type": "text"},
@@ -78,6 +79,7 @@ SCHEMAS = [
             "name": "store_vectors",
             "prefix": STORE_VECTOR_PREFIX + REDIS_KEY_SEPARATOR,
             "storage_type": "json",
+            "stopwords": [],
         },
         "fields": [
             {"name": "prefix", "type": "text"},
@@ -270,6 +272,7 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
                 "name": self.store_prefix,
                 "prefix": self.store_prefix + REDIS_KEY_SEPARATOR,
                 "storage_type": "json",
+                "stopwords": [],
             },
             "fields": [
                 {"name": "prefix", "type": "text"},
@@ -297,6 +300,7 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
                 "name": self.vector_prefix,
                 "prefix": self.vector_prefix + REDIS_KEY_SEPARATOR,
                 "storage_type": vector_storage_type,
+                "stopwords": [],
             },
             "fields": [
                 {"name": "prefix", "type": "text"},
