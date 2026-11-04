@@ -492,6 +492,14 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
                 # Decode base64-encoded bytes
                 return self._decode_blob(obj["__bytes__"])
 
+            # Delegate lossless typed-value envelopes to the serializer.
+            if obj.get("__redis_jsonplus_typed__") is True:
+                if hasattr(self.serde, "_revive_if_needed"):
+                    revived = {
+                        k: self._recursive_deserialize(v) for k, v in obj.items()
+                    }
+                    return self.serde._revive_if_needed(revived)
+
             # Delegate _DeltaSnapshot markers to the serializer (issue #201).
             if obj.get("__delta_snapshot__") is True:
                 if hasattr(self.serde, "_revive_if_needed"):

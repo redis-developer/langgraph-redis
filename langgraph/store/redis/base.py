@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import copy
-import json
 import logging
 import threading
 from collections import defaultdict
@@ -402,15 +401,10 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
         if value is None:
             return None
 
-        # First, try standard JSON serialization to check if it's needed
-        try:
-            json.dumps(value)
-            # Value is already JSON-serializable, return as-is for backward
-            # compatibility and to preserve filter functionality
+        # Store only values that JSON can round-trip without changing their type,
+        # keys, or numeric value. Other values use the serde wrapper below.
+        if self._serde.is_native_json_value(value):
             return value
-        except TypeError:
-            # Value contains non-JSON-serializable objects, use serde wrapper
-            pass
 
         # Use the serializer to handle complex objects
         type_str, data_bytes = self._serde.dumps_typed(value)

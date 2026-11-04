@@ -1,12 +1,19 @@
+import base64
+import binascii
 import dataclasses
 import logging
+import math
 from collections.abc import Callable, Sequence
+from enum import Enum
 from typing import Any
 
 import orjson
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
 logger = logging.getLogger(__name__)
+
+_TYPED_VALUE_MARKER = "__redis_jsonplus_typed__"
+_TYPED_VALUE_KEYS = {_TYPED_VALUE_MARKER, "type", "data"}
 
 
 def _interrupt_fields() -> set[str]:
@@ -68,6 +75,47 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
         "checkpoint_ns",
         "parent_checkpoint_id",
     ]
+
+    @classmethod
+    def is_native_json_value(cls, obj: Any) -> bool:
+        """Return whether JSON can store a value without changing its meaning.
+
+        Exact type checks are intentional: ``Enum`` and scalar subclasses can be
+        accepted by JSON encoders while losing their Python type.
+        """
+        if obj is None or type(obj) in (str, bool, int):
+            return True
+        if type(obj) is float:
+            return math.isfinite(obj)
+        if type(obj) in (list, tuple):
+            return all(cls.is_native_json_value(item) for item in obj)
+        if type(obj) is dict:
+            return all(
+                type(key) is str and cls.is_native_json_value(value)
+                for key, value in obj.items()
+            )
+        return False
+
+    def _encode_typed_value(self, obj: Any) -> dict[str, Any]:
+        """Wrap an upstream-serialized value in a RedisJSON-safe envelope."""
+        type_, data = super().dumps_typed(obj)
+        return {
+            _TYPED_VALUE_MARKER: True,
+            "type": type_,
+            "data": base64.b64encode(bytes(data)).decode("ascii"),
+        }
+
+    def _decode_typed_value(self, obj: dict[str, Any]) -> Any:
+        """Decode a value produced by :meth:`_encode_typed_value`."""
+        type_ = obj["type"]
+        data = obj["data"]
+        if not isinstance(type_, str) or not isinstance(data, str):
+            return obj
+        try:
+            decoded = base64.b64decode(data, validate=True)
+        except (binascii.Error, ValueError):
+            return obj
+        return super().loads_typed((type_, decoded))
 
     def _encode_constructor_envelope(
         self,
@@ -131,14 +179,23 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
             if hasattr(obj, "to_json"):
                 json_dict = obj.to_json()
                 if isinstance(json_dict, dict) and "lc" in json_dict:
-                    # Already in LC format, return as-is
-                    return json_dict
+                    # Already in LC format; preserve typed values in its fields.
+                    return self._preprocess_redis_json(json_dict)
 
-            # For other objects, encode with constructor args
-            # Pass the class and the instance's __dict__ as kwargs
-            return self._encode_constructor_envelope(
-                type(obj), kwargs=obj.__dict__ if hasattr(obj, "__dict__") else {}
-            )
+            # For other objects with instance state, encode with constructor kwargs.
+            if hasattr(obj, "__dict__"):
+                return self._encode_constructor_envelope(
+                    type(obj),
+                    kwargs={
+                        key: self._preprocess_redis_json(value)
+                        for key, value in obj.__dict__.items()
+                    },
+                )
+
+            # Built-in and extension types without __dict__ must not be encoded
+            # as an empty constructor. Delegate to the upstream msgpack codec,
+            # which preserves types such as Decimal, timedelta and frozenset.
+            return self._encode_typed_value(obj)
         except (AttributeError, KeyError, ValueError, TypeError):
             # For types we can't handle, raise TypeError
             raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
@@ -223,6 +280,11 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
             }
             return self._encode_constructor_envelope(type(obj), kwargs=processed_dict)
         elif isinstance(obj, dict):
+            # RedisJSON requires string object keys. During msgpack-to-RedisJSON
+            # normalization, preserve non-string keys in a typed envelope instead
+            # of allowing orjson.OPT_NON_STR_KEYS to coerce or merge them.
+            if encode_bytes is not None and any(type(key) is not str for key in obj):
+                return self._encode_typed_value(obj)
             return {
                 k: self._preprocess_redis_json(v, encode_bytes=encode_bytes)
                 for k, v in obj.items()
@@ -234,8 +296,20 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
             ]
             # Preserve tuple type
             return tuple(processed) if isinstance(obj, tuple) else processed
-        else:
+        elif isinstance(obj, Enum):
+            # orjson otherwise serializes Enum members as their raw value.
+            return self._encode_typed_value(obj)
+        elif self.is_native_json_value(obj):
             return obj
+        elif hasattr(obj, "to_json") or hasattr(obj, "__dict__"):
+            # Keep LangChain and ordinary constructor objects on the existing
+            # default-handler path.
+            return obj
+        else:
+            # orjson has native encoders for datetime, date, time and UUID, but
+            # those encodings discard the Python type. The upstream codec also
+            # covers Decimal, timedelta, frozenset, deque and non-finite floats.
+            return self._encode_typed_value(obj)
 
     def dumps_typed(self, obj: Any) -> tuple[str, bytes]:
         """Serialize using orjson for JSON.
@@ -371,6 +445,12 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
         if isinstance(obj, dict):
             # Match json.loads(object_hook=...) semantics by reviving children first.
             revived = {k: self._revive_if_needed(v) for k, v in obj.items()}
+
+            if (
+                set(revived) == _TYPED_VALUE_KEYS
+                and revived.get(_TYPED_VALUE_MARKER) is True
+            ):
+                return self._decode_typed_value(revived)
 
             if revived.get("lc") in (1, 2) and revived.get("type") == "constructor":
                 # If the dictionary is an lc constructor envelope
