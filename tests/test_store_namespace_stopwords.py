@@ -1,10 +1,12 @@
 """Stopword namespaces must round-trip without affecting other namespaces."""
 
+import copy
 from typing import Any, AsyncIterator, Iterator
 from uuid import uuid4
 
 import pytest
 from langgraph.store.base import Item
+from redisvl.index import AsyncSearchIndex, SearchIndex
 
 from langgraph.store.redis import AsyncRedisStore, RedisStore
 from tests.embed_test_utils import CharacterEmbeddings
@@ -42,6 +44,12 @@ def _assert_item(
     assert item.namespace == namespace
     assert item.key == key
     assert item.value == value
+
+
+def _legacy_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    schema = copy.deepcopy(schema)
+    schema["index"].pop("stopwords")
+    return schema
 
 
 @pytest.fixture
@@ -150,4 +158,54 @@ async def test_async_stopword_writes_preserve_other_namespaces(
     else:
         assert [i.value for i in await astore.asearch(("in",), query="new")] == [
             {"text": "new"}
+        ]
+
+
+@pytest.mark.parametrize("delete", [False, True], ids=["put", "delete"])
+def test_sync_legacy_index_write_preserves_other_namespace(
+    redis_url: str, delete: bool
+) -> None:
+    with RedisStore.from_conn_string(redis_url, **_config()) as store:
+        for schema in (store.store_schema, store.vector_schema):
+            SearchIndex.from_dict(
+                _legacy_schema(schema), redis_client=store._redis
+            ).create(overwrite=True, drop=False)
+
+        control = {"text": "control"}
+        store.put(("users",), "shared", control)
+        if delete:
+            store.delete(("in",), "shared")
+        else:
+            store.put(("in",), "shared", {"text": "new"})
+
+        _assert_item(store.get(("users",), "shared"), ("users",), "shared", control)
+        assert [i.value for i in store.search(("users",), query="control")] == [control]
+
+
+@pytest.mark.parametrize("delete", [False, True], ids=["put", "delete"])
+async def test_async_legacy_index_write_preserves_other_namespace(
+    redis_url: str, delete: bool
+) -> None:
+    async with AsyncRedisStore.from_conn_string(redis_url, **_config()) as store:
+        for schema in (store.store_schema, store.vector_schema):
+            legacy_index = AsyncSearchIndex.from_dict(
+                _legacy_schema(schema), redis_client=store._redis
+            )
+            await legacy_index.create(overwrite=True, drop=False)
+
+        control = {"text": "control"}
+        await store.aput(("users",), "shared", control)
+        if delete:
+            await store.adelete(("in",), "shared")
+        else:
+            await store.aput(("in",), "shared", {"text": "new"})
+
+        _assert_item(
+            await store.aget(("users",), "shared"),
+            ("users",),
+            "shared",
+            control,
+        )
+        assert [i.value for i in await store.asearch(("users",), query="control")] == [
+            control
         ]

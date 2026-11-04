@@ -37,6 +37,7 @@ from langgraph.store.base import (
 )
 from redis import Redis
 from redis.asyncio import Redis as AsyncRedis
+from redis.commands.search.query import Query
 from redis.exceptions import ResponseError
 from redisvl.index import SearchIndex
 from redisvl.query.filter import Tag, Text
@@ -536,9 +537,11 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
             # Delete matching documents
             for op in deletes:
                 prefix = _namespace_to_text(op.namespace)
-                query = f"(@prefix:{prefix} @key:{{{_token_escaper.escape(op.key)}}})"
+                query = Query(
+                    f"(@prefix:{prefix} @key:{{{_token_escaper.escape(op.key)}}})"
+                ).return_field("prefix")
                 results = self.store_index.search(query)
-                for doc in results.docs:
+                for doc in _matching_prefix_docs(results.docs, prefix):
                     self._redis.delete(doc.id)
 
         # Handle inserts
@@ -690,6 +693,11 @@ def _namespace_to_text(
     ns_text = _token_escaper.escape(".".join(namespace))
 
     return ns_text
+
+
+def _matching_prefix_docs(docs: Iterable[Any], prefix: str) -> Iterable[Any]:
+    """Keep deletion candidates that belong to the exact namespace prefix."""
+    return (doc for doc in docs if getattr(doc, "prefix", None) == prefix)
 
 
 def _decode_ns(ns: str) -> tuple[str, ...]:

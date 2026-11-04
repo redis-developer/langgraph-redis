@@ -40,6 +40,7 @@ from langgraph.store.redis.base import (
     RedisDocument,
     _decode_ns,
     _group_ops,
+    _matching_prefix_docs,
     _namespace_to_text,
     _row_to_item,
     _row_to_search_item,
@@ -324,24 +325,30 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
         # First delete any existing documents that are being updated/deleted
         for _, op in put_ops:
             namespace = _namespace_to_text(op.namespace)
-            query = f"@prefix:{namespace} @key:{{{_token_escaper.escape(op.key)}}}"
+            query = Query(
+                f"@prefix:{namespace} @key:{{{_token_escaper.escape(op.key)}}}"
+            ).return_field("prefix")
             results = self.store_index.search(query)
 
             if self.cluster_mode:
-                for doc in results.docs:
+                for doc in _matching_prefix_docs(results.docs, namespace):
                     self._redis.delete(doc.id)
                 if self.index_config:
                     vector_results = self.vector_index.search(query)
-                    for doc_vec in vector_results.docs:
+                    for doc_vec in _matching_prefix_docs(
+                        vector_results.docs, namespace
+                    ):
                         self._redis.delete(doc_vec.id)
             else:
                 pipeline = self._redis.pipeline(transaction=True)
-                for doc in results.docs:
+                for doc in _matching_prefix_docs(results.docs, namespace):
                     pipeline.delete(doc.id)
 
                 if self.index_config:
                     vector_results = self.vector_index.search(query)
-                    for doc_vec in vector_results.docs:
+                    for doc_vec in _matching_prefix_docs(
+                        vector_results.docs, namespace
+                    ):
                         pipeline.delete(doc_vec.id)
 
                 if pipeline.command_stack:
