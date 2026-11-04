@@ -39,6 +39,7 @@ from langgraph.store.redis.base import (
     _decode_ns,
     _ensure_string_or_literal,
     _group_ops,
+    _matching_prefix_docs,
     _namespace_to_text,
     _row_to_item,
     _row_to_search_item,
@@ -499,9 +500,11 @@ class AsyncRedisStore(
             # Delete matching documents
             for op in deletes:
                 prefix = _namespace_to_text(op.namespace)
-                query = f"(@prefix:{prefix} @key:{{{_token_escaper.escape(op.key)}}})"
+                query = Query(
+                    f"(@prefix:{prefix} @key:{{{_token_escaper.escape(op.key)}}})"
+                ).return_field("prefix")
                 results = await self.store_index.search(query)
-                for doc in results.docs:
+                for doc in _matching_prefix_docs(results.docs, prefix):
                     await self._redis.delete(doc.id)
 
         # Handle inserts
@@ -560,24 +563,30 @@ class AsyncRedisStore(
         # First delete any existing documents that are being updated/deleted
         for _, op in put_ops:
             namespace = _namespace_to_text(op.namespace)
-            query = f"@prefix:{namespace} @key:{{{_token_escaper.escape(op.key)}}}"
+            query = Query(
+                f"@prefix:{namespace} @key:{{{_token_escaper.escape(op.key)}}}"
+            ).return_field("prefix")
             results = await self.store_index.search(query)
 
             if self.cluster_mode:
-                for doc in results.docs:
+                for doc in _matching_prefix_docs(results.docs, namespace):
                     await self._redis.delete(doc.id)
                 if self.index_config:
                     vector_results = await self.vector_index.search(query)
-                    for doc_vec in vector_results.docs:
+                    for doc_vec in _matching_prefix_docs(
+                        vector_results.docs, namespace
+                    ):
                         await self._redis.delete(doc_vec.id)
             else:
                 pipeline = self._redis.pipeline(transaction=True)
-                for doc in results.docs:
+                for doc in _matching_prefix_docs(results.docs, namespace):
                     pipeline.delete(doc.id)
 
                 if self.index_config:
                     vector_results = await self.vector_index.search(query)
-                    for doc_vec in vector_results.docs:
+                    for doc_vec in _matching_prefix_docs(
+                        vector_results.docs, namespace
+                    ):
                         pipeline.delete(doc_vec.id)
 
                 if (

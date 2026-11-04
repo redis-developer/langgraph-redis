@@ -247,12 +247,12 @@ def test_batch_put_ops_pre_delete_behavior(store):
     vector_doc_id_to_delete = f"{STORE_VECTOR_PREFIX}{REDIS_KEY_SEPARATOR}{str(ULID())}"
 
     # Mock store_index.search to return a document that needs to be deleted
-    mock_store_doc = MagicMock(id=doc_id_to_delete)
+    mock_store_doc = MagicMock(id=doc_id_to_delete, prefix="test_ns")
     store.store_index.search = MagicMock(return_value=MagicMock(docs=[mock_store_doc]))
 
     # Mock vector_index.search if index_config is present
     if store.index_config:
-        mock_vector_doc = MagicMock(id=vector_doc_id_to_delete)
+        mock_vector_doc = MagicMock(id=vector_doc_id_to_delete, prefix="test_ns")
         store.vector_index.search = MagicMock(
             return_value=MagicMock(docs=[mock_vector_doc])
         )
