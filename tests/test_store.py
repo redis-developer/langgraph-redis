@@ -372,6 +372,43 @@ def test_basic_ops(store: RedisStore) -> None:
     assert deleted_item is None
 
 
+def test_search_filter_with_comparison_operators(store: RedisStore) -> None:
+    """Operator filters match like InMemoryStore instead of silently returning nothing."""
+    namespace = ("ops", str(uuid4()))
+    for i in range(6):
+        store.put(
+            namespace, f"item{i}", {"score": i, "status": "done" if i % 2 else "open"}
+        )
+
+    def keys(filter: dict) -> list[str]:
+        return sorted(item.key for item in store.search(namespace, filter=filter))
+
+    assert keys({"score": {"$gt": 3}}) == ["item4", "item5"]
+    assert keys({"score": {"$gte": 4}}) == ["item4", "item5"]
+    assert keys({"score": {"$lt": 2}}) == ["item0", "item1"]
+    assert keys({"score": {"$gt": 0, "$lte": 1}}) == ["item1"]
+    assert keys({"status": {"$eq": "done"}}) == ["item1", "item3", "item5"]
+    assert keys({"status": {"$ne": "done"}}) == ["item0", "item2", "item4"]
+
+
+def test_search_filter_applies_limit_and_offset_to_matching_items(
+    store: RedisStore,
+) -> None:
+    """limit and offset count the items that pass the filter, not the items Redis returned."""
+    namespace = ("paged", str(uuid4()))
+    for i in range(30):
+        store.put(namespace, f"other{i:02d}", {"keep": False})
+    for i in range(3):
+        store.put(namespace, f"match{i}", {"keep": True})
+
+    first = store.search(namespace, filter={"keep": True}, limit=2)
+    rest = store.search(namespace, filter={"keep": True}, limit=2, offset=2)
+
+    assert len(first) == 2
+    assert len(rest) == 1
+    assert {item.key for item in first + rest} == {"match0", "match1", "match2"}
+
+
 def test_search(store: RedisStore) -> None:
     """Test search functionality."""
     # Create test data

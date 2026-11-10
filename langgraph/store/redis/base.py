@@ -55,6 +55,59 @@ logger = logging.getLogger(__name__)
 REDIS_KEY_SEPARATOR = ":"
 STORE_PREFIX = "store"
 STORE_VECTOR_PREFIX = "store_vectors"
+# Number of documents fetched per page when a search filter is applied client-side
+FILTER_PAGE_SIZE = 500
+
+
+def _matches_filter(value: dict[str, Any], filter: dict[str, Any]) -> bool:
+    """Return whether a stored value matches a search filter.
+
+    Follows the semantics of LangGraph's InMemoryStore: comparison operators
+    ($eq, $ne, $gt, $gte, $lt, $lte) and nested dicts matched key by key. A
+    list matches any of its elements, as this store has always done.
+    """
+    return all(
+        _filter_value_matches(value.get(key), expected)
+        for key, expected in filter.items()
+    )
+
+
+def _filter_value_matches(actual: Any, expected: Any) -> bool:
+    if isinstance(expected, dict):
+        if any(key.startswith("$") for key in expected):
+            return all(
+                _apply_filter_operator(actual, operator, operand)
+                for operator, operand in expected.items()
+            )
+        return isinstance(actual, dict) and all(
+            _filter_value_matches(actual.get(key), value)
+            for key, value in expected.items()
+        )
+    if isinstance(expected, list):
+        return actual in expected
+    return bool(actual == expected)
+
+
+def _apply_filter_operator(actual: Any, operator: str, operand: Any) -> bool:
+    if operator == "$eq":
+        return bool(actual == operand)
+    if operator == "$ne":
+        return bool(actual != operand)
+    if operator in ("$gt", "$gte", "$lt", "$lte"):
+        try:
+            left, right = float(actual), float(operand)
+        except (TypeError, ValueError):
+            # A missing or non-numeric value never satisfies a range comparison
+            return False
+        if operator == "$gt":
+            return left > right
+        if operator == "$gte":
+            return left >= right
+        if operator == "$lt":
+            return left < right
+        return left <= right
+    raise ValueError(f"Unsupported operator: {operator}")
+
 
 # Schemas for Redis Search indices
 SCHEMAS = [
