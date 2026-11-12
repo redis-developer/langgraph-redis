@@ -22,6 +22,7 @@ These tests cover EVERY deserialization path in _deserialize_response:
 """
 
 import json
+import os
 import uuid
 
 import pytest
@@ -46,7 +47,7 @@ pytest.importorskip("sentence_transformers")
 @pytest.fixture(scope="module")
 def redis_container():
     """Start a Redis container for the test module."""
-    container = RedisContainer("redis/redis-stack-server:latest")
+    container = RedisContainer(os.environ.get("REDIS_IMAGE", "redis:8"))
     container.start()
     yield container
     container.stop()

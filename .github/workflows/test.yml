@@ -27,9 +27,8 @@ jobs:
       fail-fast: false
       matrix:
         python-version: [ '3.10', 3.11, 3.12, 3.13 ]
-        # 'latest' is the final Redis Stack line (7.4.x), for users not yet on
-        # Redis 8; '8.2' is the oldest Redis 8 we test and '8' the newest.
-        redis-version: [ 'latest', '8.2', '8' ]
+        # '8.2' is the oldest Redis 8 we test and '8' the newest.
+        redis-version: [ '8.2', '8' ]
         deps: [ 'locked' ]
         include:
           # One extra job on the newest redisvl, redis and langgraph-checkpoint
@@ -69,20 +68,17 @@ jobs:
 
       - name: Set Redis image name
         run: |
-          if [[ "${{ matrix.redis-version }}" == 8* ]]; then
-            echo "REDIS_IMAGE=redis:${{ matrix.redis-version }}" >> $GITHUB_ENV
-          else
-            echo "REDIS_IMAGE=redis/redis-stack-server:${{ matrix.redis-version }}" >> $GITHUB_ENV
-          fi
+          echo "REDIS_IMAGE=redis:${{ matrix.redis-version }}" >> $GITHUB_ENV
 
+      # API-key tests run once per Python version, on the locked newest Redis 8.
       - name: Run API tests
-        if: matrix.redis-version == 'latest'
+        if: matrix.redis-version == '8' && matrix.deps == 'locked'
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           make test-all
 
       - name: Run tests
-        if: matrix.redis-version != 'latest'
+        if: matrix.redis-version != '8' || matrix.deps != 'locked'
         run: |
           make test

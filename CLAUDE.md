@@ -49,7 +49,7 @@ TestContainers. The library handles container lifecycle automatically.
 ```python
 from testcontainers.redis import RedisContainer
 
-# Use redis:8 (has all required modules) or redis/redis-stack-server:latest
+# Use redis:8 (has all required modules)
 redis_container = RedisContainer("redis:8")
 redis_container.start()
 try:

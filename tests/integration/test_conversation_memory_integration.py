@@ -4,6 +4,7 @@ These tests verify the ACTUAL behavior of the middleware using real Redis
 and real SemanticMessageHistory — no mocks allowed.
 """
 
+import os
 import time
 import uuid
 
@@ -35,7 +36,7 @@ requires_sentence_transformers = pytest.mark.skipif(
 @pytest.fixture(scope="module")
 def redis_url():
     """Provide a Redis URL using TestContainers."""
-    redis_container = RedisContainer("redis/redis-stack-server:latest")
+    redis_container = RedisContainer(os.environ.get("REDIS_IMAGE", "redis:8"))
     redis_container.start()
     try:
         host = redis_container.get_container_host_ip()

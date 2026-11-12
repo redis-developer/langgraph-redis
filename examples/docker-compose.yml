@@ -18,7 +18,6 @@ services:
       - redis
 
   redis:
-    image: redis/redis-stack:latest
+    image: redis:8
     ports:
       - "6379:6379"
-      - "8001:8001"
