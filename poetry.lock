@@ -2709,7 +2709,7 @@ description = "Python for Window Extensions"
 optional = false
 python-versions = "*"
 groups = ["dev"]
-markers = "platform_system == \"Windows\" or sys_platform == \"win32\""
+markers = "sys_platform == \"win32\" or platform_system == \"Windows\""
 files = [
     {file = "pywin32-311-cp310-cp310-win32.whl", hash = "sha256:d03ff496d2a0cd4a5893504789d4a15399133fe82517455e78bad62efbb7f0a3"},
     {file = "pywin32-311-cp310-cp310-win_amd64.whl", hash = "sha256:797c2772017851984b97180b0bebe4b620bb86328e8a884bb626156295a63b3b"},
@@ -2838,14 +2838,15 @@ ocsp = ["cryptography (>=36.0.1)", "pyopenssl (>=20.0.1)", "requests (>=2.31.0)"
 
 [[package]]
 name = "redisvl"
-version = "0.28.0"
+version = "0.31.0"
 description = "Python client library and CLI for using Redis as a vector database"
 optional = false
-python-versions = "<3.15,>=3.10"
+python-versions = "<3.16,>=3.10"
 groups = ["main"]
+markers = "python_version == \"3.10\""
 files = [
-    {file = "redisvl-0.28.0-py3-none-any.whl", hash = "sha256:0f013853a54219651355ec3a6c5a3d2c5cdf02935ffc0aa27c9cb80e2023d306"},
-    {file = "redisvl-0.28.0.tar.gz", hash = "sha256:851a9528ffefc547263e50db90e5bf9efaeb9f5c91771073705827f294ab02c0"},
+    {file = "redisvl-0.31.0-py3-none-any.whl", hash = "sha256:fb20dc06f02a99bbc3d61512bb5e8261b5630e70e744e2cd8046c0e86df3490e"},
+    {file = "redisvl-0.31.0.tar.gz", hash = "sha256:6a69e8ba12b27caad212234c25ea54ff1848a58503989a68f9595bdeaa2926e4"},
 ]
 
 [package.dependencies]
@@ -2864,10 +2865,50 @@ bedrock = ["boto3 (>=1.36.0,<2)", "urllib3 (<2.9.0)"]
 cohere = ["cohere (>=4.44)"]
 google-genai = ["google-genai (>=1.0.0)"]
 langcache = ["langcache (>=0.11.0)"]
-mcp = ["fastmcp (>=2.0.0,<4)", "pydantic-settings (>=2.0,<3)"]
+mcp = ["beartype (>=0.23.1)", "fastmcp (>=2.13.0,<4)", "pydantic-settings (>=2.0,<3)"]
 mistralai = ["mistralai (>=1.0.0,<2)"]
 ollama = ["ollama (>=0.5.4)"]
 openai = ["openai (>=1.1.0)"]
+pillow = ["pillow (>=11.3.0)"]
+sentence-transformers = ["sentence-transformers (>=5.2.0,<6)"]
+sql-redis = ["sql-redis (>=0.7.1)"]
+vertexai = ["google-cloud-aiplatform (>=1.26,<2.0.0)", "protobuf (>=5.28.0)"]
+voyageai = ["voyageai[video] (>=0.5.0)"]
+
+[[package]]
+name = "redisvl"
+version = "0.32.0"
+description = "Python client library and CLI for using Redis as a vector database"
+optional = false
+python-versions = "<3.16,>=3.11"
+groups = ["main"]
+markers = "python_version >= \"3.11\""
+files = [
+    {file = "redisvl-0.32.0-py3-none-any.whl", hash = "sha256:5affc519949ef260ec4ff786c36bb6c15f1527de2b5da089ef53efcfd72f5d83"},
+    {file = "redisvl-0.32.0.tar.gz", hash = "sha256:8f8b587da238d16fc77af8b9b0961d76359402ca6661540ec376b895a1d4c3bf"},
+]
+
+[package.dependencies]
+jsonpath-ng = ">=1.5.0"
+ml-dtypes = ">=0.4.0,<1.0.0"
+numpy = ">=1.26.0,<3"
+pydantic = ">=2,<3"
+python-ulid = ">=3.0.0"
+pyyaml = ">=5.4,<7.0"
+redis = ">=6.3.0,!=8.0.0,<9.0"
+tenacity = ">=8.2.2"
+
+[package.extras]
+all = ["boto3 (>=1.36.0,<2)", "cohere (>=4.44)", "google-cloud-aiplatform (>=1.26,<2.0.0)", "google-genai (>=1.0.0)", "langcache (>=0.11.0)", "mistralai (>=1.0.0,<2)", "ollama (>=0.5.4)", "openai (>=1.1.0)", "opentelemetry-api (>=1.30.0)", "pillow (>=11.3.0)", "protobuf (>=5.28.0)", "sentence-transformers (>=5.2.0,<6)", "sql-redis (>=0.7.1)", "urllib3 (<2.9.0)", "voyageai[video] (>=0.5.0)"]
+bedrock = ["boto3 (>=1.36.0,<2)", "urllib3 (<2.9.0)"]
+cohere = ["cohere (>=4.44)"]
+google-genai = ["google-genai (>=1.0.0)"]
+langcache = ["langcache (>=0.11.0)"]
+mcp = ["beartype (>=0.23.1)", "fastmcp (>=2.13.0,<4)", "pydantic-settings (>=2.0,<3)"]
+mistralai = ["mistralai (>=1.0.0,<2)"]
+ollama = ["ollama (>=0.5.4)"]
+openai = ["openai (>=1.1.0)"]
+otel = ["opentelemetry-api (>=1.30.0)"]
 pillow = ["pillow (>=11.3.0)"]
 sentence-transformers = ["sentence-transformers (>=5.2.0,<6)"]
 sql-redis = ["sql-redis (>=0.7.1)"]
@@ -3261,6 +3302,7 @@ description = "Most extensible Python build backend with support for C/C++ exten
 optional = false
 python-versions = ">=3.10"
 groups = ["dev"]
+markers = "python_version >= \"3.12\""
 files = [
     {file = "setuptools-84.1.0-py3-none-any.whl", hash = "sha256:5231689c6ac8156cd155cfb98c3fd6fb252c3e7e9bd3d78b64d3c55f132624c9"},
     {file = "setuptools-84.1.0.tar.gz", hash = "sha256:23657205b63d4d31395ab917815247f694aafad28cd21316bf5fd45a51048ea0"},
