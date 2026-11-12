@@ -108,6 +108,47 @@ async def test_basic_ops(store: AsyncRedisStore) -> None:
 
 
 @pytest.mark.asyncio
+async def test_search_filter_with_comparison_operators(store: AsyncRedisStore) -> None:
+    """Operator filters match like InMemoryStore instead of silently returning nothing."""
+    namespace = ("ops", str(uuid4()))
+    for i in range(6):
+        await store.aput(
+            namespace, f"item{i}", {"score": i, "status": "done" if i % 2 else "open"}
+        )
+
+    async def keys(filter: dict) -> list[str]:
+        return sorted(
+            item.key for item in await store.asearch(namespace, filter=filter)
+        )
+
+    assert await keys({"score": {"$gt": 3}}) == ["item4", "item5"]
+    assert await keys({"score": {"$gte": 4}}) == ["item4", "item5"]
+    assert await keys({"score": {"$lt": 2}}) == ["item0", "item1"]
+    assert await keys({"score": {"$gt": 0, "$lte": 1}}) == ["item1"]
+    assert await keys({"status": {"$eq": "done"}}) == ["item1", "item3", "item5"]
+    assert await keys({"status": {"$ne": "done"}}) == ["item0", "item2", "item4"]
+
+
+@pytest.mark.asyncio
+async def test_search_filter_applies_limit_and_offset_to_matching_items(
+    store: AsyncRedisStore,
+) -> None:
+    """limit and offset count the items that pass the filter, not the items Redis returned."""
+    namespace = ("paged", str(uuid4()))
+    for i in range(30):
+        await store.aput(namespace, f"other{i:02d}", {"keep": False})
+    for i in range(3):
+        await store.aput(namespace, f"match{i}", {"keep": True})
+
+    first = await store.asearch(namespace, filter={"keep": True}, limit=2)
+    rest = await store.asearch(namespace, filter={"keep": True}, limit=2, offset=2)
+
+    assert len(first) == 2
+    assert len(rest) == 1
+    assert {item.key for item in first + rest} == {"match0", "match1", "match2"}
+
+
+@pytest.mark.asyncio
 async def test_search(store: AsyncRedisStore) -> None:
     """Test search functionality with async store."""
     # Create test data

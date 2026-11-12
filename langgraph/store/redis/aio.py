@@ -31,6 +31,7 @@ from ulid import ULID
 
 from langgraph.checkpoint.redis.util import unwrap_connection_errors
 from langgraph.store.redis.base import (
+    FILTER_PAGE_SIZE,
     REDIS_KEY_SEPARATOR,
     STORE_PREFIX,
     STORE_VECTOR_PREFIX,
@@ -39,6 +40,7 @@ from langgraph.store.redis.base import (
     _decode_ns,
     _ensure_string_or_literal,
     _group_ops,
+    _matches_filter,
     _namespace_to_text,
     _row_to_item,
     _row_to_search_item,
@@ -675,6 +677,29 @@ class AsyncRedisStore(
         for main_key, (related_keys, ttl_minutes) in ttl_tracking.items():
             await self._apply_ttl_to_keys(main_key, related_keys, ttl_minutes)
 
+    async def _asearch_filtered(
+        self, query_str: str, filter: dict[str, Any], offset: int, limit: int
+    ) -> list[Any]:
+        """Page through the documents matching query_str and return those that pass filter.
+
+        Value fields aren't part of the search index, so the filter runs client-side and
+        offset and limit have to apply to the filtered documents, not to a page of Redis
+        results.
+        """
+        matched: list[Any] = []
+        start = 0
+        while len(matched) < offset + limit:
+            res = await self.store_index.search(
+                Query(query_str).paging(start, FILTER_PAGE_SIZE)
+            )
+            for doc in res.docs:
+                if _matches_filter(json.loads(doc.json).get("value", {}), filter):
+                    matched.append(doc)
+            start += len(res.docs)
+            if not res.docs or start >= res.total:
+                break
+        return matched[offset : offset + limit]
+
     async def _batch_search_ops(
         self,
         search_ops: Sequence[tuple[int, SearchOp]],
@@ -787,20 +812,10 @@ class AsyncRedisStore(
                             continue
 
                         # Apply value filters if needed
-                        if op.filter:
-                            matches = True
-                            value = store_doc.get("value", {})
-                            for key, expected in op.filter.items():
-                                actual = value.get(key)
-                                if isinstance(expected, list):
-                                    if actual not in expected:
-                                        matches = False
-                                        break
-                                elif actual != expected:
-                                    matches = False
-                                    break
-                            if not matches:
-                                continue
+                        if op.filter and not _matches_filter(
+                            store_doc.get("value", {}), op.filter
+                        ):
+                            continue
 
                         # If refresh_ttl is true, add to list for refreshing
                         if op.refresh_ttl:
@@ -849,31 +864,21 @@ class AsyncRedisStore(
 
             else:
                 # Regular search
-                # Create a query with LIMIT and OFFSET parameters
-                query = Query(query_str).paging(offset, limit)
-
-                # Execute search with limit and offset applied by Redis
-                res = await self.store_index.search(query)
+                if op.filter:
+                    docs = await self._asearch_filtered(
+                        query_str, op.filter, offset, limit
+                    )
+                else:
+                    # Without a filter, Redis applies offset and limit directly
+                    res = await self.store_index.search(
+                        Query(query_str).paging(offset, limit)
+                    )
+                    docs = res.docs
                 items = []
                 refresh_keys = []  # Track keys that need TTL refreshed
 
-                for doc in res.docs:
+                for doc in docs:
                     data = json.loads(doc.json)
-                    # Apply value filters
-                    if op.filter:
-                        matches = True
-                        value = data.get("value", {})
-                        for key, expected in op.filter.items():
-                            actual = value.get(key)
-                            if isinstance(expected, list):
-                                if actual not in expected:
-                                    matches = False
-                                    break
-                            elif actual != expected:
-                                matches = False
-                                break
-                        if not matches:
-                            continue
 
                     # If refresh_ttl is true, add the key to refresh list
                     if op.refresh_ttl:
