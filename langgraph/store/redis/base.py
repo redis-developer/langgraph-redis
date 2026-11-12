@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import re
 import threading
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -39,7 +40,6 @@ from redis import Redis
 from redis.asyncio import Redis as AsyncRedis
 from redis.exceptions import ResponseError
 from redisvl.index import SearchIndex
-from redisvl.query.filter import Tag, Text
 from redisvl.utils.token_escaper import TokenEscaper
 
 from langgraph.checkpoint.redis.jsonplus_redis import JsonPlusRedisSerializer
@@ -48,6 +48,11 @@ from .token_unescaper import TokenUnescaper
 from .types import IndexType, RedisClientType
 
 _token_escaper = TokenEscaper()
+# For tag values. The default set leaves "|", which separates tag alternatives,
+# and whitespace other than a space, which ends the value.
+_tag_escaper = TokenEscaper(
+    re.compile(TokenEscaper.DEFAULT_ESCAPED_CHARS[:-1] + r"|\n\r\t\v\f]")
+)
 _token_unescaper = TokenUnescaper()
 
 logger = logging.getLogger(__name__)
@@ -494,12 +499,12 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
         results: list[tuple[str, Sequence, tuple[str, ...], list]] = []
         for namespace, items in namespace_groups.items():
             _, keys = zip(*items)
-            # Use Tag helper to properly escape all special characters
-            prefix_filter = Text("prefix") == _namespace_to_text(namespace)
-            filter_str = f"({prefix_filter} "
+            # redisvl's Text filter turns a double quote into a space, so it
+            # can't match the escaped namespace that put() stored.
+            filter_str = f'(@prefix:("{_namespace_to_text(namespace)}") '
             if keys:
-                key_filter = Tag("key") == list(keys)
-                filter_str += f"{key_filter})"
+                key_filter = "|".join(_tag_escaper.escape(key) for key in keys)
+                filter_str += f"@key:{{{key_filter}}})"
             else:
                 filter_str += ")"
             results.append((filter_str, [], namespace, items))
@@ -532,7 +537,7 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
             # Delete matching documents
             for op in deletes:
                 prefix = _namespace_to_text(op.namespace)
-                query = f"(@prefix:{prefix} @key:{{{_token_escaper.escape(op.key)}}})"
+                query = f"(@prefix:{prefix} @key:{{{_tag_escaper.escape(op.key)}}})"
                 results = self.store_index.search(query)
                 for doc in results.docs:
                     self._redis.delete(doc.id)
