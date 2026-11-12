@@ -27,6 +27,17 @@ def redis_container():
     yield DummyCompose()
 
 
+@pytest.fixture
+def redis_url():
+    """These tests use mock clients, so no Redis server is needed."""
+    return "redis://localhost:6379"
+
+
+@pytest.fixture(autouse=True)
+def clear_redis():
+    """Override the conftest flush: there is no Redis server to clear."""
+
+
 # Basic Mock for non-cluster async client
 class AsyncMockRedis(AsyncRedis):
     def __init__(self, *args, **kwargs):
