@@ -13,8 +13,9 @@ from testcontainers.compose import DockerCompose
 
 VECTOR_TYPES = ["vector", "halfvec"]
 
-# Set this to pin the Compose project prefix, for example to reuse one Redis
-# container across runs. Left unset, every run gets a prefix of its own.
+# Set this to pin the Compose project prefix. Left unset, every run gets a
+# prefix of its own. Runs that share a prefix share one project, so a run that
+# finishes tears down the Redis the others are still using.
 PROJECT_PREFIX_ENV = "REDIS_TEST_PROJECT_PREFIX"
 
 
@@ -44,9 +45,10 @@ def set_tokenizers_parallelism():
 def redis_container(request):
     """Start Redis through Docker Compose under a project of this run's own.
 
-    See ``_compose_project_name`` for how the project is named. A failed
-    start fails the tests that need Redis, rather than letting them run
-    against a missing or foreign container.
+    See ``_compose_project_name`` for how the project is named. The fixture
+    is autouse, so a failed start fails every test that does not override
+    ``redis_container``, ``redis_url`` and ``clear_redis``, rather than letting
+    them run against a missing or foreign container.
     """
     project_name = _compose_project_name(request.config)
     os.environ["COMPOSE_PROJECT_NAME"] = project_name
@@ -65,6 +67,12 @@ def redis_container(request):
         if isinstance(stderr, bytes):
             stderr = stderr.decode(errors="replace")
         detail = f"\n{stderr.strip()}" if stderr else ""
+        # `up --wait` can fail after creating the container and network. No
+        # later run reuses this project name, so remove them now.
+        try:
+            compose.stop()
+        except Exception:
+            pass
         pytest.fail(
             f"Could not start the Redis test container (Compose project "
             f"{project_name!r}, image {os.environ['REDIS_IMAGE']!r}): {exc}{detail}",
