@@ -84,8 +84,8 @@ pytest --run-api-tests      # Include API integration tests
 tests.
 
 Note: Tests automatically use TestContainers for Redis - do not manually start Redis containers. Each run gets its own
-Compose project, so concurrent suites on one Docker host do not interfere; set `REDIS_TEST_PROJECT_PREFIX` to pin the
-project prefix instead.
+Compose project, so concurrent suites on one Docker host do not interfere. `REDIS_TEST_PROJECT_PREFIX` pins the project
+prefix instead; runs sharing a prefix tear down each other's Redis.
 
 ### Code Quality
 
