@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import math
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Iterable, Iterator, Optional, Sequence, cast
@@ -24,6 +25,7 @@ from langgraph.store.base import (
 from redis import Redis
 from redis.cluster import RedisCluster as SyncRedisCluster
 from redis.commands.search.query import Query
+from redisvl.exceptions import RedisSearchError
 from redisvl.index import SearchIndex
 from redisvl.query import FilterQuery, VectorQuery
 from redisvl.redis.connection import RedisConnectionFactory
@@ -34,12 +36,15 @@ from langgraph.checkpoint.redis.util import unwrap_connection_errors
 from langgraph.store.redis.aio import AsyncRedisStore
 from langgraph.store.redis.base import (
     REDIS_KEY_SEPARATOR,
+    REINDEX_WAIT_SECONDS,
     STORE_PREFIX,
     STORE_VECTOR_PREFIX,
     BaseRedisStore,
     RedisDocument,
     _decode_ns,
     _group_ops,
+    _index_is_current,
+    _indexing_done,
     _namespace_to_text,
     _row_to_item,
     _row_to_search_item,
@@ -144,9 +149,46 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
         self._detect_cluster_mode()
 
         with unwrap_connection_errors():
-            self.store_index.create(overwrite=False)
+            self._create_or_rebuild_index(self.store_index)
             if self.index_config:
-                self.vector_index.create(overwrite=False)
+                self._create_or_rebuild_index(self.vector_index)
+
+    def _create_or_rebuild_index(self, index: SearchIndex) -> None:
+        """Create ``index``, or rebuild it if an earlier release created it
+        without STOPWORDS 0 / NOSTEM on ``prefix``.
+
+        The rebuild drops only the index definition (never the documents);
+        Redis re-indexes the existing documents in the background, which this
+        waits for so the first operations after setup() see every item.
+        """
+        if index.exists():
+            if _index_is_current(index.info()):
+                return
+            logger.warning(
+                "Rebuilding search index %r: it predates STOPWORDS 0 / NOSTEM on "
+                "the namespace field. Stored items are kept and re-indexed.",
+                index.name,
+            )
+            try:
+                index.delete(drop=False)
+            except RedisSearchError:
+                # Another process rebuilt it first; create() below then no-ops.
+                if index.exists() and _index_is_current(index.info()):
+                    return
+                raise
+        index.create(overwrite=False)
+
+        deadline = time.monotonic() + REINDEX_WAIT_SECONDS
+        while not _indexing_done(index.info()):
+            if time.monotonic() > deadline:
+                logger.warning(
+                    "Search index %r is still re-indexing after %.0fs; queries "
+                    "may miss items until it finishes.",
+                    index.name,
+                    REINDEX_WAIT_SECONDS,
+                )
+                return
+            time.sleep(0.05)
 
     def batch(self, ops: Iterable[Op]) -> list[Result]:
         """Execute batch of operations."""
