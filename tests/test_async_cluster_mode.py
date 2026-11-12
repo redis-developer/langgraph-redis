@@ -211,6 +211,8 @@ async def test_async_cluster_mode_behavior_differs(
     mock_index_cluster.load = AsyncMock(return_value=None)
     mock_index_cluster.query = AsyncMock(return_value=[])  # For vector search mocks
     mock_index_cluster.create = AsyncMock(return_value=None)  # For setup
+    mock_index_cluster.exists = AsyncMock(return_value=False)  # setup() creates it
+    mock_index_cluster.info = AsyncMock(return_value={"indexing": 0})
     async_cluster_store.store_index = mock_index_cluster
     async_cluster_store.vector_index = mock_index_cluster
     await async_cluster_store.setup()  # Call setup to initialize indices
@@ -235,6 +237,8 @@ async def test_async_cluster_mode_behavior_differs(
     mock_index_non_cluster.load = AsyncMock(return_value=None)
     mock_index_non_cluster.query = AsyncMock(return_value=[])
     mock_index_non_cluster.create = AsyncMock(return_value=None)
+    mock_index_non_cluster.exists = AsyncMock(return_value=False)  # setup() creates it
+    mock_index_non_cluster.info = AsyncMock(return_value={"indexing": 0})
     async_non_cluster_store.store_index = mock_index_non_cluster
     async_non_cluster_store.vector_index = mock_index_non_cluster
     await async_non_cluster_store.setup()
