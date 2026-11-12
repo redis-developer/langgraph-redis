@@ -5,6 +5,7 @@ and extract all diagnostic information.
 Uses real Redis via TestContainers. No mocks, no guessing.
 """
 
+import os
 import asyncio
 import time
 from typing import Any
@@ -22,7 +23,7 @@ from langgraph.middleware.redis import (
 async def run_debug() -> None:
     # ── Spin up Redis ──────────────────────────────────────────────────
     print("Starting Redis container...")
-    redis_container = RedisContainer("redis/redis-stack-server:latest")
+    redis_container = RedisContainer(os.environ.get("REDIS_IMAGE", "redis:8"))
     redis_container.start()
     redis_url = (
         f"redis://{redis_container.get_container_host_ip()}"
