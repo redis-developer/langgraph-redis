@@ -83,7 +83,9 @@ pytest --run-api-tests      # Include API integration tests
 **Important**: Always use `make test-all` when evaluating changes to ensure all tests pass, including API integration
 tests.
 
-Note: Tests automatically use TestContainers for Redis - do not manually start Redis containers.
+Note: Tests automatically use TestContainers for Redis - do not manually start Redis containers. Each run gets its own
+Compose project, so concurrent suites on one Docker host do not interfere; set `REDIS_TEST_PROJECT_PREFIX` to pin the
+project prefix instead.
 
 ### Code Quality
 
