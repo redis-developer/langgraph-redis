@@ -81,6 +81,27 @@ def _index_is_current(info: Dict[str, Any]) -> bool:
     return False
 
 
+# How RediSearch words "this index does not exist" across versions.
+_MISSING_INDEX_FRAGMENTS = (
+    "unknown index name",
+    "no such index",
+    "search_index_not_found",
+    "index not found",
+)
+
+
+def _is_missing_index(exc: Exception) -> bool:
+    """Whether a redisvl ``RedisSearchError`` means the index does not exist.
+
+    redisvl wraps every failure, connection errors included, in
+    ``RedisSearchError``; only this one is a race with another process's
+    rebuild. The wrapped Redis error is read, since the wrapper's own message
+    includes the index name."""
+    cause = exc.__cause__ if exc.__cause__ is not None else exc
+    message = str(cause).lower()
+    return any(fragment in message for fragment in _MISSING_INDEX_FRAGMENTS)
+
+
 def _indexing_done(info: Dict[str, Any]) -> bool:
     return int(info.get("indexing", 0) or 0) == 0
 

@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, AsyncIterator, Iterator
 from unittest.mock import patch
@@ -26,6 +28,8 @@ from unittest.mock import patch
 import pytest
 from langgraph.store.base import GetOp
 from redis import Redis
+from redis.exceptions import ConnectionError as RedisConnectionError
+from redisvl.exceptions import RedisSearchError
 from redisvl.index import SearchIndex
 from testcontainers.redis import RedisContainer
 
@@ -275,9 +279,15 @@ def test_concurrent_setup_on_legacy_index_succeeds_in_every_worker(
         for i in range(200):
             seed.put(("a", str(i)), "k", {"i": i})
 
+    all_started = threading.Barrier(4)
+
     def start_worker() -> None:
         with RedisStore.from_conn_string(own_redis_url) as worker:
+            all_started.wait()
             worker.setup()
+            # Every worker, not just the one that rebuilt, sees every item.
+            assert int(_store_index_info(own_redis_url)["num_docs"]) == 200
+            assert worker.get(("a", "199"), "k").value == {"i": 199}
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         for future in [pool.submit(start_worker) for _ in range(4)]:
@@ -286,6 +296,21 @@ def test_concurrent_setup_on_legacy_index_succeeds_in_every_worker(
     info = _store_index_info(own_redis_url)
     assert info["stopwords_list"] == []
     assert int(info["num_docs"]) == 200
+
+
+def test_setup_raises_connection_error_while_waiting_for_indexing(
+    own_redis_url: str,
+) -> None:
+    """A Redis that becomes unreachable during setup() is reported, not mistaken
+    for another process's rebuild and waited out."""
+    with RedisStore.from_conn_string(own_redis_url) as s:
+        lost = RedisSearchError("Error while fetching store index info")
+        lost.__cause__ = RedisConnectionError("Connection refused")
+        started = time.monotonic()
+        with patch.object(s.store_index, "info", side_effect=lost):
+            with pytest.raises(RedisConnectionError):
+                s.setup()
+        assert time.monotonic() - started < 5
 
 
 # -------------------------------------------------------------------------- async
@@ -448,9 +473,25 @@ async def test_async_concurrent_setup_on_legacy_index_succeeds_in_every_worker(
     async def start_worker() -> None:
         async with AsyncRedisStore(own_redis_url) as worker:
             await worker.setup()
+            # Every worker, not just the one that rebuilt, sees every item.
+            assert int(_store_index_info(own_redis_url)["num_docs"]) == 200
+            assert (await worker.aget(("a", "199"), "k")).value == {"i": 199}
 
     await asyncio.gather(*(start_worker() for _ in range(4)))
 
     info = _store_index_info(own_redis_url)
     assert info["stopwords_list"] == []
     assert int(info["num_docs"]) == 200
+
+
+async def test_async_setup_raises_connection_error_while_waiting_for_indexing(
+    own_redis_url: str,
+) -> None:
+    async with AsyncRedisStore(own_redis_url) as s:
+        lost = RedisSearchError("Error while fetching store index info")
+        lost.__cause__ = RedisConnectionError("Connection refused")
+        started = time.monotonic()
+        with patch.object(s.store_index, "info", side_effect=lost):
+            with pytest.raises(RedisConnectionError):
+                await s.setup()
+        assert time.monotonic() - started < 5
