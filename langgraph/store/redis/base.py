@@ -85,6 +85,15 @@ def _indexing_done(info: Dict[str, Any]) -> bool:
     return int(info.get("indexing", 0) or 0) == 0
 
 
+# Logged when setup() rebuilds an index from an earlier release.
+REBUILD_WARNING = (
+    "Rebuilding search index %r: it predates STOPWORDS 0 / NOSTEM on the "
+    "namespace field. Stored items are kept and re-indexed in the background. "
+    "Until that finishes, put() and delete() from other processes can miss "
+    "existing items (leaving duplicates or undeleted items), so pause other "
+    "writers to this store during the upgrade."
+)
+
 # How long setup() waits for Redis to re-index existing documents after it
 # rebuilds an outdated index, before carrying on with a warning.
 REINDEX_WAIT_SECONDS = 60.0

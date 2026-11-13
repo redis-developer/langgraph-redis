@@ -35,6 +35,7 @@ from ulid import ULID
 from langgraph.checkpoint.redis.util import unwrap_connection_errors
 from langgraph.store.redis.aio import AsyncRedisStore
 from langgraph.store.redis.base import (
+    REBUILD_WARNING,
     REDIS_KEY_SEPARATOR,
     REINDEX_WAIT_SECONDS,
     STORE_PREFIX,
@@ -144,7 +145,14 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
                 client.connection_pool.disconnect()
 
     def setup(self) -> None:
-        """Initialize store indices."""
+        """Create the store's search indexes, or bring existing ones up to date.
+
+        Safe to call on every start. An index created by a release before the
+        namespace field used STOPWORDS 0 / NOSTEM is rebuilt once: its
+        definition is dropped and recreated, the stored items are kept, and
+        this waits (up to ``REINDEX_WAIT_SECONDS``) for Redis to re-index them.
+        Pause other writers to the store while that one-time rebuild runs.
+        """
         # Detect if we're connected to a Redis cluster
         self._detect_cluster_mode()
 
@@ -155,34 +163,44 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
 
     def _create_or_rebuild_index(self, index: SearchIndex) -> None:
         """Create ``index``, or rebuild it if an earlier release created it
-        without STOPWORDS 0 / NOSTEM on ``prefix``.
+        without STOPWORDS 0 / NOSTEM on ``prefix``, then wait for indexing.
 
-        The rebuild drops only the index definition (never the documents);
-        Redis re-indexes the existing documents in the background, which this
-        waits for so the first operations after setup() see every item.
+        The rebuild drops only the index definition (never the documents) and
+        Redis re-indexes the existing documents in the background. Several
+        processes may run this at once: whichever drops or creates the index
+        first wins, and the others fall through to waiting on it.
         """
-        if index.exists():
-            if _index_is_current(index.info()):
-                return
-            logger.warning(
-                "Rebuilding search index %r: it predates STOPWORDS 0 / NOSTEM on "
-                "the namespace field. Stored items are kept and re-indexed.",
-                index.name,
-            )
+        try:
+            outdated = index.exists() and not _index_is_current(index.info())
+        except RedisSearchError:
+            outdated = False  # dropped by another process since exists()
+        if outdated:
+            logger.warning(REBUILD_WARNING, index.name)
             try:
                 index.delete(drop=False)
             except RedisSearchError:
-                # Another process rebuilt it first; create() below then no-ops.
-                if index.exists() and _index_is_current(index.info()):
-                    return
+                pass  # another process dropped it first; create it below
+        try:
+            index.create(overwrite=False)  # no-op if it already exists
+        except RedisSearchError:
+            # Another process created it between the exists() check and FT.CREATE.
+            if not index.exists():
                 raise
-        index.create(overwrite=False)
+        self._wait_for_indexing(index)
 
+    def _wait_for_indexing(self, index: SearchIndex) -> None:
+        """Wait (up to REINDEX_WAIT_SECONDS) for Redis to finish indexing the
+        documents under ``index``, so the first operations see every item."""
         deadline = time.monotonic() + REINDEX_WAIT_SECONDS
-        while not _indexing_done(index.info()):
+        while True:
+            try:
+                if _indexing_done(index.info()):
+                    return
+            except RedisSearchError:
+                pass  # missing for a moment while another process recreates it
             if time.monotonic() > deadline:
                 logger.warning(
-                    "Search index %r is still re-indexing after %.0fs; queries "
+                    "Search index %r is still indexing after %.0fs; queries "
                     "may miss items until it finishes.",
                     index.name,
                     REINDEX_WAIT_SECONDS,

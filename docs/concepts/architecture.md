@@ -69,6 +69,8 @@ Both checkpoints and stores define their RediSearch index schemas as structured 
 
 Indexes are created lazily via `setup()` with `overwrite=False`, so they are safe to call on every application startup. The `redisvl` library handles index creation and query building from these schemas.
 
+The store indexes the namespace as a TEXT field `prefix` with `STOPWORDS 0` and `NOSTEM`, because a namespace label is an identifier, not prose: with RediSearch's defaults a label such as `a` or `the` would not be indexed, and `running` would match `runs`. When the store's `setup()` finds a store index created by an earlier release without these options, it rebuilds it once: it drops the index definition (never the documents), recreates it, and waits for Redis to re-index the stored items. Pause other writers to the store while that one-time rebuild runs.
+
 ## Redis Key Patterns
 
 Every Redis key follows a deterministic pattern built from the data it represents:

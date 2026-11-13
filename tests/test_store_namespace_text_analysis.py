@@ -17,7 +17,11 @@ and ``setup()`` rebuilds an index created without them, keeping its documents.
 
 from __future__ import annotations
 
+import asyncio
+import logging
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, AsyncIterator, Iterator
+from unittest.mock import patch
 
 import pytest
 from langgraph.store.base import GetOp
@@ -102,6 +106,15 @@ def _create_legacy_store_index(own_redis_url: str) -> None:
         },
         redis_url=own_redis_url,
     ).create(overwrite=True)
+
+
+def _drop_store_index_definition(own_redis_url: str) -> None:
+    """FT.DROPINDEX without DD, as another process upgrading would."""
+    client = Redis.from_url(own_redis_url)
+    try:
+        client.execute_command("FT.DROPINDEX", "store")
+    finally:
+        client.close()
 
 
 def _store_index_info(own_redis_url: str) -> dict[str, Any]:
@@ -215,12 +228,64 @@ def test_setup_migrates_legacy_index_and_keeps_documents(own_redis_url: str) -> 
     assert int(info["num_docs"]) == 2
 
 
-def test_setup_leaves_current_index_in_place(own_redis_url: str) -> None:
+def test_setup_leaves_current_index_in_place(
+    own_redis_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
     with RedisStore.from_conn_string(own_redis_url) as s:
         s.setup()
         s.put(("a",), "k0", {"i": 0})
-        s.setup()  # second setup must not drop or rebuild
+        with (
+            patch.object(s.store_index, "delete", wraps=s.store_index.delete) as delete,
+            caplog.at_level(logging.WARNING),
+        ):
+            s.setup()
+        delete.assert_not_called()
+        assert "Rebuilding search index" not in caplog.text
         assert s.get(("a",), "k0").value == {"i": 0}
+
+
+def test_setup_recovers_when_another_process_drops_the_legacy_index_first(
+    own_redis_url: str,
+) -> None:
+    """Two processes upgrading at once both see the legacy index; the other one
+    drops it between this one's check and its own FT.DROPINDEX, which then fails."""
+    _create_legacy_store_index(own_redis_url)
+    with RedisStore.from_conn_string(own_redis_url) as s:
+        s.put(("a",), "k0", {"owner": "a"})
+        real_delete = s.store_index.delete
+
+        def dropped_by_other_process_first(drop: bool = True) -> None:
+            _drop_store_index_definition(own_redis_url)
+            real_delete(drop=drop)  # raises: the index is already gone
+
+        with patch.object(
+            s.store_index, "delete", side_effect=dropped_by_other_process_first
+        ):
+            s.setup()
+
+        assert s.get(("a",), "k0").value == {"owner": "a"}
+    assert _store_index_info(own_redis_url)["stopwords_list"] == []
+
+
+def test_concurrent_setup_on_legacy_index_succeeds_in_every_worker(
+    own_redis_url: str,
+) -> None:
+    _create_legacy_store_index(own_redis_url)
+    with RedisStore.from_conn_string(own_redis_url) as seed:
+        for i in range(200):
+            seed.put(("a", str(i)), "k", {"i": i})
+
+    def start_worker() -> None:
+        with RedisStore.from_conn_string(own_redis_url) as worker:
+            worker.setup()
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        for future in [pool.submit(start_worker) for _ in range(4)]:
+            future.result()  # re-raises any setup() error
+
+    info = _store_index_info(own_redis_url)
+    assert info["stopwords_list"] == []
+    assert int(info["num_docs"]) == 200
 
 
 # -------------------------------------------------------------------------- async
@@ -336,9 +401,56 @@ async def test_async_setup_migrates_legacy_index_and_keeps_documents(
     assert int(info["num_docs"]) == 2
 
 
-async def test_async_setup_leaves_current_index_in_place(own_redis_url: str) -> None:
+async def test_async_setup_leaves_current_index_in_place(
+    own_redis_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
     async with AsyncRedisStore.from_conn_string(own_redis_url) as s:
-        await s.setup()
         await s.aput(("a",), "k0", {"i": 0})
-        await s.setup()
+        with (
+            patch.object(s.store_index, "delete", wraps=s.store_index.delete) as delete,
+            caplog.at_level(logging.WARNING),
+        ):
+            await s.setup()
+        delete.assert_not_called()
+        assert "Rebuilding search index" not in caplog.text
         assert (await s.aget(("a",), "k0")).value == {"i": 0}
+
+
+async def test_async_setup_recovers_when_another_process_drops_the_legacy_index_first(
+    own_redis_url: str,
+) -> None:
+    _create_legacy_store_index(own_redis_url)
+    async with AsyncRedisStore(own_redis_url) as s:
+        await s.aput(("a",), "k0", {"owner": "a"})
+        real_delete = s.store_index.delete
+
+        async def dropped_by_other_process_first(drop: bool = True) -> None:
+            _drop_store_index_definition(own_redis_url)
+            await real_delete(drop=drop)  # raises: the index is already gone
+
+        with patch.object(
+            s.store_index, "delete", side_effect=dropped_by_other_process_first
+        ):
+            await s.setup()
+
+        assert (await s.aget(("a",), "k0")).value == {"owner": "a"}
+    assert _store_index_info(own_redis_url)["stopwords_list"] == []
+
+
+async def test_async_concurrent_setup_on_legacy_index_succeeds_in_every_worker(
+    own_redis_url: str,
+) -> None:
+    _create_legacy_store_index(own_redis_url)
+    async with AsyncRedisStore(own_redis_url) as seed:
+        for i in range(200):
+            await seed.aput(("a", str(i)), "k", {"i": i})
+
+    async def start_worker() -> None:
+        async with AsyncRedisStore(own_redis_url) as worker:
+            await worker.setup()
+
+    await asyncio.gather(*(start_worker() for _ in range(4)))
+
+    info = _store_index_info(own_redis_url)
+    assert info["stopwords_list"] == []
+    assert int(info["num_docs"]) == 200
