@@ -136,11 +136,15 @@ def store(request):
     # Mock the search indices
     store.store_index = MagicMock()
     store.store_index.create = MagicMock()
+    store.store_index.exists = MagicMock(return_value=False)  # setup() creates it
+    store.store_index.info = MagicMock(return_value={"indexing": 0})
     store.store_index.search = MagicMock(return_value=MagicMock(docs=[]))
     store.store_index.load = MagicMock()
 
     store.vector_index = MagicMock()
     store.vector_index.create = MagicMock()
+    store.vector_index.exists = MagicMock(return_value=False)
+    store.vector_index.info = MagicMock(return_value={"indexing": 0})
     store.vector_index.query = MagicMock(return_value=[])
     store.vector_index.load = MagicMock()
 
