@@ -2,13 +2,37 @@ import asyncio
 import os
 import socket
 import time
+import uuid
 
 import pytest
+from redis import Redis as SyncRedis
 from redis.asyncio import Redis
+from redis.exceptions import RedisError
 from redisvl.redis.connection import RedisConnectionFactory
 from testcontainers.compose import DockerCompose
 
 VECTOR_TYPES = ["vector", "halfvec"]
+
+# Set this to pin the Compose project prefix. Left unset, every run gets a
+# prefix of its own. Runs that share a prefix share one project, so a run that
+# finishes tears down the Redis the others are still using.
+PROJECT_PREFIX_ENV = "REDIS_TEST_PROJECT_PREFIX"
+
+
+def _compose_project_name(config: pytest.Config) -> str:
+    """Return the Compose project name for this pytest process.
+
+    Each xdist worker gets its own project, and by default so does each run,
+    so two suites sharing a Docker host never recreate or tear down each
+    other's Redis. Workers of one xdist run share its ``testrun_uid``.
+    """
+    workerinput = getattr(config, "workerinput", {})
+    worker_id = workerinput.get("workerid", "master")
+    prefix = os.environ.get(PROJECT_PREFIX_ENV)
+    if not prefix:
+        run_id = workerinput.get("testrun_uid") or uuid.uuid4().hex
+        prefix = f"redis_test_{run_id[:12]}"
+    return f"{prefix}_{worker_id}".lower()
 
 
 @pytest.fixture(autouse=True)
@@ -19,17 +43,15 @@ def set_tokenizers_parallelism():
 
 @pytest.fixture(scope="session", autouse=True)
 def redis_container(request):
-    """
-    If using xdist, create a unique Compose project for each xdist worker by
-    setting COMPOSE_PROJECT_NAME. That prevents collisions on container/volume
-    names.
-    """
-    # In xdist, the config has "workerid" in workerinput
-    workerinput = getattr(request.config, "workerinput", {})
-    worker_id = workerinput.get("workerid", "master")
+    """Start Redis through Docker Compose under a project of this run's own.
 
-    # Set the Compose project name so containers do not clash across workers
-    os.environ["COMPOSE_PROJECT_NAME"] = f"redis_test_{worker_id}"
+    See ``_compose_project_name`` for how the project is named. The fixture
+    is autouse, so a failed start fails every test that does not override
+    ``redis_container``, ``redis_url`` and ``clear_redis``, rather than letting
+    them run against a missing or foreign container.
+    """
+    project_name = _compose_project_name(request.config)
+    os.environ["COMPOSE_PROJECT_NAME"] = project_name
     os.environ.setdefault("REDIS_VERSION", "8")
     os.environ.setdefault("REDIS_IMAGE", "redis:8")
 
@@ -40,9 +62,22 @@ def redis_container(request):
     )
     try:
         compose.start()
-    except Exception:
-        # Ignore compose startup errors (e.g., existing containers)
-        pass
+    except Exception as exc:
+        stderr = getattr(exc, "stderr", None)
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode(errors="replace")
+        detail = f"\n{stderr.strip()}" if stderr else ""
+        # `up --wait` can fail after creating the container and network. No
+        # later run reuses this project name, so remove them now.
+        try:
+            compose.stop()
+        except Exception:
+            pass
+        pytest.fail(
+            f"Could not start the Redis test container (Compose project "
+            f"{project_name!r}, image {os.environ['REDIS_IMAGE']!r}): {exc}{detail}",
+            pytrace=False,
+        )
 
     yield compose
 
@@ -60,21 +95,27 @@ def redis_url(redis_container):
     on container port 6379 (mapped to an ephemeral port on the host).
     """
     host, port = redis_container.get_service_host_and_port("redis", 6379)
+    url = f"redis://{host}:{port}"
 
-    # Wait up to 15 seconds for the container to accept TCP connections.
+    # Wait up to 15 seconds for Redis to answer PING. A published port can
+    # accept TCP connections before the server behind it is ready.
     deadline = time.time() + 15
     while True:
         try:
-            with socket.create_connection((host, int(port)), timeout=1):
-                break  # Redis is accepting connections
-        except OSError:
+            with SyncRedis.from_url(url, socket_timeout=1) as client:
+                if client.ping():
+                    break
+        except (RedisError, OSError) as exc:
             if time.time() > deadline:
-                pytest.skip(
-                    "Redis container failed to become ready for this worker – skipping tests."
+                pytest.fail(
+                    f"Redis test container at {url} did not answer PING within "
+                    f"15 seconds (Compose project "
+                    f"{os.environ.get('COMPOSE_PROJECT_NAME')!r}): {exc}",
+                    pytrace=False,
                 )
-            time.sleep(0.5)
+        time.sleep(0.5)
 
-    return f"redis://{host}:{port}"
+    return url
 
 
 @pytest.fixture
@@ -101,13 +142,17 @@ async def clear_redis(redis_url: str) -> None:
     """Clear Redis before each test."""
     # Add a small delay to allow container to stabilize between tests
     await asyncio.sleep(0.1)
+    client = Redis.from_url(redis_url)
     try:
-        client = Redis.from_url(redis_url)
         await client.flushall()
+    except (RedisError, OSError) as exc:
+        pytest.fail(
+            f"Could not flush Redis at {redis_url} before the test; the test "
+            f"container may have stopped or been removed: {exc}",
+            pytrace=False,
+        )
+    finally:
         await client.aclose()
-    except Exception:
-        # Ignore clear_redis errors when Redis container is unavailable
-        pass
 
 
 @pytest.fixture(scope="session")
@@ -168,8 +213,6 @@ def sentinel_info(sentinel_container):
     master_port = 6399
 
     # Poll sentinel until it has discovered the master
-    from redis import Redis as SyncRedis
-
     deadline = time.time() + 30
     while True:
         try:

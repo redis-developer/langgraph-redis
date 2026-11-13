@@ -33,7 +33,7 @@ jobs:
     
     - name: Set Redis image name
       run: |
-        echo "REDIS_IMAGE=redis/redis-stack-server:latest" >> $GITHUB_ENV
+        echo "REDIS_IMAGE=redis:8" >> $GITHUB_ENV
     
     - name: Run tests with coverage
       run: |

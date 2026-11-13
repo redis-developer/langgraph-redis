@@ -741,7 +741,7 @@ The project includes several make commands for development:
 - **Redis for Development/Testing**:
 
   ```bash
-  make redis-start   # Start Redis Stack in Docker (includes RedisJSON and RediSearch modules)
+  make redis-start   # Start Redis 8 in Docker (includes the JSON and search modules)
   make redis-stop    # Stop Redis container
   ```
 

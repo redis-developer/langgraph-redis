@@ -37,7 +37,7 @@ from langgraph.middleware.redis import (
 @pytest.fixture(scope="module")
 def redis_container():
     """Start a Redis container for the test module."""
-    container = RedisContainer("redis/redis-stack-server:latest")
+    container = RedisContainer(os.environ.get("REDIS_IMAGE", "redis:8"))
     container.start()
     yield container
     container.stop()
