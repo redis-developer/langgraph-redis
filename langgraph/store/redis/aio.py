@@ -45,6 +45,7 @@ from langgraph.store.redis.base import (
     _group_ops,
     _index_is_current,
     _indexing_done,
+    _is_missing_index,
     _namespace_to_text,
     _row_to_item,
     _row_to_search_item,
@@ -189,14 +190,18 @@ class AsyncRedisStore(
             outdated = await index.exists() and not _index_is_current(
                 await index.info()
             )
-        except RedisSearchError:
+        except RedisSearchError as e:
+            if not _is_missing_index(e):
+                raise
             outdated = False  # dropped by another process since exists()
         if outdated:
             logger.warning(REBUILD_WARNING, index.name)
             try:
                 await index.delete(drop=False)
-            except RedisSearchError:
-                pass  # another process dropped it first; create it below
+            except RedisSearchError as e:
+                if not _is_missing_index(e):
+                    raise
+                # Another process dropped it first; create it below.
         try:
             await index.create(overwrite=False)  # no-op if it already exists
         except RedisSearchError:
@@ -213,9 +218,17 @@ class AsyncRedisStore(
             try:
                 if _indexing_done(await index.info()):
                     return
-            except RedisSearchError:
-                pass  # missing for a moment while another process recreates it
+                missing = False
+            except RedisSearchError as e:
+                if not _is_missing_index(e):
+                    raise
+                missing = True  # another process is between drop and create
             if time.monotonic() > deadline:
+                if missing:
+                    raise RedisSearchError(
+                        f"Search index {index.name!r} still does not exist "
+                        f"{REINDEX_WAIT_SECONDS:.0f}s after setup() created it."
+                    )
                 logger.warning(
                     "Search index %r is still indexing after %.0fs; queries "
                     "may miss items until it finishes.",
