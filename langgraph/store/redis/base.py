@@ -37,6 +37,7 @@ from langgraph.store.base import (
 )
 from redis import Redis
 from redis.asyncio import Redis as AsyncRedis
+from redis.commands.search.aggregation import AggregateRequest
 from redis.exceptions import ResponseError
 from redisvl.index import SearchIndex
 from redisvl.query.filter import Tag, Text
@@ -55,10 +56,14 @@ logger = logging.getLogger(__name__)
 REDIS_KEY_SEPARATOR = ":"
 STORE_PREFIX = "store"
 STORE_VECTOR_PREFIX = "store_vectors"
-# RediSearch returns 10 documents unless a query asks for more. Reads that need
-# every match (batched gets, list_namespaces) ask for this many first, and if
-# more match, repeat the search asking for all of them.
+# Reads that need every match (batched gets, list_namespaces) page through them
+# with RedisVL's paginate(), this many documents a page, sorted on
+# STORE_SORT_FIELD. Offset pages are only stable when the sort field is unique.
 STORE_SEARCH_PAGE_SIZE = 1000
+# Every store document keeps its own id (the ULID in its Redis key) in this field,
+# so the paged reads have a unique sort key. setup() adds it to an index created
+# before the field existed and backfills documents written without it.
+STORE_SORT_FIELD = "doc_id"
 
 # Schemas for Redis Search indices
 SCHEMAS = [
@@ -75,6 +80,7 @@ SCHEMAS = [
             {"name": "updated_at", "type": "numeric"},
             {"name": "ttl_minutes", "type": "numeric"},
             {"name": "expires_at", "type": "numeric"},
+            {"name": STORE_SORT_FIELD, "type": "tag", "attrs": {"sortable": True}},
         ],
     },
     {
@@ -115,6 +121,7 @@ class RedisDocument(TypedDict, total=False):
     updated_at: int
     ttl_minutes: Optional[float]
     expires_at: Optional[int]
+    doc_id: str
 
 
 class BaseRedisStore(Generic[RedisClientType, IndexType]):
@@ -127,6 +134,9 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
     _ttl_stop_event: threading.Event | None = None
     # Whether to operate in Redis cluster mode; None triggers auto-detection
     cluster_mode: Optional[bool] = None
+    # Set once this instance has made sure the store index and its documents
+    # have STORE_SORT_FIELD (in setup(), or in the first paged read without it)
+    _has_sort_field: bool = False
     SCHEMAS = SCHEMAS
     # Storage type the vector index is forced to, overriding the caller's
     # ``index["vector_storage_type"]``. None (the sync store) honours the
@@ -282,6 +292,11 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
                 {"name": "updated_at", "type": "numeric"},
                 {"name": "ttl_minutes", "type": "numeric"},
                 {"name": "expires_at", "type": "numeric"},
+                {
+                    "name": STORE_SORT_FIELD,
+                    "type": "tag",
+                    "attrs": {"sortable": True},
+                },
             ],
         }
         if not self.index_config:
@@ -485,6 +500,57 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
         # Legacy format: value is stored as-is (plain JSON-serializable data)
         # Return as-is for backward compatibility
         return value
+
+    @staticmethod
+    def _index_has_field(info: Dict[str, Any], name: str) -> bool:
+        """Whether FT.INFO output lists an attribute called ``name``."""
+        for attr in info.get("attributes", []):
+            values = [v.decode() if isinstance(v, bytes) else v for v in attr]
+            if "attribute" in values:
+                i = values.index("attribute")
+                if i + 1 < len(values) and values[i + 1] == name:
+                    return True
+        return False
+
+    @staticmethod
+    def _still_indexing(info: Dict[str, Any]) -> bool:
+        """Whether FT.INFO says the index is still scanning existing documents,
+        as it does after FT.ALTER adds a field."""
+        indexing = info.get("indexing", 0)
+        if isinstance(indexing, bytes):
+            indexing = indexing.decode()
+        return str(indexing) not in ("0", "0.0")
+
+    def _sort_field_definition(self) -> Any:
+        """The STORE_SORT_FIELD definition as FT.ALTER takes it, built from the
+        same schema the index is created from."""
+        return self.store_index.schema.fields[STORE_SORT_FIELD].as_redis_field()
+
+    @staticmethod
+    def _missing_sort_field_request() -> AggregateRequest:
+        """One batch of store documents that have no STORE_SORT_FIELD yet."""
+        return (
+            AggregateRequest("*")
+            .load("@__key", f"@{STORE_SORT_FIELD}")
+            .filter(f"!exists(@{STORE_SORT_FIELD})")
+            .limit(0, STORE_SEARCH_PAGE_SIZE)
+        )
+
+    def _sort_field_backfill(self, rows: Iterable[Any]) -> list[tuple[str, str]]:
+        """(Redis key, doc id) for each row of _missing_sort_field_request().
+
+        The doc id is the ULID after the store prefix in the key, the same value
+        new documents get when they are written.
+        """
+        prefix = f"{self.store_prefix}{REDIS_KEY_SEPARATOR}"
+        backfill = []
+        for row in rows:
+            values = [v.decode() if isinstance(v, bytes) else v for v in row]
+            fields = dict(zip(values[::2], values[1::2]))
+            key = fields.get("__key")
+            if isinstance(key, str) and key.startswith(prefix):
+                backfill.append((key, key[len(prefix) :]))
+        return backfill
 
     def _get_batch_GET_ops_queries(
         self,

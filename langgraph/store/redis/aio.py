@@ -23,6 +23,7 @@ from langgraph.store.base import (
 from langgraph.store.base.batch import AsyncBatchedBaseStore
 from redis.asyncio import Redis as AsyncRedis
 from redis.commands.search.query import Query
+from redis.exceptions import ResponseError
 from redisvl.index import AsyncSearchIndex
 from redisvl.query import FilterQuery, VectorQuery
 from redisvl.redis.connection import RedisConnectionFactory
@@ -34,6 +35,7 @@ from langgraph.store.redis.base import (
     REDIS_KEY_SEPARATOR,
     STORE_PREFIX,
     STORE_SEARCH_PAGE_SIZE,
+    STORE_SORT_FIELD,
     STORE_VECTOR_PREFIX,
     BaseRedisStore,
     RedisDocument,
@@ -163,6 +165,68 @@ class AsyncRedisStore(
             await self.store_index.create(overwrite=False)
             if self.index_config:
                 await self.vector_index.create(overwrite=False)
+            await self._ensure_sort_field()
+
+    async def _ensure_sort_field(self) -> None:
+        """Give an index and documents from before STORE_SORT_FIELD the field.
+
+        Adds the field to a store index created without it, then sets it on
+        every document that lacks it. Both steps do nothing once done, so this
+        runs on every setup(), and on the first paged read when setup() was not
+        called after an upgrade. A document an older version writes after this
+        has run lacks the field; the paged reads still return it, after the
+        others and in no fixed order.
+        """
+        search = self._redis.ft(self.store_index.name)
+        if not self._index_has_field(await self.store_index.info(), STORE_SORT_FIELD):
+            try:
+                await search.alter_schema_add([self._sort_field_definition()])
+            except ResponseError:
+                # Another process may have added it first.
+                info = await self.store_index.info()
+                if not self._index_has_field(info, STORE_SORT_FIELD):
+                    raise
+
+        # FT.ALTER rescans existing documents in the background, and pages read
+        # during the rescan can skip documents.
+        while self._still_indexing(await self.store_index.info()):
+            await asyncio.sleep(0.05)
+
+        attempted: set[str] = set()
+        while True:
+            request = self._missing_sort_field_request()
+            # redis-py's annotation for the async aggregate() leaves out
+            # AggregateRequest, which it accepts as the sync one does.
+            rows = (await search.aggregate(request)).rows  # type: ignore[arg-type]
+            backfill = [
+                (key, doc_id)
+                for key, doc_id in self._sort_field_backfill(rows)
+                if key not in attempted
+            ]
+            if not backfill:
+                self._has_sort_field = True
+                return
+            attempted.update(key for key, _ in backfill)
+            path = f"$.{STORE_SORT_FIELD}"
+            if self.cluster_mode:
+                outcomes: list[Any] = []
+                for key, doc_id in backfill:
+                    try:
+                        outcomes.append(
+                            await self._redis.json().set(key, path, doc_id, nx=True)
+                        )
+                    except ResponseError as e:
+                        outcomes.append(e)
+            else:
+                pipeline = self._redis.pipeline(transaction=False)
+                for key, doc_id in backfill:
+                    pipeline.json().set(key, path, doc_id, nx=True)
+                outcomes = await pipeline.execute(raise_on_error=False)
+            for (key, _), outcome in zip(backfill, outcomes):
+                # A document deleted after the search found it cannot take a
+                # field; any other failure is real.
+                if isinstance(outcome, Exception) and await self._redis.exists(key):
+                    raise outcome
 
     async def _detect_cluster_mode(self) -> None:
         """Detect if the Redis client is a cluster client by inspecting its class."""
@@ -395,19 +459,21 @@ class AsyncRedisStore(
             self.abatch(ops), asyncio.get_event_loop()
         ).result()
 
-    async def _search_all(self, query: Query) -> list[Any]:
-        """Return every document in the store index that matches ``query``.
+    async def _search_all(self, query: FilterQuery) -> AsyncIterator[dict[str, Any]]:
+        """Yield every document in the store index that matches ``query``.
 
-        Asks for STORE_SEARCH_PAGE_SIZE documents and, if more match, searches again
-        asking for all of them. The documents all come from one search, not offset
-        pages, which can repeat or skip documents when the index changes between them.
+        Pages through the matches with paginate(), sorted on the unique
+        STORE_SORT_FIELD so pages do not repeat or skip documents. A document
+        written or deleted between two pages can still shift the pages after it.
         """
-        num = STORE_SEARCH_PAGE_SIZE
-        while True:
-            res = await self.store_index.search(query.paging(0, num))
-            if len(res.docs) >= res.total or res.total <= num:
-                return res.docs
-            num = res.total
+        if not self._has_sort_field:
+            await self._ensure_sort_field()
+        query.sort_by(STORE_SORT_FIELD)
+        async for page in self.store_index.paginate(
+            query, page_size=STORE_SEARCH_PAGE_SIZE
+        ):
+            for doc in page:
+                yield doc
 
     async def _batch_get_ops(
         self,
@@ -421,10 +487,10 @@ class AsyncRedisStore(
 
         for query, _, namespace, items in self._get_batch_GET_ops_queries(get_ops):
             # Parse JSON from each document
-            key_to_row = {
-                json.loads(doc.json)["key"]: (json.loads(doc.json), doc.id)
-                for doc in await self._search_all(Query(query))
-            }
+            key_to_row: dict[str, tuple[dict[str, Any], str]] = {}
+            async for doc in self._search_all(FilterQuery(filter_expression=query)):
+                doc_id = doc.pop("id")
+                key_to_row[doc["key"]] = (doc, doc_id)
 
             for idx, key in items:
                 if key in key_to_row:
@@ -630,6 +696,7 @@ class AsyncRedisStore(
             if "expires_at" in doc:
                 doc.pop("expires_at", None)
 
+            doc["doc_id"] = doc_id  # STORE_SORT_FIELD
             store_docs.append(doc)
             redis_key = f"{self.store_prefix}{REDIS_KEY_SEPARATOR}{doc_id}"
             store_keys.append(redis_key)
@@ -963,9 +1030,9 @@ class AsyncRedisStore(
 
             # Extract unique namespaces
             namespaces = set()
-            for doc in await self._search_all(query):
-                if hasattr(doc, "prefix"):
-                    ns = tuple(_token_unescaper.unescape(doc.prefix).split("."))
+            async for doc in self._search_all(query):
+                if "prefix" in doc:
+                    ns = tuple(_token_unescaper.unescape(doc["prefix"]).split("."))
                     # Apply max_depth if specified
                     if op.max_depth is not None:
                         ns = ns[: op.max_depth]

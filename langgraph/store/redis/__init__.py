@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import math
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Iterable, Iterator, Optional, Sequence, cast
@@ -24,6 +25,7 @@ from langgraph.store.base import (
 from redis import Redis
 from redis.cluster import RedisCluster as SyncRedisCluster
 from redis.commands.search.query import Query
+from redis.exceptions import ResponseError
 from redisvl.index import SearchIndex
 from redisvl.query import FilterQuery, VectorQuery
 from redisvl.redis.connection import RedisConnectionFactory
@@ -36,6 +38,7 @@ from langgraph.store.redis.base import (
     REDIS_KEY_SEPARATOR,
     STORE_PREFIX,
     STORE_SEARCH_PAGE_SIZE,
+    STORE_SORT_FIELD,
     STORE_VECTOR_PREFIX,
     BaseRedisStore,
     RedisDocument,
@@ -148,6 +151,64 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
             self.store_index.create(overwrite=False)
             if self.index_config:
                 self.vector_index.create(overwrite=False)
+            self._ensure_sort_field()
+
+    def _ensure_sort_field(self) -> None:
+        """Give an index and documents from before STORE_SORT_FIELD the field.
+
+        Adds the field to a store index created without it, then sets it on
+        every document that lacks it. Both steps do nothing once done, so this
+        runs on every setup(), and on the first paged read when setup() was not
+        called after an upgrade. A document an older version writes after this
+        has run lacks the field; the paged reads still return it, after the
+        others and in no fixed order.
+        """
+        search = self._redis.ft(self.store_index.name)
+        if not self._index_has_field(self.store_index.info(), STORE_SORT_FIELD):
+            try:
+                search.alter_schema_add([self._sort_field_definition()])
+            except ResponseError:
+                # Another process may have added it first.
+                if not self._index_has_field(self.store_index.info(), STORE_SORT_FIELD):
+                    raise
+
+        # FT.ALTER rescans existing documents in the background, and pages read
+        # during the rescan can skip documents.
+        while self._still_indexing(self.store_index.info()):
+            time.sleep(0.05)
+
+        attempted: set[str] = set()
+        while True:
+            rows = search.aggregate(self._missing_sort_field_request()).rows
+            backfill = [
+                (key, doc_id)
+                for key, doc_id in self._sort_field_backfill(rows)
+                if key not in attempted
+            ]
+            if not backfill:
+                self._has_sort_field = True
+                return
+            attempted.update(key for key, _ in backfill)
+            path = f"$.{STORE_SORT_FIELD}"
+            if self.cluster_mode:
+                outcomes: list[Any] = []
+                for key, doc_id in backfill:
+                    try:
+                        outcomes.append(
+                            self._redis.json().set(key, path, doc_id, nx=True)
+                        )
+                    except ResponseError as e:
+                        outcomes.append(e)
+            else:
+                pipeline = self._redis.pipeline(transaction=False)
+                for key, doc_id in backfill:
+                    pipeline.json().set(key, path, doc_id, nx=True)
+                outcomes = pipeline.execute(raise_on_error=False)
+            for (key, _), outcome in zip(backfill, outcomes):
+                # A document deleted after the search found it cannot take a
+                # field; any other failure is real.
+                if isinstance(outcome, Exception) and self._redis.exists(key):
+                    raise outcome
 
     def batch(self, ops: Iterable[Op]) -> list[Result]:
         """Execute batch of operations."""
@@ -194,19 +255,18 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
             self.cluster_mode = False
             logger.info("Redis standalone client detected for RedisStore.")
 
-    def _search_all(self, query: Query) -> list[Any]:
-        """Return every document in the store index that matches ``query``.
+    def _search_all(self, query: FilterQuery) -> Iterator[dict[str, Any]]:
+        """Yield every document in the store index that matches ``query``.
 
-        Asks for STORE_SEARCH_PAGE_SIZE documents and, if more match, searches again
-        asking for all of them. The documents all come from one search, not offset
-        pages, which can repeat or skip documents when the index changes between them.
+        Pages through the matches with paginate(), sorted on the unique
+        STORE_SORT_FIELD so pages do not repeat or skip documents. A document
+        written or deleted between two pages can still shift the pages after it.
         """
-        num = STORE_SEARCH_PAGE_SIZE
-        while True:
-            res = self.store_index.search(query.paging(0, num))
-            if len(res.docs) >= res.total or res.total <= num:
-                return res.docs
-            num = res.total
+        if not self._has_sort_field:
+            self._ensure_sort_field()
+        query.sort_by(STORE_SORT_FIELD)
+        for page in self.store_index.paginate(query, page_size=STORE_SEARCH_PAGE_SIZE):
+            yield from page
 
     def _batch_list_namespaces_ops(
         self,
@@ -239,8 +299,8 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
             # Extract unique namespaces
             namespaces = set()
             for doc in self._search_all(query):
-                if hasattr(doc, "prefix"):
-                    ns = tuple(_token_unescaper.unescape(doc.prefix).split("."))
+                if "prefix" in doc:
+                    ns = tuple(_token_unescaper.unescape(doc["prefix"]).split("."))
                     # Apply max_depth if specified
                     if op.max_depth is not None:
                         ns = ns[: op.max_depth]
@@ -267,10 +327,10 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
 
         for query, _, namespace, items in self._get_batch_GET_ops_queries(get_ops):
             # Parse JSON from each document
-            key_to_row = {
-                json.loads(doc.json)["key"]: (json.loads(doc.json), doc.id)
-                for doc in self._search_all(Query(query))
-            }
+            key_to_row: dict[str, tuple[dict[str, Any], str]] = {}
+            for doc in self._search_all(FilterQuery(filter_expression=query)):
+                doc_id = doc.pop("id")
+                key_to_row[doc["key"]] = (doc, doc_id)
 
             for idx, key in items:
                 if key in key_to_row:
@@ -391,6 +451,7 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
             if "expires_at" in doc:
                 doc.pop("expires_at", None)
 
+            doc["doc_id"] = doc_id  # STORE_SORT_FIELD
             store_docs.append(doc)
             redis_key = f"{self.store_prefix}{REDIS_KEY_SEPARATOR}{doc_id}"
             store_keys.append(redis_key)
