@@ -124,14 +124,19 @@ def _drop_store_index_definition(own_redis_url: str) -> None:
 def _store_index_info(own_redis_url: str) -> dict[str, Any]:
     client = Redis.from_url(own_redis_url, decode_responses=True)
     try:
-        raw = client.execute_command("FT.INFO", "store")
+        # Parsed by redis-py, as redisvl does; the raw reply's shape varies
+        # across redis-py releases.
+        return dict(client.ft("store").info())
     finally:
         client.close()
-    return dict(zip(raw[::2], raw[1::2]))
 
 
 def _prefix_attribute(info: dict[str, Any]) -> list[str]:
-    return next(attr for attr in info["attributes"] if attr[3] == "prefix")
+    for attr in info["attributes"]:
+        tokens = [str(a) for a in attr]
+        if tokens[tokens.index("attribute") + 1] == "prefix":
+            return tokens
+    raise AssertionError("store index has no prefix attribute")
 
 
 # --------------------------------------------------------------------------- sync
