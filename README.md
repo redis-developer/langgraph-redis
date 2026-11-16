@@ -273,19 +273,19 @@ You can make specific checkpoints persistent by removing their TTL. This is usef
 from langgraph.checkpoint.redis import RedisSaver
 
 # Create saver with default TTL
-saver = RedisSaver.from_conn_string("redis://localhost:6379", ttl={"default_ttl": 60})
-saver.setup()
+with RedisSaver.from_conn_string("redis://localhost:6379", ttl={"default_ttl": 60}) as saver:
+    saver.setup()
 
-# Save a checkpoint
-config = {"configurable": {"thread_id": "important-thread", "checkpoint_ns": ""}}
-saved_config = saver.put(config, checkpoint, metadata, {})
+    # Save a checkpoint
+    config = {"configurable": {"thread_id": "important-thread", "checkpoint_ns": ""}}
+    saved_config = saver.put(config, checkpoint, metadata, {})
 
-# Remove TTL from the checkpoint to make it persistent
-checkpoint_id = saved_config["configurable"]["checkpoint_id"]
-checkpoint_key = f"checkpoint:important-thread:__empty__:{checkpoint_id}"
-saver._apply_ttl_to_keys(checkpoint_key, ttl_minutes=-1)
+    # Remove TTL from the checkpoint to make it persistent
+    checkpoint_id = saved_config["configurable"]["checkpoint_id"]
+    checkpoint_key = f"checkpoint:important-thread:__empty__:{checkpoint_id}"
+    saver._apply_ttl_to_keys(checkpoint_key, ttl_minutes=-1)
 
-# The checkpoint is now persistent and won't expire
+    # The checkpoint is now persistent and won't expire
 ```
 
 When no TTL configuration is provided, checkpoints are persistent by default (no expiration).
