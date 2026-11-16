@@ -1,4 +1,4 @@
-"""Integration tests for issue #159 — aprune() / prune() with keep_last strategy.
+"""Integration tests for checkpoint pruning, retention, and input validation.
 
 Tests cover:
 - keep_last=1  (keep only the latest checkpoint, default)
@@ -11,10 +11,12 @@ Tests cover:
 - sync (RedisSaver.prune) and async (AsyncRedisSaver.aprune) variants
 - shallow savers: keep_last>=1 is no-op, keep_last=0 deletes all
 - invalid strategies raise without changing stored data (issue #238)
+- incomplete checkpoint and write searches are rejected before deleting thread data
 """
 
 import time
-from typing import Optional
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from typing import Any, Optional
 
 import pytest
 from langchain_core.runnables import RunnableConfig
@@ -30,6 +32,13 @@ from langgraph.checkpoint.redis.ashallow import AsyncShallowRedisSaver
 from langgraph.checkpoint.redis.shallow import ShallowRedisSaver
 
 INVALID_STRATEGIES = ("keep_last", "Delete", "KEEP_LATEST", "zzz", "", "keep_latest ")
+PRUNE_SEARCH_CASES = (
+    # Strategy, keep_last, retained per namespace, offset from the complete limit.
+    pytest.param("keep_latest", None, 1, -1, id="reject-partial-retention"),
+    pytest.param("delete", None, 0, -1, id="reject-partial-deletion"),
+    pytest.param("delete", 2, 2, -1, id="reject-partial-override"),
+    pytest.param("delete", None, 0, 1, id="above-limit"),
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -68,6 +77,75 @@ def _config(thread_id: str, cp_id: str, ns: str = "") -> RunnableConfig:
 def _thread_data(client: Redis, thread_id: str) -> dict[bytes, Optional[bytes]]:
     """Snapshot checkpoints, writes, registries, and pointers without changing TTLs."""
     return {key: client.dump(key) for key in client.scan_iter(match=f"*{thread_id}*")}
+
+
+@pytest.fixture(params=["checkpoints", "writes"])
+def prune_search_data(
+    request: pytest.FixtureRequest, redis_url: str
+) -> tuple[str, list[RunnableConfig], int]:
+    """Truncate either the global namespace inventory or the last write query."""
+    thread_id = f"prune-search-{_make_ulid()}"
+    namespaces = (
+        [""] * 4 if request.param == "writes" else ["", "", "child:0", "child:0"]
+    )
+    write_counts = [5, 1, 1, 1] if request.param == "writes" else [1] * 4
+    checkpoints = [_config(thread_id, _make_ulid(), ns) for ns in namespaces]
+    # Both pruning APIs operate on the same persisted checkpoint format.
+    with RedisSaver.from_conn_string(redis_url) as saver:
+        saver.setup()
+        for config, write_count in zip(checkpoints, write_counts):
+            saver.put(
+                config,
+                _make_checkpoint(config["configurable"]["checkpoint_id"]),
+                CheckpointMetadata(source="input", step=0, writes={}),
+                {"messages": "1"},
+            )
+            for write in range(write_count):
+                saver.put_writes(
+                    config, [("messages", f"write-{write}")], f"task-{write}"
+                )
+    return thread_id, checkpoints, 5 if request.param == "writes" else 4
+
+
+@pytest.fixture(params=["sync", "async"])
+async def prune(
+    request: pytest.FixtureRequest, redis_url: str
+) -> AsyncIterator[Callable[..., Awaitable[None]]]:
+    """Run the same assertions against either pruning API."""
+    if request.param == "async":
+        async with AsyncRedisSaver.from_conn_string(redis_url) as async_saver:
+            yield async_saver.aprune
+    else:
+        with RedisSaver.from_conn_string(redis_url) as sync_saver:
+            sync_saver.setup()
+
+            async def prune_sync(thread_ids: Sequence[str], **kwargs: Any) -> None:
+                sync_saver.prune(thread_ids, **kwargs)
+
+            yield prune_sync
+
+
+def _expected_pruned_data(
+    before: dict[bytes, Optional[bytes]],
+    checkpoints: list[RunnableConfig],
+    retained_per_ns: int,
+) -> dict[bytes, Optional[bytes]]:
+    if retained_per_ns == 0:
+        return {}
+    configs = [config["configurable"] for config in checkpoints]
+    evicted_ids = []
+    for ns in {config["checkpoint_ns"] for config in configs}:
+        ids = [
+            config["checkpoint_id"].encode()
+            for config in configs
+            if config["checkpoint_ns"] == ns
+        ]
+        evicted_ids.extend(ids[:-retained_per_ns])
+    return {
+        key: value
+        for key, value in before.items()
+        if not any(cp_id in key for cp_id in evicted_ids)
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -492,6 +570,39 @@ def test_shallow_prune_keep_last_0_deletes_all(
 # ---------------------------------------------------------------------------
 # Validation tests
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("strategy", "keep_last", "retained_per_ns", "limit_offset"), PRUNE_SEARCH_CASES
+)
+async def test_prune_requires_complete_search_results(
+    client: Redis,
+    prune: Callable[..., Awaitable[None]],
+    prune_search_data: tuple[str, list[RunnableConfig], int],
+    strategy: str,
+    keep_last: Optional[int],
+    retained_per_ns: int,
+    limit_offset: int,
+) -> None:
+    thread_id, checkpoints, complete_limit = prune_search_data
+    before = _thread_data(client, thread_id)
+    assert before
+    kwargs = dict(
+        strategy=strategy,
+        keep_last=keep_last,
+        max_results=complete_limit + limit_offset,
+    )
+    if limit_offset < 0:
+        with pytest.raises(ValueError, match="max_results") as error:
+            await prune([thread_id], **kwargs)
+        assert thread_id in str(error.value)
+        assert _thread_data(client, thread_id) == before
+        kwargs["max_results"] = complete_limit
+    await prune([thread_id], **kwargs)
+    assert _thread_data(client, thread_id) == _expected_pruned_data(
+        before, checkpoints, retained_per_ns
+    )
 
 
 @pytest.mark.parametrize(

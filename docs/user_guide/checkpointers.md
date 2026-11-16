@@ -150,11 +150,23 @@ an explicit `keep_last` overrides either valid strategy.
 
 #### Search limits and expiration
 
-`max_results` defaults to 10,000 and limits the initial checkpoint search across
-all namespaces in each thread. Set it high enough to include the thread's full
-checkpoint history. A truncated search can miss surviving checkpoints whose
-ancestors must be protected. This parameter is not a deletion batch size or a
-cursor for incremental pruning, and it does not limit dependency-walk reads.
+`max_results` defaults to 10,000 and limits each search: the initial checkpoint
+search across all namespaces in a thread, and each search for an evicted
+checkpoint's writes. Pruning compares the total matches with the returned
+records. If any of these searches is truncated, it raises `ValueError` before
+deleting any keys for that thread. This also applies to explicit deletion and
+calls with a `keep_last` override.
+
+Set the limit high enough to cover both the thread's full checkpoint history and
+the writes for each checkpoint being deleted, then retry. A result count equal
+to the limit is accepted when the complete result set was returned. A too-small
+limit no longer causes partial deletion or silently removes a surviving branch's
+required history.
+
+This parameter is not a deletion batch size or a cursor for incremental pruning,
+and it does not limit dependency-walk reads. Completeness checks apply per thread:
+if a later thread in the same call fails, previously processed threads are not
+rolled back.
 
 Pruning does not refresh TTLs, even with `refresh_on_read=True`. Dependency
 preservation assumes the required checkpoints and writes are still present; it

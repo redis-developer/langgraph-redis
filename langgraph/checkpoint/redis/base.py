@@ -29,6 +29,7 @@ from langgraph.checkpoint.base import (
 )
 from langgraph.checkpoint.serde.base import SerializerProtocol
 from langgraph.checkpoint.serde.types import ChannelProtocol
+from redis.commands.search.result import Result
 from redis.exceptions import ResponseError
 from redisvl.query import FilterQuery
 from redisvl.query.filter import Tag
@@ -1097,6 +1098,19 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         if strategy not in ("keep_latest", "delete"):
             raise ValueError(
                 f"strategy must be 'keep_latest' or 'delete', got {strategy!r}"
+            )
+
+    @staticmethod
+    def _validate_prune_search_result(
+        result: Result, *, thread_id: str, max_results: int
+    ) -> None:
+        """Reject partial search results before deleting any keys for this thread."""
+        returned = len(result.docs)
+        if result.total > returned:
+            raise ValueError(
+                f"Cannot safely prune thread {thread_id!r}: "
+                f"search returned {returned} of {result.total} records "
+                f"(max_results={max_results}). Increase max_results and retry."
             )
 
     def _make_redis_checkpoint_key(

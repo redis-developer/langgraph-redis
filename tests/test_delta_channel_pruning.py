@@ -44,6 +44,12 @@ ANCESTRY_CYCLE_CASES = (
     pytest.param(2, 6, id="support-ancestor-cycle"),
 )
 
+FORK_RETENTION_CASES = (
+    pytest.param(False, True, id="shared-snapshot"),
+    pytest.param(True, True, id="different-snapshots"),
+    pytest.param(True, False, id="truncated-fork-history"),
+)
+
 
 @pytest.fixture
 def saver(redis_url: str) -> Iterator[RedisSaver]:
@@ -498,10 +504,10 @@ async def test_aprune_preserves_independent_delta_snapshots(
 
 
 @pytest.mark.parametrize(
-    "separate_snapshots", [False, True], ids=["shared-snapshot", "different-snapshots"]
+    ("separate_snapshots", "complete_search"), FORK_RETENTION_CASES
 )
 def test_prune_preserves_forked_delta_history(
-    saver: RedisSaver, separate_snapshots: bool
+    saver: RedisSaver, separate_snapshots: bool, complete_search: bool
 ) -> None:
     thread_id = f"delta-fork-{uuid4()}"
     config = _config(thread_id)
@@ -524,11 +530,21 @@ def test_prune_preserves_forked_delta_history(
     graph.invoke({"value": 30}, fork, durability="sync")
     branch_b = graph.get_state(config).config
     before = list(saver.list(config))
+    if not complete_search:
+        # Three branch-B checkpoints are omitted; the separate-snapshot case
+        # reproduces max_results=12 deleting the seed for [1, 2, 30].
+        with pytest.raises(ValueError, match="max_results"):
+            saver.prune([thread_id], max_results=len(before) - 3)
+        assert [cp.config for cp in saver.list(config)] == [cp.config for cp in before]
+        _assert_branch_state(graph.get_state(config).values, [1, 2, 30])
+        saver.prune([thread_id], max_results=len(before))
+        _assert_branch_state(graph.get_state(config).values, [1, 2, 30])
+        return
     expected = _expected_fork_retention(
         before, fork, (branch_a, branch_b), separate_snapshots=separate_snapshots
     )
 
-    saver.prune([thread_id], keep_last=4)
+    saver.prune([thread_id], keep_last=4, max_results=len(before))
 
     assert [cp.config for cp in saver.list(config)] == expected
     a_values = [1, 2, 3, 4] if separate_snapshots else [1, 2, 3]
@@ -542,10 +558,10 @@ def test_prune_preserves_forked_delta_history(
 
 
 @pytest.mark.parametrize(
-    "separate_snapshots", [False, True], ids=["shared-snapshot", "different-snapshots"]
+    ("separate_snapshots", "complete_search"), FORK_RETENTION_CASES
 )
 async def test_aprune_preserves_forked_delta_history(
-    async_saver: AsyncRedisSaver, separate_snapshots: bool
+    async_saver: AsyncRedisSaver, separate_snapshots: bool, complete_search: bool
 ) -> None:
     thread_id = f"delta-afork-{uuid4()}"
     config = _config(thread_id)
@@ -568,11 +584,20 @@ async def test_aprune_preserves_forked_delta_history(
     await graph.ainvoke({"value": 30}, fork, durability="sync")
     branch_b = (await graph.aget_state(config)).config
     before = [cp async for cp in async_saver.alist(config)]
+    if not complete_search:
+        with pytest.raises(ValueError, match="max_results"):
+            await async_saver.aprune([thread_id], max_results=len(before) - 3)
+        after = [cp async for cp in async_saver.alist(config)]
+        assert [cp.config for cp in after] == [cp.config for cp in before]
+        _assert_branch_state((await graph.aget_state(config)).values, [1, 2, 30])
+        await async_saver.aprune([thread_id], max_results=len(before))
+        _assert_branch_state((await graph.aget_state(config)).values, [1, 2, 30])
+        return
     expected = _expected_fork_retention(
         before, fork, (branch_a, branch_b), separate_snapshots=separate_snapshots
     )
 
-    await async_saver.aprune([thread_id], keep_last=4)
+    await async_saver.aprune([thread_id], keep_last=4, max_results=len(before))
 
     after = [cp async for cp in async_saver.alist(config)]
     assert [cp.config for cp in after] == expected

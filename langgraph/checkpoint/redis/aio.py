@@ -2078,15 +2078,16 @@ class AsyncRedisSaver(
                 ``strategy``.  Use ``keep_last=0`` to remove all checkpoints.
                 This is not a strict storage cap: DeltaChannel dependencies may
                 cause more checkpoints to remain, including the entire chain.
-            max_results: Maximum number of checkpoints fetched from the index
-                per thread in a single query. Defaults to 10 000. Set high enough
-                to include all checkpoints across the thread's namespaces; a
-                truncated search can miss dependencies of unreturned checkpoints.
+            max_results: Maximum results per checkpoint or write-cleanup search.
+                Defaults to 10 000. Must cover all checkpoints across the thread's
+                namespaces and all writes for each checkpoint being deleted.
+                A truncated search raises before deleting keys for that thread.
                 This does not bound ancestor reads or the number of deletions.
 
         Raises:
             ValueError: If ``strategy`` is not ``"keep_latest"`` or ``"delete"``,
-                even when ``keep_last`` is provided.
+                even when ``keep_last`` is provided, or if a checkpoint or
+                write-cleanup search is truncated by ``max_results``.
         """
         self._validate_prune_strategy(strategy)
 
@@ -2115,6 +2116,11 @@ class AsyncRedisSaver(
                 num_results=max_results,
             )
             checkpoint_results = await self.checkpoints_index.search(checkpoint_query)
+            self._validate_prune_search_result(
+                checkpoint_results,
+                thread_id=thread_id,
+                max_results=max_results,
+            )
 
             if not checkpoint_results.docs:
                 continue
@@ -2191,6 +2197,11 @@ class AsyncRedisSaver(
                     num_results=max_results,
                 )
                 writes_results = await self.checkpoint_writes_index.search(writes_query)
+                self._validate_prune_search_result(
+                    writes_results,
+                    thread_id=thread_id,
+                    max_results=max_results,
+                )
                 for wdoc in writes_results.docs:
                     keys_to_delete.append(
                         self._make_redis_checkpoint_writes_key(
