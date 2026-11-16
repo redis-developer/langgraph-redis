@@ -2077,7 +2077,13 @@ class AsyncRedisSaver(
                 Delta-channel dependencies may cause more checkpoints to remain.
             max_results: Maximum number of checkpoints fetched from the index
                 per thread in a single query.  Defaults to 10 000.
+
+        Raises:
+            ValueError: If ``strategy`` is not ``"keep_latest"`` or ``"delete"``,
+                even when ``keep_last`` is provided.
         """
+        self._validate_prune_strategy(strategy)
+
         # Resolve keep_last from strategy if not explicitly provided
         if keep_last is None:
             if strategy == "delete":
