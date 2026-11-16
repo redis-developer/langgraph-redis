@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import math
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Iterable, Iterator, Optional, Sequence, cast
@@ -24,6 +25,7 @@ from langgraph.store.base import (
 from redis import Redis
 from redis.cluster import RedisCluster as SyncRedisCluster
 from redis.commands.search.query import Query
+from redisvl.exceptions import RedisSearchError
 from redisvl.index import SearchIndex
 from redisvl.query import FilterQuery, VectorQuery
 from redisvl.redis.connection import RedisConnectionFactory
@@ -33,13 +35,18 @@ from ulid import ULID
 from langgraph.checkpoint.redis.util import unwrap_connection_errors
 from langgraph.store.redis.aio import AsyncRedisStore
 from langgraph.store.redis.base import (
+    REBUILD_WARNING,
     REDIS_KEY_SEPARATOR,
+    REINDEX_WAIT_SECONDS,
     STORE_PREFIX,
     STORE_VECTOR_PREFIX,
     BaseRedisStore,
     RedisDocument,
     _decode_ns,
     _group_ops,
+    _index_is_current,
+    _indexing_done,
+    _is_missing_index,
     _namespace_to_text,
     _row_to_item,
     _row_to_search_item,
@@ -139,14 +146,80 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
                 client.connection_pool.disconnect()
 
     def setup(self) -> None:
-        """Initialize store indices."""
+        """Create the store's search indexes, or bring existing ones up to date.
+
+        Safe to call on every start. An index created by a release before the
+        namespace field used STOPWORDS 0 / NOSTEM is rebuilt once: its
+        definition is dropped and recreated, the stored items are kept, and
+        this waits (up to ``REINDEX_WAIT_SECONDS``) for Redis to re-index them.
+        Pause other writers to the store while that one-time rebuild runs.
+        """
         # Detect if we're connected to a Redis cluster
         self._detect_cluster_mode()
 
         with unwrap_connection_errors():
-            self.store_index.create(overwrite=False)
+            self._create_or_rebuild_index(self.store_index)
             if self.index_config:
-                self.vector_index.create(overwrite=False)
+                self._create_or_rebuild_index(self.vector_index)
+
+    def _create_or_rebuild_index(self, index: SearchIndex) -> None:
+        """Create ``index``, or rebuild it if an earlier release created it
+        without STOPWORDS 0 / NOSTEM on ``prefix``, then wait for indexing.
+
+        The rebuild drops only the index definition (never the documents) and
+        Redis re-indexes the existing documents in the background. Several
+        processes may run this at once: whichever drops or creates the index
+        first wins, and the others fall through to waiting on it.
+        """
+        try:
+            outdated = index.exists() and not _index_is_current(index.info())
+        except RedisSearchError as e:
+            if not _is_missing_index(e):
+                raise
+            outdated = False  # dropped by another process since exists()
+        if outdated:
+            logger.warning(REBUILD_WARNING, index.name)
+            try:
+                index.delete(drop=False)
+            except RedisSearchError as e:
+                if not _is_missing_index(e):
+                    raise
+                # Another process dropped it first; create it below.
+        try:
+            index.create(overwrite=False)  # no-op if it already exists
+        except RedisSearchError:
+            # Another process created it between the exists() check and FT.CREATE.
+            if not index.exists():
+                raise
+        self._wait_for_indexing(index)
+
+    def _wait_for_indexing(self, index: SearchIndex) -> None:
+        """Wait (up to REINDEX_WAIT_SECONDS) for Redis to finish indexing the
+        documents under ``index``, so the first operations see every item."""
+        deadline = time.monotonic() + REINDEX_WAIT_SECONDS
+        while True:
+            try:
+                if _indexing_done(index.info()):
+                    return
+                missing = False
+            except RedisSearchError as e:
+                if not _is_missing_index(e):
+                    raise
+                missing = True  # another process is between drop and create
+            if time.monotonic() > deadline:
+                if missing:
+                    raise RedisSearchError(
+                        f"Search index {index.name!r} still does not exist "
+                        f"{REINDEX_WAIT_SECONDS:.0f}s after setup() created it."
+                    )
+                logger.warning(
+                    "Search index %r is still indexing after %.0fs; queries "
+                    "may miss items until it finishes.",
+                    index.name,
+                    REINDEX_WAIT_SECONDS,
+                )
+                return
+            time.sleep(0.05)
 
     def batch(self, ops: Iterable[Op]) -> list[Result]:
         """Execute batch of operations."""

@@ -56,6 +56,69 @@ REDIS_KEY_SEPARATOR = ":"
 STORE_PREFIX = "store"
 STORE_VECTOR_PREFIX = "store_vectors"
 
+
+# The namespace is indexed as TEXT so prefix/suffix queries work, but it is an
+# identifier, not prose: with the index defaults RediSearch drops stopwords
+# ("a", "the", "of", ...) and stems terms, so ("a",) is never indexed under its
+# namespace, ``@prefix:(a) @key:{k}`` collapses to ``@key:{k}`` (matching every
+# namespace), and ("running",) matches ("runs",). Every index carrying this
+# field is therefore created with STOPWORDS 0 and NOSTEM on it.
+def _prefix_field() -> Dict[str, Any]:
+    return {"name": "prefix", "type": "text", "attrs": {"no_stem": True}}
+
+
+def _index_is_current(info: Dict[str, Any]) -> bool:
+    """Whether an existing index (its FT.INFO) was created with STOPWORDS 0 and
+    NOSTEM on ``prefix``. Indexes from earlier releases were not, and
+    ``setup()`` rebuilds them."""
+    stopwords = info.get("stopwords_list")
+    if stopwords is None or len(stopwords) > 0:
+        return False
+    for attr in info.get("attributes", []):
+        attr = [str(a) for a in attr]
+        if "attribute" in attr and attr[attr.index("attribute") + 1] == "prefix":
+            return "NOSTEM" in attr
+    return False
+
+
+# How RediSearch words "this index does not exist" across versions.
+_MISSING_INDEX_FRAGMENTS = (
+    "unknown index name",
+    "no such index",
+    "search_index_not_found",
+    "index not found",
+)
+
+
+def _is_missing_index(exc: Exception) -> bool:
+    """Whether a redisvl ``RedisSearchError`` means the index does not exist.
+
+    redisvl wraps every failure, connection errors included, in
+    ``RedisSearchError``; only this one is a race with another process's
+    rebuild. The wrapped Redis error is read, since the wrapper's own message
+    includes the index name."""
+    cause = exc.__cause__ if exc.__cause__ is not None else exc
+    message = str(cause).lower()
+    return any(fragment in message for fragment in _MISSING_INDEX_FRAGMENTS)
+
+
+def _indexing_done(info: Dict[str, Any]) -> bool:
+    return int(info.get("indexing", 0) or 0) == 0
+
+
+# Logged when setup() rebuilds an index from an earlier release.
+REBUILD_WARNING = (
+    "Rebuilding search index %r: it predates STOPWORDS 0 / NOSTEM on the "
+    "namespace field. Stored items are kept and re-indexed in the background. "
+    "Until that finishes, put() and delete() from other processes can miss "
+    "existing items (leaving duplicates or undeleted items), so pause other "
+    "writers to this store during the upgrade."
+)
+
+# How long setup() waits for Redis to re-index existing documents after it
+# rebuilds an outdated index, before carrying on with a warning.
+REINDEX_WAIT_SECONDS = 60.0
+
 # Schemas for Redis Search indices
 SCHEMAS = [
     {
@@ -63,9 +126,10 @@ SCHEMAS = [
             "name": "store",
             "prefix": STORE_PREFIX + REDIS_KEY_SEPARATOR,
             "storage_type": "json",
+            "stopwords": [],
         },
         "fields": [
-            {"name": "prefix", "type": "text"},
+            _prefix_field(),
             {"name": "key", "type": "tag"},
             {"name": "created_at", "type": "numeric"},
             {"name": "updated_at", "type": "numeric"},
@@ -78,9 +142,10 @@ SCHEMAS = [
             "name": "store_vectors",
             "prefix": STORE_VECTOR_PREFIX + REDIS_KEY_SEPARATOR,
             "storage_type": "json",
+            "stopwords": [],
         },
         "fields": [
-            {"name": "prefix", "type": "text"},
+            _prefix_field(),
             {"name": "key", "type": "tag"},
             {"name": "field_name", "type": "tag"},
             {"name": "embedding", "type": "vector"},
@@ -270,9 +335,10 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
                 "name": self.store_prefix,
                 "prefix": self.store_prefix + REDIS_KEY_SEPARATOR,
                 "storage_type": "json",
+                "stopwords": [],
             },
             "fields": [
-                {"name": "prefix", "type": "text"},
+                _prefix_field(),
                 {"name": "key", "type": "tag"},
                 {"name": "created_at", "type": "numeric"},
                 {"name": "updated_at", "type": "numeric"},
@@ -297,9 +363,10 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
                 "name": self.vector_prefix,
                 "prefix": self.vector_prefix + REDIS_KEY_SEPARATOR,
                 "storage_type": vector_storage_type,
+                "stopwords": [],
             },
             "fields": [
-                {"name": "prefix", "type": "text"},
+                _prefix_field(),
                 {"name": "key", "type": "tag"},
                 {"name": "field_name", "type": "tag"},
                 {"name": "embedding", "type": "vector"},
