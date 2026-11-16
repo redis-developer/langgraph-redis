@@ -2063,6 +2063,11 @@ class AsyncRedisSaver(
         A cycle in required ancestry raises ``ValueError`` before any keys for
         that thread are deleted.
 
+        Prune only inactive threads and keep Search configuration stable during
+        the call. Search ON_TIMEOUT must be FAIL; the saver verifies it with
+        FT.CONFIG GET ON_TIMEOUT before pruning and never changes it. The Redis
+        user needs permission for this read on every node of a cluster.
+
         Each namespace (root ``""`` and any subgraph namespaces) is treated as
         an independent checkpoint chain.  Channel values are stored inline
         within each checkpoint document, so they are automatically removed
@@ -2087,7 +2092,9 @@ class AsyncRedisSaver(
         Raises:
             ValueError: If ``strategy`` is not ``"keep_latest"`` or ``"delete"``,
                 even when ``keep_last`` is provided, or if a checkpoint or
-                write-cleanup search is truncated by ``max_results``.
+                write-cleanup search is truncated by ``max_results``, or Search
+                ON_TIMEOUT is not FAIL (or cannot be verified from its response).
+            ResponseError: If reading Search timeout configuration fails.
         """
         self._validate_prune_strategy(strategy)
 
@@ -2105,6 +2112,20 @@ class AsyncRedisSaver(
             raise ValueError(f"``keep_last`` must be >= 0, got {keep_last}")
         if max_results < 1:
             raise ValueError(f"``max_results`` must be >= 1, got {max_results}")
+
+        # A timed-out search can report total == len(docs) for partial results.
+        # Read the policy on each call; never mutate deployment-wide settings.
+        timeout_config = await self._redis.execute_command(
+            "FT.CONFIG",
+            "GET",
+            "ON_TIMEOUT",
+            **(
+                {"target_nodes": "all"}
+                if isinstance(self._redis, AsyncRedisCluster)
+                else {}
+            ),
+        )
+        self._validate_prune_search_timeout(timeout_config)
 
         for thread_id in thread_ids:
             storage_safe_thread_id = to_storage_safe_id(thread_id)
@@ -2191,6 +2212,7 @@ class AsyncRedisSaver(
                 writes_query = FilterQuery(
                     filter_expression=(
                         (Tag("thread_id") == storage_safe_thread_id)
+                        & (Tag("checkpoint_ns") == checkpoint_ns)
                         & (Tag("checkpoint_id") == checkpoint_id)
                     ),
                     return_fields=["checkpoint_ns", "checkpoint_id", "task_id", "idx"],

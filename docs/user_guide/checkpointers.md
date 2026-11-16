@@ -150,6 +150,30 @@ an explicit `keep_last` overrides either valid strategy.
 
 #### Search limits and expiration
 
+Prune only inactive threads: checkpoint creation, updates, and other pruning calls
+for those threads must be paused until pruning finishes. The search inventory and
+deletions are not atomic with concurrent writers. Keep Search configuration stable
+during pruning as well.
+
+Pruning requires Search's timeout policy to be `FAIL`. With `RETURN` (the default)
+or `RETURN_STRICT`, a timed-out search can report a partial set whose total matches
+its returned count, so the count check alone cannot establish completeness.
+An administrator must configure `search-on-timeout FAIL` on Redis 8, or
+`ON_TIMEOUT FAIL` on older Redis Stack deployments, before using pruning.
+For example, on Redis 8:
+
+```text
+CONFIG SET search-on-timeout FAIL
+```
+
+This is a deployment-wide setting and also affects other Search users. The saver
+never changes it. Each `prune()` / `aprune()` call verifies it using
+`FT.CONFIG GET ON_TIMEOUT` (supported by Redis Stack and Redis 8), on every node
+known to a cluster client. The application's Redis user needs permission for that
+read. A non-`FAIL` or missing policy raises `ValueError`; configuration-read errors
+propagate. These checks happen before any thread is pruned. Under `FAIL`, a search
+timeout raises before any keys for the affected thread are deleted.
+
 `max_results` defaults to 10,000 and limits each search: the initial checkpoint
 search across all namespaces in a thread, and each search for an evicted
 checkpoint's writes. Pruning compares the total matches with the returned
@@ -167,6 +191,10 @@ This parameter is not a deletion batch size or a cursor for incremental pruning,
 and it does not limit dependency-walk reads. Completeness checks apply per thread:
 if a later thread in the same call fails, previously processed threads are not
 rolled back.
+
+Write cleanup uses the full checkpoint identity: thread ID, namespace, and
+checkpoint ID. Reusing a checkpoint ID in another namespace does not remove that
+namespace's pending writes.
 
 Pruning does not refresh TTLs, even with `refresh_on_read=True`. Dependency
 preservation assumes the required checkpoints and writes are still present; it

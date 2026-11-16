@@ -1101,6 +1101,32 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
             )
 
     @staticmethod
+    def _validate_prune_search_timeout(config: Any) -> None:
+        """Require complete searches, including on every queried cluster node.
+
+        FT.CONFIG GET returns pairs with RESP2 and a mapping with RESP3.
+        Cluster clients can wrap either response in a node-name mapping.
+        """
+        if isinstance(config, (list, tuple)):
+            config = dict(config)
+        if not isinstance(config, dict) or not config:
+            raise ValueError(
+                "Cannot safely prune: unable to verify Search ON_TIMEOUT=FAIL."
+            )
+        for value in config.values():
+            if isinstance(value, (dict, list, tuple)):
+                BaseRedisSaver._validate_prune_search_timeout(value)
+            elif (
+                not isinstance(value, (str, bytes))
+                or safely_decode(value).lower() != "fail"
+            ):
+                raise ValueError(
+                    "Cannot safely prune: Search ON_TIMEOUT must be FAIL "
+                    "(search-on-timeout on Redis 8). Partial results on timeout "
+                    "cannot reliably be detected. Configure FAIL before retrying."
+                )
+
+    @staticmethod
     def _validate_prune_search_result(
         result: Result, *, thread_id: str, max_results: int
     ) -> None:

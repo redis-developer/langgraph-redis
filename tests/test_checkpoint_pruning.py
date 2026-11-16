@@ -15,13 +15,14 @@ Tests cover:
 """
 
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 from typing import Any, Optional
 
 import pytest
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import Checkpoint, CheckpointMetadata
 from redis import Redis
+from redis.exceptions import NoPermissionError, ResponseError
 from redisvl.query import FilterQuery
 from redisvl.query.filter import Tag
 from ulid import ULID
@@ -30,6 +31,7 @@ from langgraph.checkpoint.redis import RedisSaver
 from langgraph.checkpoint.redis.aio import AsyncRedisSaver
 from langgraph.checkpoint.redis.ashallow import AsyncShallowRedisSaver
 from langgraph.checkpoint.redis.shallow import ShallowRedisSaver
+from langgraph.checkpoint.redis.util import safely_decode
 
 INVALID_STRATEGIES = ("keep_last", "Delete", "KEEP_LATEST", "zzz", "", "keep_latest ")
 PRUNE_SEARCH_CASES = (
@@ -79,9 +81,144 @@ def _thread_data(client: Redis, thread_id: str) -> dict[bytes, Optional[bytes]]:
     return {key: client.dump(key) for key in client.scan_iter(match=f"*{thread_id}*")}
 
 
+@pytest.fixture
+def saver(client: Redis) -> Iterator[RedisSaver]:
+    """Reuse the Redis client for seeding and inspecting persisted checkpoints."""
+    with RedisSaver.from_conn_string(redis_client=client) as saver:
+        saver.setup()
+        yield saver
+
+
+def _put_checkpoint_with_writes(
+    saver: RedisSaver, config: RunnableConfig, write_count: int = 1
+) -> None:
+    """Seed the shared storage format used by both pruning APIs."""
+    saver.put(
+        config,
+        _make_checkpoint(config["configurable"]["checkpoint_id"]),
+        CheckpointMetadata(source="input", step=0, writes={}),
+        {"messages": "1"},
+    )
+    for write in range(write_count):
+        saver.put_writes(config, [("messages", f"write-{write}")], f"task-{write}")
+
+
+def _get_search_timeout_policy(client: Redis) -> str:
+    config = dict(client.execute_command("FT.CONFIG", "GET", "ON_TIMEOUT"))
+    return safely_decode(next(iter(config.values()))).lower()
+
+
+@pytest.mark.parametrize(
+    "other_node",
+    [
+        pytest.param({"ON_TIMEOUT": "FAIL"}, id="all-fail"),
+        pytest.param({b"ON_TIMEOUT": b"return"}, id="mixed-policy"),
+        pytest.param({}, id="missing-policy"),
+        pytest.param({"ON_TIMEOUT": None}, id="invalid-policy"),
+    ],
+)
+def test_prune_requires_fail_policy_on_every_node(other_node: dict[Any, Any]) -> None:
+    """Validate mixed RESP2/RESP3 replies returned by cluster clients."""
+    config = {"node-a": [[b"ON_TIMEOUT", b"fail"]], "node-b": other_node}
+    if other_node == {"ON_TIMEOUT": "FAIL"}:
+        RedisSaver._validate_prune_search_timeout(config)
+    else:
+        with pytest.raises(ValueError, match="ON_TIMEOUT.*FAIL"):
+            RedisSaver._validate_prune_search_timeout(config)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("evicted_ns,retained_ns", [("", "child:0"), ("child:0", "")])
+async def test_prune_preserves_writes_for_same_id_in_another_namespace(
+    saver: RedisSaver,
+    client: Redis,
+    prune: Callable[..., Awaitable[None]],
+    evicted_ns: str,
+    retained_ns: str,
+) -> None:
+    thread_id = f"prune-namespaces-{_make_ulid()}"
+    shared_id, latest_id = _make_ulid(), _make_ulid()
+    evicted = _config(thread_id, shared_id, evicted_ns)
+    retained = _config(thread_id, shared_id, retained_ns)
+    latest = _config(thread_id, latest_id, evicted_ns)
+    for config in (evicted, retained, latest):
+        _put_checkpoint_with_writes(saver, config)
+    before = _thread_data(client, thread_id)
+    assert saver._key_registry is not None
+    evicted_keys = (
+        saver._make_redis_checkpoint_key(thread_id, evicted_ns, shared_id).encode(),
+        saver._make_redis_checkpoint_writes_key(
+            thread_id, evicted_ns, shared_id, "task-0", 0
+        ).encode(),
+        saver._key_registry.make_write_keys_zset_key(
+            thread_id, evicted_ns, shared_id
+        ).encode(),
+    )
+
+    await prune([thread_id])
+
+    assert saver.get_tuple(evicted) is None
+    for config in (retained, latest):
+        checkpoint = saver.get_tuple(config)
+        assert checkpoint is not None
+        assert checkpoint.pending_writes == [("task-0", "messages", "write-0")]
+    assert _thread_data(client, thread_id) == {
+        key: value for key, value in before.items() if key not in evicted_keys
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("policy", "error", "message"),
+    [
+        ("return", ValueError, "ON_TIMEOUT.*FAIL"),
+        ("return-strict", ValueError, "ON_TIMEOUT.*FAIL"),
+        ("unreadable", NoPermissionError, "FT.CONFIG|ft.config"),
+    ],
+)
+@pytest.mark.parametrize("strategy", ["keep_latest", "delete"])
+async def test_prune_rejects_unverifiable_timeout_policy(
+    saver: RedisSaver,
+    client: Redis,
+    prune: Callable[..., Awaitable[None]],
+    policy: str,
+    error: type[Exception],
+    message: str,
+    strategy: str,
+) -> None:
+    thread_id = f"prune-timeout-{_make_ulid()}"
+    for _ in range(2):
+        _put_checkpoint_with_writes(saver, _config(thread_id, _make_ulid()))
+    before = _thread_data(client, thread_id)
+    original = _get_search_timeout_policy(client)
+    try:
+        if policy == "unreadable":
+            client.execute_command("ACL", "SETUSER", "default", "-ft.config")
+        else:
+            try:
+                if policy == "return-strict":
+                    client.config_set("search-on-timeout", policy.upper())
+                else:
+                    client.execute_command("FT.CONFIG", "SET", "ON_TIMEOUT", policy)
+            except ResponseError:
+                if policy == "return-strict":
+                    pytest.skip("RETURN_STRICT requires Redis 8.10 or later")
+                raise
+        with pytest.raises(error, match=message):
+            await prune([thread_id], strategy=strategy)
+        assert _thread_data(client, thread_id) == before
+        # The saver must never change deployment-wide configuration itself.
+        if policy != "unreadable":
+            assert _get_search_timeout_policy(client) == policy
+    finally:
+        if policy == "unreadable":
+            client.execute_command("ACL", "SETUSER", "default", "+ft.config")
+        client.execute_command("FT.CONFIG", "SET", "ON_TIMEOUT", original)
+
+
 @pytest.fixture(params=["checkpoints", "writes"])
 def prune_search_data(
-    request: pytest.FixtureRequest, redis_url: str
+    request: pytest.FixtureRequest, saver: RedisSaver
 ) -> tuple[str, list[RunnableConfig], int]:
     """Truncate either the global namespace inventory or the last write query."""
     thread_id = f"prune-search-{_make_ulid()}"
@@ -90,20 +227,8 @@ def prune_search_data(
     )
     write_counts = [5, 1, 1, 1] if request.param == "writes" else [1] * 4
     checkpoints = [_config(thread_id, _make_ulid(), ns) for ns in namespaces]
-    # Both pruning APIs operate on the same persisted checkpoint format.
-    with RedisSaver.from_conn_string(redis_url) as saver:
-        saver.setup()
-        for config, write_count in zip(checkpoints, write_counts):
-            saver.put(
-                config,
-                _make_checkpoint(config["configurable"]["checkpoint_id"]),
-                CheckpointMetadata(source="input", step=0, writes={}),
-                {"messages": "1"},
-            )
-            for write in range(write_count):
-                saver.put_writes(
-                    config, [("messages", f"write-{write}")], f"task-{write}"
-                )
+    for config, write_count in zip(checkpoints, write_counts):
+        _put_checkpoint_with_writes(saver, config, write_count)
     return thread_id, checkpoints, 5 if request.param == "writes" else 4
 
 
@@ -113,10 +238,14 @@ async def prune(
 ) -> AsyncIterator[Callable[..., Awaitable[None]]]:
     """Run the same assertions against either pruning API."""
     if request.param == "async":
-        async with AsyncRedisSaver.from_conn_string(redis_url) as async_saver:
+        async with AsyncRedisSaver.from_conn_string(
+            redis_url, connection_args={"protocol": 2}
+        ) as async_saver:
             yield async_saver.aprune
     else:
-        with RedisSaver.from_conn_string(redis_url) as sync_saver:
+        with RedisSaver.from_conn_string(
+            redis_url, connection_args={"protocol": 2}
+        ) as sync_saver:
             sync_saver.setup()
 
             async def prune_sync(thread_ids: Sequence[str], **kwargs: Any) -> None:
