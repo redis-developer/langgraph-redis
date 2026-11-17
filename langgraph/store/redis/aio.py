@@ -218,7 +218,9 @@ class AsyncRedisStore(
                 for key, doc_id in backfill:
                     try:
                         outcomes.append(
-                            await self._redis.json().set(key, path, doc_id, nx=True)
+                            await self._redis.json().set(  # type: ignore[misc]
+                                key, path, doc_id, nx=True
+                            )
                         )
                     except ResponseError as e:
                         outcomes.append(e)
