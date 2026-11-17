@@ -1,8 +1,8 @@
 """RedisStore / AsyncRedisStore reads that must see every matching document.
 
 RediSearch returns 10 documents unless a query asks for more. #31 fixed this for
-search(); these tests cover list_namespaces() and batched gets, which run their own
-queries against the same index and page through them sorted on a unique field.
+search(); these tests cover list_namespaces(), which pages through its query sorted
+on a unique field, and batched gets, which ask for one result per key.
 """
 
 from __future__ import annotations
@@ -10,13 +10,21 @@ from __future__ import annotations
 import asyncio
 import copy
 import time
+from contextlib import contextmanager
 
 import pytest
 from langgraph.store.base import GetOp, PutOp
+from redis import Redis
 from redis.exceptions import ResponseError
+from redisvl.exceptions import RedisSearchError
 from redisvl.index import SearchIndex
 
-from langgraph.store.redis import AsyncRedisStore, RedisStore
+from langgraph.store.redis import (
+    AsyncRedisStore,
+    RedisStore,
+    StoreIndexNotReadyError,
+    StoreSetupRequiredError,
+)
 from langgraph.store.redis.base import STORE_SORT_FIELD
 
 
@@ -277,43 +285,78 @@ async def test_async_setup_adds_the_sort_field_to_an_older_index_and_its_documen
         await astore.setup()
 
 
-def test_reads_before_setup_on_an_older_index_add_the_sort_field_first(
-    redis_url: str,
-) -> None:
-    namespaces = _user_namespaces(1005)
+def _index_has_sort_field(client, index_name: str) -> bool:
+    attributes = client.ft(index_name).info()["attributes"]
+    return any(
+        STORE_SORT_FIELD in [v.decode() if isinstance(v, bytes) else v for v in a]
+        for a in attributes
+    )
+
+
+def _older_store_with(redis_url: str, namespaces) -> list[str]:
     with RedisStore.from_conn_string(redis_url) as old:
         old.setup()
         old.batch([PutOp(ns, "profile", {"name": ns[-1]}) for ns in namespaces])
-        keys = _make_pre_sort_field(old)
+        return _make_pre_sort_field(old)
 
-    # Upgraded, but setup() not called again. Unsorted offset pages can repeat
-    # or skip documents, so the first read adds the field before paging.
-    with RedisStore.from_conn_string(redis_url) as store:
-        assert store.list_namespaces(limit=2000) == sorted(namespaces)
-        assert _sort_field_values(store._redis, keys) == {
-            k: [k.split(":", 1)[1]] for k in keys
-        }
+
+def test_list_namespaces_on_an_older_index_requires_setup(redis_url: str) -> None:
+    namespaces = _user_namespaces(1005)
+    keys = _older_store_with(redis_url, namespaces)
+
+    # Constructed directly: from_conn_string() is not involved, and nothing here
+    # calls setup() until the test does.
+    client = Redis.from_url(redis_url)
+    try:
+        store = RedisStore(client)
+        index_name = store.store_index.name
+        assert not _index_has_sort_field(client, index_name)
+
+        with pytest.raises(StoreSetupRequiredError, match=r"call setup\(\)") as exc:
+            store.list_namespaces(limit=2000)
+        assert index_name in str(exc.value)
+        # The read changed nothing.
+        assert not _index_has_sort_field(client, index_name)
+        assert set(map(str, _sort_field_values(client, keys).values())) == {"[]"}
+
+        # Gets do not use the sort field and work before setup().
         results = store.batch([GetOp(ns, "profile") for ns in namespaces])
         assert [r.value["name"] for r in results] == [ns[-1] for ns in namespaces]
 
+        store.setup()
+        assert _index_has_sort_field(client, index_name)
+        assert store.list_namespaces(limit=2000) == sorted(namespaces)
+    finally:
+        client.close()
+
 
 @pytest.mark.asyncio
-async def test_async_reads_before_setup_on_an_older_index_add_the_sort_field_first(
+async def test_alist_namespaces_on_an_older_index_requires_setup(
     redis_url: str,
 ) -> None:
     namespaces = _user_namespaces(1005)
-    with RedisStore.from_conn_string(redis_url) as old:
-        old.setup()
-        old.batch([PutOp(ns, "profile", {"name": ns[-1]}) for ns in namespaces])
-        keys = _make_pre_sort_field(old)
+    keys = _older_store_with(redis_url, namespaces)
 
-    async with AsyncRedisStore.from_conn_string(redis_url) as astore:
-        assert await astore.alist_namespaces(limit=2000) == sorted(namespaces)
-        client = astore._redis
-        values = {k: await client.json().get(k, f"$.{STORE_SORT_FIELD}") for k in keys}
-        assert values == {k: [k.split(":", 1)[1]] for k in keys}
-        results = await astore.abatch([GetOp(ns, "profile") for ns in namespaces])
-        assert [r.value["name"] for r in results] == [ns[-1] for ns in namespaces]
+    # The direct constructor: from_conn_string() would call setup() itself.
+    async with AsyncRedisStore(redis_url) as astore:
+        index_name = astore.store_index.name
+        client = Redis.from_url(redis_url)
+        try:
+            assert not _index_has_sort_field(client, index_name)
+
+            with pytest.raises(StoreSetupRequiredError, match=r"call setup\(\)"):
+                await astore.alist_namespaces(limit=2000)
+            assert not _index_has_sort_field(client, index_name)
+            assert set(map(str, _sort_field_values(client, keys).values())) == {"[]"}
+
+            results = await astore.abatch([GetOp(ns, "profile") for ns in namespaces])
+            assert [r.value["name"] for r in results] == [ns[-1] for ns in namespaces]
+
+            await astore.setup()
+            assert _index_has_sort_field(client, index_name)
+            assert await astore.alist_namespaces(limit=2000) == sorted(namespaces)
+        finally:
+            client.close()
 
 
 def test_setup_when_another_process_added_the_field_first(
@@ -410,3 +453,372 @@ def test_setup_raises_when_the_backfill_fails_on_a_document_that_exists(
         _aggregate_also_returning(store, monkeypatch, "store:01NOTAJSONDOCUMENT000000")
         with pytest.raises(ResponseError):
             store.setup()
+
+
+# batched gets: one query per chunk of keys
+
+
+def test_batched_gets_send_one_query_per_chunk_of_distinct_keys(
+    store: RedisStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store.batch([PutOp(("docs",), f"k{i:04d}", {"i": i}) for i in range(1005)])
+    store.put(("notes",), "k0000", {"i": -1})
+
+    sizes: list[int] = []
+    query = store.store_index.query
+
+    def counting_query(q):
+        sizes.append(q._num_results)
+        return query(q)
+
+    def no_paging(*args, **kwargs):
+        raise AssertionError("gets query by key and do not page")
+
+    monkeypatch.setattr(store.store_index, "query", counting_query)
+    monkeypatch.setattr(store.store_index, "paginate", no_paging)
+
+    assert store.get(("docs",), "k0000").value == {"i": 0}
+    assert sizes == [1]
+
+    sizes.clear()
+    ops = [GetOp(("docs",), f"k{i:04d}") for i in range(1005)]
+    ops += [GetOp(("docs",), "k0000"), GetOp(("notes",), "k0000")]
+    results = store.batch(ops)
+    # docs: 1005 distinct keys in chunks of 1000 and 5; notes: one key.
+    assert sorted(sizes) == [1, 5, 1000]
+    assert [r.value["i"] for r in results] == list(range(1005)) + [0, -1]
+
+
+@pytest.mark.asyncio
+async def test_abatch_gets_send_one_query_per_chunk_of_distinct_keys(
+    astore: AsyncRedisStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await astore.abatch([PutOp(("docs",), f"k{i:04d}", {"i": i}) for i in range(1005)])
+    await astore.aput(("notes",), "k0000", {"i": -1})
+
+    sizes: list[int] = []
+    query = astore.store_index.query
+
+    async def counting_query(q):
+        sizes.append(q._num_results)
+        return await query(q)
+
+    def no_paging(*args, **kwargs):
+        raise AssertionError("gets query by key and do not page")
+
+    monkeypatch.setattr(astore.store_index, "query", counting_query)
+    monkeypatch.setattr(astore.store_index, "paginate", no_paging)
+
+    assert (await astore.aget(("docs",), "k0000")).value == {"i": 0}
+    assert sizes == [1]
+
+    sizes.clear()
+    ops = [GetOp(("docs",), f"k{i:04d}") for i in range(1005)]
+    ops += [GetOp(("docs",), "k0000"), GetOp(("notes",), "k0000")]
+    results = await astore.abatch(ops)
+    assert sorted(sizes) == [1, 5, 1000]
+    assert [r.value["i"] for r in results] == list(range(1005)) + [0, -1]
+
+
+# setup() waits for indexing up to a deadline
+
+
+def _sort_field_ids(keys: list[str]) -> dict[str, list[str]]:
+    return {k: [k.split(":", 1)[1]] for k in keys}
+
+
+def test_setup_raises_an_actionable_error_when_indexing_outlasts_the_deadline(
+    redis_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    keys = _older_store_with(redis_url, _user_namespaces(5))
+
+    with RedisStore.from_conn_string(redis_url) as store:
+        store.index_ready_timeout = 0.2
+        monkeypatch.setattr(store, "_still_indexing", lambda info: True)
+        started = time.monotonic()
+        with pytest.raises(StoreIndexNotReadyError, match=r"Retry setup\(\)") as exc:
+            store.setup()
+        # It waited for the deadline, and not much longer.
+        assert 0.2 <= time.monotonic() - started < 5
+        assert store.store_index.name in str(exc.value)
+
+        # Once indexing has finished, retrying setup() completes the migration.
+        monkeypatch.undo()
+        store.setup()
+        assert _sort_field_values(store._redis, keys) == _sort_field_ids(keys)
+
+
+@pytest.mark.asyncio
+async def test_async_setup_raises_an_actionable_error_when_indexing_outlasts_the_deadline(
+    redis_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    keys = _older_store_with(redis_url, _user_namespaces(5))
+
+    async with AsyncRedisStore(redis_url) as astore:
+        astore.index_ready_timeout = 0.2
+        monkeypatch.setattr(astore, "_still_indexing", lambda info: True)
+        started = time.monotonic()
+        with pytest.raises(StoreIndexNotReadyError, match=r"Retry setup\(\)") as exc:
+            await astore.setup()
+        # It waited for the deadline, and not much longer.
+        assert 0.2 <= time.monotonic() - started < 5
+        assert astore.store_index.name in str(exc.value)
+
+        monkeypatch.undo()
+        await astore.setup()
+        client = astore._redis
+        values = {k: await client.json().get(k, f"$.{STORE_SORT_FIELD}") for k in keys}
+        assert values == _sort_field_ids(keys)
+
+
+def test_list_namespaces_while_the_index_is_still_indexing(
+    store: RedisStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The field is there but the rescan is not finished, as when another process
+    is still in setup(): reading now could skip documents, so the read says so."""
+    store.batch([PutOp(ns, "profile", {"n": 1}) for ns in _user_namespaces(15)])
+    client = store._redis
+    reader = RedisStore(client)
+    assert _index_has_sort_field(client, reader.store_index.name)
+    monkeypatch.setattr(reader, "_still_indexing", lambda info: True)
+    with pytest.raises(StoreIndexNotReadyError, match=r"Retry setup\(\)"):
+        reader.list_namespaces()
+    monkeypatch.undo()
+    assert reader.list_namespaces() == sorted(_user_namespaces(15))
+
+
+@pytest.mark.asyncio
+async def test_alist_namespaces_while_the_index_is_still_indexing(
+    redis_url: str, astore: AsyncRedisStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await astore.abatch([PutOp(ns, "profile", {"n": 1}) for ns in _user_namespaces(15)])
+    async with AsyncRedisStore(redis_url) as reader:
+        monkeypatch.setattr(reader, "_still_indexing", lambda info: True)
+        with pytest.raises(StoreIndexNotReadyError, match=r"Retry setup\(\)"):
+            await reader.alist_namespaces()
+        monkeypatch.undo()
+        assert await reader.alist_namespaces() == sorted(_user_namespaces(15))
+
+
+# setup() in cluster mode sets the field key by key, not in a pipeline
+
+
+def _forbid_pipeline(store, monkeypatch: pytest.MonkeyPatch) -> None:
+    def no_pipeline(*args, **kwargs):
+        raise AssertionError("cluster mode sets the field key by key")
+
+    monkeypatch.setattr(store._redis, "pipeline", no_pipeline)
+
+
+def _async_aggregate_also_returning(
+    astore: AsyncRedisStore, monkeypatch: pytest.MonkeyPatch, extra_key: str
+) -> None:
+    """Make the async backfill's first search also report ``extra_key``."""
+    ft = astore._redis.ft
+    calls: list[int] = []
+
+    def patched_ft(name):
+        search = ft(name)
+
+        class _Search:
+            def __getattr__(self, attr):
+                return getattr(search, attr)
+
+            async def aggregate(self, request):
+                res = await search.aggregate(request)
+                if not calls:
+                    res.rows.append(["__key", extra_key])
+                calls.append(1)
+                return res
+
+        return _Search()
+
+    monkeypatch.setattr(astore._redis, "ft", patched_ft)
+
+
+def test_cluster_mode_setup_fills_in_missing_ids(
+    redis_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    namespaces = _user_namespaces(1005)
+    keys = _older_store_with(redis_url, namespaces)
+
+    client = Redis.from_url(redis_url)
+    try:
+        store = RedisStore(client, cluster_mode=True)
+        _forbid_pipeline(store, monkeypatch)
+        store.setup()
+        assert _sort_field_values(client, keys) == _sort_field_ids(keys)
+        assert store.list_namespaces(limit=2000) == sorted(namespaces)
+    finally:
+        client.close()
+
+
+def test_cluster_mode_setup_skips_a_document_deleted_during_the_backfill(
+    redis_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    namespaces = _user_namespaces(5)
+    keys = _older_store_with(redis_url, namespaces)
+
+    client = Redis.from_url(redis_url)
+    try:
+        store = RedisStore(client, cluster_mode=True)
+        _forbid_pipeline(store, monkeypatch)
+        _aggregate_also_returning(store, monkeypatch, "store:01DELETEDBEFORESET00000")
+        store.setup()
+        assert _sort_field_values(client, keys) == _sort_field_ids(keys)
+        assert store.list_namespaces() == sorted(namespaces)
+    finally:
+        client.close()
+
+
+def test_cluster_mode_setup_raises_when_the_backfill_fails_on_a_document_that_exists(
+    redis_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = Redis.from_url(redis_url)
+    try:
+        store = RedisStore(client, cluster_mode=True)
+        store.setup()
+        client.set("store:01NOTAJSONDOCUMENT000000", "x")
+        _forbid_pipeline(store, monkeypatch)
+        _aggregate_also_returning(store, monkeypatch, "store:01NOTAJSONDOCUMENT000000")
+        with pytest.raises(ResponseError):
+            store.setup()
+    finally:
+        client.close()
+
+
+@pytest.mark.asyncio
+async def test_async_cluster_mode_setup_fills_in_missing_ids(
+    redis_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    namespaces = _user_namespaces(1005)
+    keys = _older_store_with(redis_url, namespaces)
+
+    async with AsyncRedisStore(redis_url, cluster_mode=True) as astore:
+        _forbid_pipeline(astore, monkeypatch)
+        await astore.setup()
+        client = astore._redis
+        values = {k: await client.json().get(k, f"$.{STORE_SORT_FIELD}") for k in keys}
+        assert values == _sort_field_ids(keys)
+        assert await astore.alist_namespaces(limit=2000) == sorted(namespaces)
+
+
+@pytest.mark.asyncio
+async def test_async_cluster_mode_setup_skips_a_document_deleted_during_the_backfill(
+    redis_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    namespaces = _user_namespaces(5)
+    keys = _older_store_with(redis_url, namespaces)
+
+    async with AsyncRedisStore(redis_url, cluster_mode=True) as astore:
+        _forbid_pipeline(astore, monkeypatch)
+        _async_aggregate_also_returning(
+            astore, monkeypatch, "store:01DELETEDBEFORESET00000"
+        )
+        await astore.setup()
+        client = astore._redis
+        values = {k: await client.json().get(k, f"$.{STORE_SORT_FIELD}") for k in keys}
+        assert values == _sort_field_ids(keys)
+        assert await astore.alist_namespaces() == sorted(namespaces)
+
+
+@pytest.mark.asyncio
+async def test_async_cluster_mode_setup_raises_when_the_backfill_fails_on_a_document_that_exists(
+    redis_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with AsyncRedisStore(redis_url, cluster_mode=True) as astore:
+        await astore.setup()
+        await astore._redis.set("store:01NOTAJSONDOCUMENT000000", "x")
+        _forbid_pipeline(astore, monkeypatch)
+        _async_aggregate_also_returning(
+            astore, monkeypatch, "store:01NOTAJSONDOCUMENT000000"
+        )
+        with pytest.raises(ResponseError):
+            await astore.setup()
+
+
+# a server with a lowered search-max-search-results
+
+
+@contextmanager
+def _max_search_results(redis_url: str, value: int):
+    """Lower RediSearch's MAXSEARCHRESULTS (search-max-search-results) for a block."""
+    client = Redis.from_url(redis_url)
+    config = client.execute_command("FT.CONFIG", "GET", "MAXSEARCHRESULTS")
+    if isinstance(config, dict):
+        (original,) = config.values()
+    else:
+        ((_, original),) = config
+    client.execute_command("FT.CONFIG", "SET", "MAXSEARCHRESULTS", value)
+    try:
+        yield
+    finally:
+        client.execute_command("FT.CONFIG", "SET", "MAXSEARCHRESULTS", original)
+        client.close()
+
+
+def test_reads_with_max_search_results_below_the_page_size(
+    redis_url: str, store: RedisStore
+) -> None:
+    """A page or key chunk larger than the server allows is refused, not cut short."""
+    namespaces = _user_namespaces(250)
+    store.batch([PutOp(ns, "profile", {"name": ns[-1]}) for ns in namespaces])
+    store.batch([PutOp(("docs",), f"k{i:04d}", {"i": i}) for i in range(250)])
+
+    with _max_search_results(redis_url, 100):
+        with pytest.raises(RedisSearchError, match="exceeds maximum"):
+            store.list_namespaces(limit=2000)
+        with pytest.raises(RedisSearchError, match="exceeds maximum"):
+            store.batch([GetOp(("docs",), f"k{i:04d}") for i in range(250)])
+        # A batch with no more keys per namespace than the limit still works.
+        results = store.batch([GetOp(("docs",), f"k{i:04d}") for i in range(100)])
+        assert [r.value["i"] for r in results] == list(range(100))
+
+
+def test_list_namespaces_sees_at_most_max_search_results_documents(
+    redis_url: str, store: RedisStore
+) -> None:
+    """Documented limit: an offset page past search-max-search-results comes back
+    empty, so list_namespaces sees only the first that many documents (in sort-field
+    order). The default limit is 1000000."""
+    namespaces = _user_namespaces(1005)
+    store.batch([PutOp(ns, "profile", {"name": ns[-1]}) for ns in namespaces])
+
+    with _max_search_results(redis_url, 1000):
+        listed = store.list_namespaces(limit=2000)
+    assert len(listed) == 1000
+    assert set(listed) < set(namespaces)
+    assert store.list_namespaces(limit=2000) == sorted(namespaces)
+
+
+@pytest.mark.asyncio
+async def test_async_reads_with_max_search_results_below_the_page_size(
+    redis_url: str, astore: AsyncRedisStore
+) -> None:
+    namespaces = _user_namespaces(250)
+    await astore.abatch([PutOp(ns, "profile", {"name": ns[-1]}) for ns in namespaces])
+    await astore.abatch([PutOp(("docs",), f"k{i:04d}", {"i": i}) for i in range(250)])
+
+    with _max_search_results(redis_url, 100):
+        with pytest.raises(RedisSearchError, match="exceeds maximum"):
+            await astore.alist_namespaces(limit=2000)
+        with pytest.raises(RedisSearchError, match="exceeds maximum"):
+            await astore.abatch([GetOp(("docs",), f"k{i:04d}") for i in range(250)])
+        results = await astore.abatch(
+            [GetOp(("docs",), f"k{i:04d}") for i in range(100)]
+        )
+        assert [r.value["i"] for r in results] == list(range(100))
+
+
+@pytest.mark.asyncio
+async def test_alist_namespaces_sees_at_most_max_search_results_documents(
+    redis_url: str, astore: AsyncRedisStore
+) -> None:
+    namespaces = _user_namespaces(1005)
+    await astore.abatch([PutOp(ns, "profile", {"name": ns[-1]}) for ns in namespaces])
+
+    with _max_search_results(redis_url, 1000):
+        listed = await astore.alist_namespaces(limit=2000)
+    assert len(listed) == 1000
+    assert set(listed) < set(namespaces)
+    assert await astore.alist_namespaces(limit=2000) == sorted(namespaces)

@@ -144,8 +144,9 @@ def store(request):
     store.vector_index.load = MagicMock()
 
     # Adding the sort field needs a real search index; that is tested against
-    # Redis in test_store_reads_past_ten_results.py.
+    # Redis in test_store_reads_past_ten_results.py. Here the index has it.
     store._ensure_sort_field = MagicMock()  # type: ignore[method-assign]
+    store._has_sort_field = True
     store.setup()
     return store
 
@@ -209,8 +210,8 @@ def test_batch_get_ops_ttl_refresh(store):
         "created_at": int(datetime.now(timezone.utc).timestamp() * 1_000_000),
         "updated_at": int(datetime.now(timezone.utc).timestamp() * 1_000_000),
     }
-    # One page of paginate() output: the document's JSON with its id
-    store.store_index.paginate = MagicMock(return_value=[[dict(mock_doc_data)]])
+    # The get's query result: the document's JSON with its id
+    store.store_index.query = MagicMock(return_value=[dict(mock_doc_data)])
 
     # Mock client.ttl to control TTL refresh logic
     client.ttl_calls.clear()

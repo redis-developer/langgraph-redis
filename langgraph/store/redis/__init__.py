@@ -42,6 +42,8 @@ from langgraph.store.redis.base import (
     STORE_VECTOR_PREFIX,
     BaseRedisStore,
     RedisDocument,
+    StoreIndexNotReadyError,
+    StoreSetupRequiredError,
     _decode_ns,
     _group_ops,
     _namespace_to_text,
@@ -156,12 +158,13 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
     def _ensure_sort_field(self) -> None:
         """Give an index and documents from before STORE_SORT_FIELD the field.
 
-        Adds the field to a store index created without it, then sets it on
-        every document that lacks it. Both steps do nothing once done, so this
-        runs on every setup(), and on the first paged read when setup() was not
-        called after an upgrade. A document an older version writes after this
-        has run lacks the field; the paged reads still return it, after the
-        others and in no fixed order.
+        Adds the field to a store index created without it, waits up to
+        index_ready_timeout seconds for the rescan that starts, then sets the
+        field on every document that lacks it. Both steps do nothing once done,
+        and this runs only from setup(), so the caller chooses when it runs and
+        with which credentials. A document an older version writes after this
+        has run lacks the field; list_namespaces still returns it, after the
+        others and in no fixed order, and the next setup() fills it in.
         """
         search = self._redis.ft(self.store_index.name)
         if not self._index_has_field(self.store_index.info(), STORE_SORT_FIELD):
@@ -174,7 +177,10 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
 
         # FT.ALTER rescans existing documents in the background, and pages read
         # during the rescan can skip documents.
+        deadline = time.monotonic() + self.index_ready_timeout
         while self._still_indexing(self.store_index.info()):
+            if time.monotonic() >= deadline:
+                raise self._index_not_ready_error()
             time.sleep(0.05)
 
         attempted: set[str] = set()
@@ -261,9 +267,17 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
         Pages through the matches with paginate(), sorted on the unique
         STORE_SORT_FIELD so pages do not repeat or skip documents. A document
         written or deleted between two pages can still shift the pages after it.
+        Raises StoreSetupRequiredError on an index setup() has not given the field,
+        and StoreIndexNotReadyError while the index is still indexing.
         """
         if not self._has_sort_field:
-            self._ensure_sort_field()
+            info = self.store_index.info()
+            if not self._index_has_field(info, STORE_SORT_FIELD):
+                raise self._setup_required_error()
+            # Pages read while the index rescans its documents can skip some.
+            if self._still_indexing(info):
+                raise self._index_not_ready_error()
+            self._has_sort_field = True
         query.sort_by(STORE_SORT_FIELD)
         for page in self.store_index.paginate(query, page_size=STORE_SEARCH_PAGE_SIZE):
             yield from page
@@ -328,7 +342,12 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
         for query, _, namespace, items in self._get_batch_GET_ops_queries(get_ops):
             # Parse JSON from each document
             key_to_row: dict[str, tuple[dict[str, Any], str]] = {}
-            for doc in self._search_all(FilterQuery(filter_expression=query)):
+            # At most one document per distinct key in this chunk
+            num_keys = len({key for _, key in items})
+            docs = self.store_index.query(
+                FilterQuery(filter_expression=query, num_results=num_keys)
+            )
+            for doc in docs:
                 doc_id = doc.pop("id")
                 key_to_row[doc["key"]] = (doc, doc_id)
 
@@ -775,4 +794,9 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
         return await asyncio.get_running_loop().run_in_executor(None, self.batch, ops)
 
 
-__all__ = ["AsyncRedisStore", "RedisStore"]
+__all__ = [
+    "AsyncRedisStore",
+    "RedisStore",
+    "StoreIndexNotReadyError",
+    "StoreSetupRequiredError",
+]

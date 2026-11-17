@@ -56,14 +56,31 @@ logger = logging.getLogger(__name__)
 REDIS_KEY_SEPARATOR = ":"
 STORE_PREFIX = "store"
 STORE_VECTOR_PREFIX = "store_vectors"
-# Reads that need every match (batched gets, list_namespaces) page through them
-# with RedisVL's paginate(), this many documents a page, sorted on
-# STORE_SORT_FIELD. Offset pages are only stable when the sort field is unique.
+# list_namespaces pages through every match with RedisVL's paginate(), this many
+# documents a page, sorted on STORE_SORT_FIELD (offset pages are only stable when
+# the sort field is unique). Batched gets query at most this many keys at a time.
+# RediSearch refuses a query asking for more than search-max-search-results
+# (MAXSEARCHRESULTS, 1000000 by default), and an offset page past that limit comes
+# back empty, so list_namespaces sees at most that many documents.
 STORE_SEARCH_PAGE_SIZE = 1000
 # Every store document keeps its own id (the ULID in its Redis key) in this field,
-# so the paged reads have a unique sort key. setup() adds it to an index created
+# so list_namespaces has a unique sort key. setup() adds it to an index created
 # before the field existed and backfills documents written without it.
 STORE_SORT_FIELD = "doc_id"
+
+
+class StoreSetupRequiredError(RuntimeError):
+    """The store index was created by an older version and lacks STORE_SORT_FIELD.
+
+    Call setup() once, with credentials that can alter the index and write to
+    the store, to add the field and backfill existing documents.
+    """
+
+
+class StoreIndexNotReadyError(TimeoutError):
+    """The store index is still indexing its documents: setup() waited
+    index_ready_timeout seconds, or list_namespaces() found it unfinished."""
+
 
 # Schemas for Redis Search indices
 SCHEMAS = [
@@ -134,9 +151,11 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
     _ttl_stop_event: threading.Event | None = None
     # Whether to operate in Redis cluster mode; None triggers auto-detection
     cluster_mode: Optional[bool] = None
-    # Set once this instance has made sure the store index and its documents
-    # have STORE_SORT_FIELD (in setup(), or in the first paged read without it)
+    # Set once this instance has seen STORE_SORT_FIELD in the store index
     _has_sort_field: bool = False
+    # Seconds setup() waits for the store index to finish indexing after adding
+    # STORE_SORT_FIELD before it raises StoreIndexNotReadyError; set before setup()
+    index_ready_timeout: float = 60.0
     SCHEMAS = SCHEMAS
     # Storage type the vector index is forced to, overriding the caller's
     # ``index["vector_storage_type"]``. None (the sync store) honours the
@@ -521,6 +540,22 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
             indexing = indexing.decode()
         return str(indexing) not in ("0", "0.0")
 
+    def _setup_required_error(self) -> StoreSetupRequiredError:
+        return StoreSetupRequiredError(
+            f"Store index '{self.store_index.name}' has no '{STORE_SORT_FIELD}' "
+            "field, which list_namespaces() needs. The index was created by an "
+            "older version: call setup() once to add the field and backfill "
+            "existing documents."
+        )
+
+    def _index_not_ready_error(self) -> StoreIndexNotReadyError:
+        return StoreIndexNotReadyError(
+            f"Store index '{self.store_index.name}' is still indexing its "
+            "documents, and list_namespaces() pages read now could skip some. "
+            "Retry setup() once indexing completes, or raise index_ready_timeout "
+            f"(now {self.index_ready_timeout:g}s)."
+        )
+
     def _sort_field_definition(self) -> Any:
         """The STORE_SORT_FIELD definition as FT.ALTER takes it, built from the
         same schema the index is created from."""
@@ -556,23 +591,28 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
         self,
         get_ops: Sequence[tuple[int, GetOp]],
     ) -> list[tuple[str, Sequence, tuple[str, ...], list]]:
-        """Convert GET operations into Redis queries."""
+        """Convert GET operations into Redis queries.
+
+        One query per namespace and per chunk of at most STORE_SEARCH_PAGE_SIZE
+        distinct keys. Each query matches at most one document per key, so the
+        caller asks for as many results as the chunk has distinct keys.
+        """
         namespace_groups = defaultdict(list)
         for idx, op in get_ops:
             namespace_groups[op.namespace].append((idx, op.key))
 
         results: list[tuple[str, Sequence, tuple[str, ...], list]] = []
         for namespace, items in namespace_groups.items():
-            _, keys = zip(*items)
+            keys = list(dict.fromkeys(key for _, key in items))
             # Use Tag helper to properly escape all special characters
             prefix_filter = Text("prefix") == _namespace_to_text(namespace)
-            filter_str = f"({prefix_filter} "
-            if keys:
-                key_filter = Tag("key") == list(keys)
-                filter_str += f"{key_filter})"
-            else:
-                filter_str += ")"
-            results.append((filter_str, [], namespace, items))
+            for start in range(0, len(keys), STORE_SEARCH_PAGE_SIZE):
+                chunk = keys[start : start + STORE_SEARCH_PAGE_SIZE]
+                key_filter = Tag("key") == chunk
+                filter_str = f"({prefix_filter} {key_filter})"
+                chunk_keys = set(chunk)
+                chunk_items = [(idx, key) for idx, key in items if key in chunk_keys]
+                results.append((filter_str, [], namespace, chunk_items))
         return results
 
     def _prepare_batch_PUT_queries(
