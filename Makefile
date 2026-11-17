@@ -4,10 +4,10 @@ install:
 	poetry install --all-extras
 
 redis-start:
-	docker run -d --name redis-stack -p 6379:6379 -p 8001:8001 redis/redis-stack:latest
+	docker run -d --name langgraph-redis -p 6379:6379 redis:8
 
 redis-stop:
-	docker stop redis-stack
+	docker stop langgraph-redis
 
 format:
 	poetry run format

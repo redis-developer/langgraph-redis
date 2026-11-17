@@ -3,6 +3,8 @@
 These tests simulate real agent workflow patterns.
 """
 
+import os
+
 import pytest
 from langchain.agents.middleware.types import ModelResponse
 from langchain_core.messages import AIMessage
@@ -39,9 +41,10 @@ requires_sentence_transformers = pytest.mark.skipif(
 def redis_url():
     """Provide a Redis URL using TestContainers.
 
-    Uses redis/redis-stack-server which includes RediSearch module required by redisvl.
+    Uses REDIS_IMAGE (default ``redis:8``), which bundles the search and JSON
+    modules redisvl needs.
     """
-    redis_container = RedisContainer("redis/redis-stack-server:latest")
+    redis_container = RedisContainer(os.environ.get("REDIS_IMAGE", "redis:8"))
     redis_container.start()
     try:
         host = redis_container.get_container_host_ip()
