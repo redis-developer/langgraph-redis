@@ -40,7 +40,7 @@ from redis.asyncio import Redis as AsyncRedis
 from redis.commands.search.aggregation import AggregateRequest
 from redis.exceptions import ResponseError
 from redisvl.index import SearchIndex
-from redisvl.query.filter import Tag, Text
+from redisvl.query.filter import Tag
 from redisvl.utils.token_escaper import TokenEscaper
 
 from langgraph.checkpoint.redis.jsonplus_redis import JsonPlusRedisSerializer
@@ -689,8 +689,9 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
         results: list[tuple[str, Sequence, tuple[str, ...], list]] = []
         for namespace, items in namespace_groups.items():
             keys = list(dict.fromkeys(key for _, key in items))
-            # Use Tag helper to properly escape all special characters
-            prefix_filter = Text("prefix") == _namespace_to_text(namespace)
+            # redisvl's Text filter turns a double quote into a space, so it
+            # can't match the escaped namespace that put() stored.
+            prefix_filter = f'@prefix:("{_namespace_to_text(namespace)}")'
             for start in range(0, len(keys), STORE_SEARCH_PAGE_SIZE):
                 chunk = keys[start : start + STORE_SEARCH_PAGE_SIZE]
                 key_filter = Tag("key") == chunk
