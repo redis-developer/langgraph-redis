@@ -37,6 +37,7 @@ from langgraph.store.base import (
 )
 from redis import Redis
 from redis.asyncio import Redis as AsyncRedis
+from redis.commands.search.aggregation import AggregateRequest
 from redis.exceptions import ResponseError
 from redisvl.index import SearchIndex
 from redisvl.query.filter import Tag, Text
@@ -55,8 +56,35 @@ logger = logging.getLogger(__name__)
 REDIS_KEY_SEPARATOR = ":"
 STORE_PREFIX = "store"
 STORE_VECTOR_PREFIX = "store_vectors"
-# Number of documents fetched per page when a search filter is applied client-side
-FILTER_PAGE_SIZE = 500
+# Smallest number of documents read per cursor round trip when a search filter is
+# applied client-side
+FILTER_READ_SIZE = 100
+
+
+def _filtered_search_request(
+    query_str: str, offset: int, limit: int
+) -> AggregateRequest:
+    """Build the cursor request that reads every document matching query_str.
+
+    FT.SEARCH can't page past the server's result limit (MAXSEARCHRESULTS), so a
+    client-side filter reads the documents through an FT.AGGREGATE cursor instead.
+    Each read returns at least offset + limit documents.
+    """
+    return (
+        AggregateRequest(query_str)
+        .load("@__key", "$")
+        .cursor(count=max(offset + limit, FILTER_READ_SIZE))
+    )
+
+
+def _aggregate_row_to_doc(row: list[Any]) -> tuple[str, dict[str, Any]]:
+    """Return the key and the stored document of a row from _filtered_search_request."""
+    fields = {
+        (name.decode() if isinstance(name, bytes) else name): value
+        for name, value in zip(row[::2], row[1::2])
+    }
+    key = fields["__key"]
+    return (key.decode() if isinstance(key, bytes) else key), json.loads(fields["$"])
 
 
 def _matches_filter(value: dict[str, Any], filter: dict[str, Any]) -> bool:
@@ -64,15 +92,16 @@ def _matches_filter(value: dict[str, Any], filter: dict[str, Any]) -> bool:
 
     Follows the semantics of LangGraph's InMemoryStore: comparison operators
     ($eq, $ne, $gt, $gte, $lt, $lte) and nested dicts matched key by key. A
-    list matches any of its elements, as this store has always done.
+    top-level list matches any of its elements, as this store has always done.
+    A list inside a nested dict must match exactly.
     """
     return all(
-        _filter_value_matches(value.get(key), expected)
+        _filter_value_matches(value.get(key), expected, any_of=True)
         for key, expected in filter.items()
     )
 
 
-def _filter_value_matches(actual: Any, expected: Any) -> bool:
+def _filter_value_matches(actual: Any, expected: Any, any_of: bool = False) -> bool:
     if isinstance(expected, dict):
         if any(key.startswith("$") for key in expected):
             return all(
@@ -83,7 +112,7 @@ def _filter_value_matches(actual: Any, expected: Any) -> bool:
             _filter_value_matches(actual.get(key), value)
             for key, value in expected.items()
         )
-    if isinstance(expected, list):
+    if any_of and isinstance(expected, list):
         return actual in expected
     return bool(actual == expected)
 

@@ -149,6 +149,58 @@ async def test_search_filter_applies_limit_and_offset_to_matching_items(
 
 
 @pytest.mark.asyncio
+async def test_search_filter_matches_nested_lists_exactly(
+    store: AsyncRedisStore,
+) -> None:
+    """A list inside a nested filter matches the stored list as a whole, and a top-level list is any-of."""
+    namespace = ("nested", str(uuid4()))
+    await store.aput(namespace, "both", {"tag": "a", "meta": {"tags": ["a", "b"]}})
+    await store.aput(namespace, "one", {"tag": "c", "meta": {"tags": ["a"]}})
+
+    async def keys(filter: dict) -> list[str]:
+        return sorted(
+            item.key for item in await store.asearch(namespace, filter=filter)
+        )
+
+    assert await keys({"meta": {"tags": ["a", "b"]}}) == ["both"]
+    assert await keys({"meta": {"tags": ["a"]}}) == ["one"]
+    assert await keys({"tag": ["a", "c"]}) == ["both", "one"]
+
+
+@pytest.mark.asyncio
+async def test_search_filter_respects_the_server_result_limit(
+    store: AsyncRedisStore, max_search_results
+) -> None:
+    """A filtered search doesn't ask Redis for more results than MAXSEARCHRESULTS allows."""
+    namespace = ("capped", str(uuid4()))
+    await store.aput(namespace, "only", {"keep": True})
+    max_search_results(100)
+
+    results = await store.asearch(namespace, filter={"keep": True}, limit=1)
+    assert [item.key for item in results] == ["only"]
+
+
+@pytest.mark.asyncio
+async def test_search_filter_reaches_items_beyond_the_server_result_limit(
+    store: AsyncRedisStore, max_search_results
+) -> None:
+    """Matching items after the first MAXSEARCHRESULTS documents of a namespace are still found."""
+    namespace = ("beyond", str(uuid4()))
+    await store.abatch(
+        [PutOp(namespace, f"item{i:03d}", {"keep": i >= 100}) for i in range(105)]
+    )
+    max_search_results(100)
+
+    assert len(await store.asearch(namespace, filter={"keep": True}, limit=1)) == 1
+    results = await store.asearch(namespace, filter={"keep": True}, limit=10)
+    assert {item.key for item in results} == {f"item{i:03d}" for i in range(100, 105)}
+    assert (
+        len(await store.asearch(namespace, filter={"keep": True}, limit=10, offset=3))
+        == 2
+    )
+
+
+@pytest.mark.asyncio
 async def test_search(store: AsyncRedisStore) -> None:
     """Test search functionality with async store."""
     # Create test data

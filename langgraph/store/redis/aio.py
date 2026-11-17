@@ -23,6 +23,7 @@ from langgraph.store.base import (
 from langgraph.store.base.batch import AsyncBatchedBaseStore
 from redis.asyncio import Redis as AsyncRedis
 from redis.commands.search.query import Query
+from redis.exceptions import RedisError
 from redisvl.index import AsyncSearchIndex
 from redisvl.query import FilterQuery, VectorQuery
 from redisvl.redis.connection import RedisConnectionFactory
@@ -31,14 +32,15 @@ from ulid import ULID
 
 from langgraph.checkpoint.redis.util import unwrap_connection_errors
 from langgraph.store.redis.base import (
-    FILTER_PAGE_SIZE,
     REDIS_KEY_SEPARATOR,
     STORE_PREFIX,
     STORE_VECTOR_PREFIX,
     BaseRedisStore,
     RedisDocument,
+    _aggregate_row_to_doc,
     _decode_ns,
     _ensure_string_or_literal,
+    _filtered_search_request,
     _group_ops,
     _matches_filter,
     _namespace_to_text,
@@ -679,25 +681,34 @@ class AsyncRedisStore(
 
     async def _asearch_filtered(
         self, query_str: str, filter: dict[str, Any], offset: int, limit: int
-    ) -> list[Any]:
-        """Page through the documents matching query_str and return those that pass filter.
+    ) -> list[tuple[str, dict[str, Any]]]:
+        """Return the key and document of each document matching query_str that passes filter.
 
         Value fields aren't part of the search index, so the filter runs client-side and
-        offset and limit have to apply to the filtered documents, not to a page of Redis
-        results.
+        offset and limit have to apply to the filtered documents. The documents are read
+        with a cursor, which reaches all of them, also beyond the server's FT.SEARCH limit.
         """
-        matched: list[Any] = []
-        start = 0
-        while len(matched) < offset + limit:
-            res = await self.store_index.search(
-                Query(query_str).paging(start, FILTER_PAGE_SIZE)
-            )
-            for doc in res.docs:
-                if _matches_filter(json.loads(doc.json).get("value", {}), filter):
-                    matched.append(doc)
-            start += len(res.docs)
-            if not res.docs or start >= res.total:
+        matched: list[tuple[str, dict[str, Any]]] = []
+        res = await self.store_index.aggregate(
+            _filtered_search_request(query_str, offset, limit)
+        )
+        while True:
+            for row in res.rows:
+                store_key, data = _aggregate_row_to_doc(row)
+                if _matches_filter(data.get("value", {}), filter):
+                    matched.append((store_key, data))
+            cursor_id = res.cursor.cid if res.cursor else 0
+            if not cursor_id:
                 break
+            if len(matched) >= offset + limit:
+                try:
+                    await self._redis.execute_command(
+                        "FT.CURSOR", "DEL", self.store_index.name, cursor_id
+                    )
+                except RedisError:
+                    pass  # The cursor expires on its own after its idle timeout
+                break
+            res = await self.store_index.aggregate(res.cursor)
         return matched[offset : offset + limit]
 
     async def _batch_search_ops(
@@ -873,18 +884,16 @@ class AsyncRedisStore(
                     res = await self.store_index.search(
                         Query(query_str).paging(offset, limit)
                     )
-                    docs = res.docs
+                    docs = [(doc.id, json.loads(doc.json)) for doc in res.docs]
                 items = []
                 refresh_keys = []  # Track keys that need TTL refreshed
 
-                for doc in docs:
-                    data = json.loads(doc.json)
-
+                for store_key, data in docs:
                     # If refresh_ttl is true, add the key to refresh list
                     if op.refresh_ttl:
-                        refresh_keys.append(doc.id)
+                        refresh_keys.append(store_key)
                         # Also find associated vector keys with same ID
-                        doc_id = doc.id.split(":")[-1]
+                        doc_id = store_key.split(":")[-1]
                         vector_key = (
                             f"{self.vector_prefix}{REDIS_KEY_SEPARATOR}{doc_id}"
                         )

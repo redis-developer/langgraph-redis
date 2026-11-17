@@ -409,6 +409,50 @@ def test_search_filter_applies_limit_and_offset_to_matching_items(
     assert {item.key for item in first + rest} == {"match0", "match1", "match2"}
 
 
+def test_search_filter_matches_nested_lists_exactly(store: RedisStore) -> None:
+    """A list inside a nested filter matches the stored list as a whole, and a top-level list is any-of."""
+    namespace = ("nested", str(uuid4()))
+    store.put(namespace, "both", {"tag": "a", "meta": {"tags": ["a", "b"]}})
+    store.put(namespace, "one", {"tag": "c", "meta": {"tags": ["a"]}})
+
+    def keys(filter: dict) -> list[str]:
+        return sorted(item.key for item in store.search(namespace, filter=filter))
+
+    assert keys({"meta": {"tags": ["a", "b"]}}) == ["both"]
+    assert keys({"meta": {"tags": ["a"]}}) == ["one"]
+    assert keys({"tag": ["a", "c"]}) == ["both", "one"]
+
+
+def test_search_filter_respects_the_server_result_limit(
+    store: RedisStore, max_search_results
+) -> None:
+    """A filtered search doesn't ask Redis for more results than MAXSEARCHRESULTS allows."""
+    namespace = ("capped", str(uuid4()))
+    store.put(namespace, "only", {"keep": True})
+    max_search_results(100)
+
+    assert [
+        item.key for item in store.search(namespace, filter={"keep": True}, limit=1)
+    ] == ["only"]
+
+
+def test_search_filter_reaches_items_beyond_the_server_result_limit(
+    store: RedisStore, max_search_results
+) -> None:
+    """Matching items after the first MAXSEARCHRESULTS documents of a namespace are still found."""
+    namespace = ("beyond", str(uuid4()))
+    store.batch(
+        [PutOp(namespace, f"item{i:03d}", {"keep": i >= 100}) for i in range(105)]
+    )
+    max_search_results(100)
+
+    assert len(store.search(namespace, filter={"keep": True}, limit=1)) == 1
+    assert {
+        item.key for item in store.search(namespace, filter={"keep": True}, limit=10)
+    } == {f"item{i:03d}" for i in range(100, 105)}
+    assert len(store.search(namespace, filter={"keep": True}, limit=10, offset=3)) == 2
+
+
 def test_search(store: RedisStore) -> None:
     """Test search functionality."""
     # Create test data
