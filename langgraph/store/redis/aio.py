@@ -23,6 +23,7 @@ from langgraph.store.base import (
 from langgraph.store.base.batch import AsyncBatchedBaseStore
 from redis.asyncio import Redis as AsyncRedis
 from redis.commands.search.query import Query
+from redis.exceptions import RedisError
 from redisvl.index import AsyncSearchIndex
 from redisvl.query import FilterQuery, VectorQuery
 from redisvl.redis.connection import RedisConnectionFactory
@@ -36,9 +37,12 @@ from langgraph.store.redis.base import (
     STORE_VECTOR_PREFIX,
     BaseRedisStore,
     RedisDocument,
+    _aggregate_row_to_doc,
     _decode_ns,
     _ensure_string_or_literal,
+    _filtered_search_request,
     _group_ops,
+    _matches_filter,
     _namespace_to_text,
     _row_to_item,
     _row_to_search_item,
@@ -675,6 +679,38 @@ class AsyncRedisStore(
         for main_key, (related_keys, ttl_minutes) in ttl_tracking.items():
             await self._apply_ttl_to_keys(main_key, related_keys, ttl_minutes)
 
+    async def _asearch_filtered(
+        self, query_str: str, filter: dict[str, Any], offset: int, limit: int
+    ) -> list[tuple[str, dict[str, Any]]]:
+        """Return the key and document of each document matching query_str that passes filter.
+
+        Value fields aren't part of the search index, so the filter runs client-side and
+        offset and limit have to apply to the filtered documents. The documents are read
+        with a cursor, which reaches all of them, also beyond the server's FT.SEARCH limit.
+        """
+        matched: list[tuple[str, dict[str, Any]]] = []
+        res = await self.store_index.aggregate(
+            _filtered_search_request(query_str, offset, limit)
+        )
+        while True:
+            for row in res.rows:
+                store_key, data = _aggregate_row_to_doc(row)
+                if _matches_filter(data.get("value", {}), filter):
+                    matched.append((store_key, data))
+            cursor_id = res.cursor.cid if res.cursor else 0
+            if not cursor_id:
+                break
+            if len(matched) >= offset + limit:
+                try:
+                    await self._redis.execute_command(
+                        "FT.CURSOR", "DEL", self.store_index.name, cursor_id
+                    )
+                except RedisError:
+                    pass  # The cursor expires on its own after its idle timeout
+                break
+            res = await self.store_index.aggregate(res.cursor)
+        return matched[offset : offset + limit]
+
     async def _batch_search_ops(
         self,
         search_ops: Sequence[tuple[int, SearchOp]],
@@ -787,20 +823,10 @@ class AsyncRedisStore(
                             continue
 
                         # Apply value filters if needed
-                        if op.filter:
-                            matches = True
-                            value = store_doc.get("value", {})
-                            for key, expected in op.filter.items():
-                                actual = value.get(key)
-                                if isinstance(expected, list):
-                                    if actual not in expected:
-                                        matches = False
-                                        break
-                                elif actual != expected:
-                                    matches = False
-                                    break
-                            if not matches:
-                                continue
+                        if op.filter and not _matches_filter(
+                            store_doc.get("value", {}), op.filter
+                        ):
+                            continue
 
                         # If refresh_ttl is true, add to list for refreshing
                         if op.refresh_ttl:
@@ -849,37 +875,25 @@ class AsyncRedisStore(
 
             else:
                 # Regular search
-                # Create a query with LIMIT and OFFSET parameters
-                query = Query(query_str).paging(offset, limit)
-
-                # Execute search with limit and offset applied by Redis
-                res = await self.store_index.search(query)
+                if op.filter:
+                    docs = await self._asearch_filtered(
+                        query_str, op.filter, offset, limit
+                    )
+                else:
+                    # Without a filter, Redis applies offset and limit directly
+                    res = await self.store_index.search(
+                        Query(query_str).paging(offset, limit)
+                    )
+                    docs = [(doc.id, json.loads(doc.json)) for doc in res.docs]
                 items = []
                 refresh_keys = []  # Track keys that need TTL refreshed
 
-                for doc in res.docs:
-                    data = json.loads(doc.json)
-                    # Apply value filters
-                    if op.filter:
-                        matches = True
-                        value = data.get("value", {})
-                        for key, expected in op.filter.items():
-                            actual = value.get(key)
-                            if isinstance(expected, list):
-                                if actual not in expected:
-                                    matches = False
-                                    break
-                            elif actual != expected:
-                                matches = False
-                                break
-                        if not matches:
-                            continue
-
+                for store_key, data in docs:
                     # If refresh_ttl is true, add the key to refresh list
                     if op.refresh_ttl:
-                        refresh_keys.append(doc.id)
+                        refresh_keys.append(store_key)
                         # Also find associated vector keys with same ID
-                        doc_id = doc.id.split(":")[-1]
+                        doc_id = store_key.split(":")[-1]
                         vector_key = (
                             f"{self.vector_prefix}{REDIS_KEY_SEPARATOR}{doc_id}"
                         )

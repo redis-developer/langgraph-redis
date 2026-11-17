@@ -96,6 +96,22 @@ def client(redis_url):
     conn.close()
 
 
+@pytest.fixture
+def max_search_results(client):
+    """
+    Set the server's FT.SEARCH result limit (MAXSEARCHRESULTS) for one test.
+
+    The setting is server-wide, so the previous value is restored after the test.
+    """
+    previous = next(iter(client.ft().config_get("MAXSEARCHRESULTS").values()))
+
+    def set_limit(limit: int) -> None:
+        client.ft().config_set("MAXSEARCHRESULTS", limit)
+
+    yield set_limit
+    client.ft().config_set("MAXSEARCHRESULTS", previous)
+
+
 @pytest.fixture(autouse=True)
 async def clear_redis(redis_url: str) -> None:
     """Clear Redis before each test."""
