@@ -27,7 +27,6 @@ from redis.commands.search.query import Query
 from redisvl.index import SearchIndex
 from redisvl.query import FilterQuery, VectorQuery
 from redisvl.redis.connection import RedisConnectionFactory
-from redisvl.utils.token_escaper import TokenEscaper
 from ulid import ULID
 
 from langgraph.checkpoint.redis.util import unwrap_connection_errors
@@ -45,9 +44,9 @@ from langgraph.store.redis.base import (
     _row_to_search_item,
 )
 
+from ._redisvl_compat import _tag_escaper
 from .token_unescaper import TokenUnescaper
 
-_token_escaper = TokenEscaper()
 _token_unescaper = TokenUnescaper()
 
 logger = logging.getLogger(__name__)
@@ -324,7 +323,7 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
         # First delete any existing documents that are being updated/deleted
         for _, op in put_ops:
             namespace = _namespace_to_text(op.namespace)
-            query = f"@prefix:{namespace} @key:{{{_token_escaper.escape(op.key)}}}"
+            query = f"@prefix:{namespace} @key:{{{_tag_escaper.escape(op.key)}}}"
             results = self.store_index.search(query)
 
             if self.cluster_mode:

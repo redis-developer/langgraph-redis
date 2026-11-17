@@ -39,11 +39,11 @@ from redis import Redis
 from redis.asyncio import Redis as AsyncRedis
 from redis.exceptions import ResponseError
 from redisvl.index import SearchIndex
-from redisvl.query.filter import Tag
 from redisvl.utils.token_escaper import TokenEscaper
 
 from langgraph.checkpoint.redis.jsonplus_redis import JsonPlusRedisSerializer
 
+from ._redisvl_compat import _tag_escaper
 from .token_unescaper import TokenUnescaper
 from .types import IndexType, RedisClientType
 
@@ -498,8 +498,8 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
             # can't match the escaped namespace that put() stored.
             filter_str = f'(@prefix:("{_namespace_to_text(namespace)}") '
             if keys:
-                key_filter = Tag("key") == list(keys)
-                filter_str += f"{key_filter})"
+                key_filter = "|".join(_tag_escaper.escape(key) for key in keys)
+                filter_str += f"@key:{{{key_filter}}})"
             else:
                 filter_str += ")"
             results.append((filter_str, [], namespace, items))
@@ -532,7 +532,7 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
             # Delete matching documents
             for op in deletes:
                 prefix = _namespace_to_text(op.namespace)
-                query = f"(@prefix:{prefix} @key:{{{_token_escaper.escape(op.key)}}})"
+                query = f"(@prefix:{prefix} @key:{{{_tag_escaper.escape(op.key)}}})"
                 results = self.store_index.search(query)
                 for doc in results.docs:
                     self._redis.delete(doc.id)
