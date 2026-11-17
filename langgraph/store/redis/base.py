@@ -39,7 +39,7 @@ from redis import Redis
 from redis.asyncio import Redis as AsyncRedis
 from redis.exceptions import ResponseError
 from redisvl.index import SearchIndex
-from redisvl.query.filter import Tag, Text
+from redisvl.query.filter import Tag
 from redisvl.utils.token_escaper import TokenEscaper
 
 from langgraph.checkpoint.redis.jsonplus_redis import JsonPlusRedisSerializer
@@ -494,9 +494,9 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
         results: list[tuple[str, Sequence, tuple[str, ...], list]] = []
         for namespace, items in namespace_groups.items():
             _, keys = zip(*items)
-            # Use Tag helper to properly escape all special characters
-            prefix_filter = Text("prefix") == _namespace_to_text(namespace)
-            filter_str = f"({prefix_filter} "
+            # redisvl's Text filter turns a double quote into a space, so it
+            # can't match the escaped namespace that put() stored.
+            filter_str = f'(@prefix:("{_namespace_to_text(namespace)}") '
             if keys:
                 key_filter = Tag("key") == list(keys)
                 filter_str += f"{key_filter})"
