@@ -82,6 +82,88 @@ class StoreIndexNotReadyError(TimeoutError):
     index_ready_timeout seconds, or list_namespaces() found it unfinished."""
 
 
+# Smallest number of documents read per cursor round trip when a search filter is
+# applied client-side
+FILTER_READ_SIZE = 100
+
+
+def _filtered_search_request(
+    query_str: str, offset: int, limit: int
+) -> AggregateRequest:
+    """Build the cursor request that reads every document matching query_str.
+
+    FT.SEARCH can't page past the server's result limit (MAXSEARCHRESULTS), so a
+    client-side filter reads the documents through an FT.AGGREGATE cursor instead.
+    Each read returns at least offset + limit documents.
+    """
+    return (
+        AggregateRequest(query_str)
+        .load("@__key", "$")
+        .cursor(count=max(offset + limit, FILTER_READ_SIZE))
+    )
+
+
+def _aggregate_row_to_doc(row: list[Any]) -> tuple[str, dict[str, Any]]:
+    """Return the key and the stored document of a row from _filtered_search_request."""
+    fields = {
+        (name.decode() if isinstance(name, bytes) else name): value
+        for name, value in zip(row[::2], row[1::2])
+    }
+    key = fields["__key"]
+    return (key.decode() if isinstance(key, bytes) else key), json.loads(fields["$"])
+
+
+def _matches_filter(value: dict[str, Any], filter: dict[str, Any]) -> bool:
+    """Return whether a stored value matches a search filter.
+
+    Follows the semantics of LangGraph's InMemoryStore: comparison operators
+    ($eq, $ne, $gt, $gte, $lt, $lte) and nested dicts matched key by key. A
+    top-level list matches any of its elements, as this store has always done.
+    A list inside a nested dict must match exactly.
+    """
+    return all(
+        _filter_value_matches(value.get(key), expected, any_of=True)
+        for key, expected in filter.items()
+    )
+
+
+def _filter_value_matches(actual: Any, expected: Any, any_of: bool = False) -> bool:
+    if isinstance(expected, dict):
+        if any(key.startswith("$") for key in expected):
+            return all(
+                _apply_filter_operator(actual, operator, operand)
+                for operator, operand in expected.items()
+            )
+        return isinstance(actual, dict) and all(
+            _filter_value_matches(actual.get(key), value)
+            for key, value in expected.items()
+        )
+    if any_of and isinstance(expected, list):
+        return actual in expected
+    return bool(actual == expected)
+
+
+def _apply_filter_operator(actual: Any, operator: str, operand: Any) -> bool:
+    if operator == "$eq":
+        return bool(actual == operand)
+    if operator == "$ne":
+        return bool(actual != operand)
+    if operator in ("$gt", "$gte", "$lt", "$lte"):
+        try:
+            left, right = float(actual), float(operand)
+        except (TypeError, ValueError):
+            # A missing or non-numeric value never satisfies a range comparison
+            return False
+        if operator == "$gt":
+            return left > right
+        if operator == "$gte":
+            return left >= right
+        if operator == "$lt":
+            return left < right
+        return left <= right
+    raise ValueError(f"Unsupported operator: {operator}")
+
+
 # Schemas for Redis Search indices
 SCHEMAS = [
     {
