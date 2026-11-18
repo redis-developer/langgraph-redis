@@ -494,14 +494,13 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
         results: list[tuple[str, Sequence, tuple[str, ...], list]] = []
         for namespace, items in namespace_groups.items():
             _, keys = zip(*items)
+            key_filter = _key_tag_filter(keys)
+            if key_filter is None:
+                # Only empty keys, which are never stored, so they stay None.
+                continue
             # redisvl's Text filter turns a double quote into a space, so it
             # can't match the escaped namespace that put() stored.
-            filter_str = f'(@prefix:("{_namespace_to_text(namespace)}") '
-            if keys:
-                key_filter = "|".join(_tag_escaper.escape(key) for key in keys)
-                filter_str += f"@key:{{{key_filter}}})"
-            else:
-                filter_str += ")"
+            filter_str = f'(@prefix:("{_namespace_to_text(namespace)}") {key_filter})'
             results.append((filter_str, [], namespace, items))
         return results
 
@@ -686,6 +685,19 @@ def _namespace_to_text(
     ns_text = _token_escaper.escape(".".join(namespace))
 
     return ns_text
+
+
+def _key_tag_filter(keys: Iterable[str]) -> Optional[str]:
+    """Build the ``@key:{...}`` clause that matches any of ``keys``.
+
+    Empty keys are left out, as redisvl's ``Tag`` filter does: an empty
+    alternative is a syntax error that would fail the other keys in the same
+    query. Returns ``None`` if no key is left, so the caller can skip the query.
+    """
+    alternatives = [_tag_escaper.escape(key) for key in keys if key]
+    if not alternatives:
+        return None
+    return "@key:{" + "|".join(alternatives) + "}"
 
 
 def _decode_ns(ns: str) -> tuple[str, ...]:
