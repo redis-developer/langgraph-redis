@@ -694,8 +694,11 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
             prefix_filter = f'@prefix:("{_namespace_to_text(namespace)}")'
             for start in range(0, len(keys), STORE_SEARCH_PAGE_SIZE):
                 chunk = keys[start : start + STORE_SEARCH_PAGE_SIZE]
-                key_filter = "|".join(_tag_escaper.escape(key) for key in chunk)
-                filter_str = f"({prefix_filter} @key:{{{key_filter}}})"
+                key_filter = _key_tag_filter(chunk)
+                if key_filter is None:
+                    # Only empty keys, which are never stored, so they stay None.
+                    continue
+                filter_str = f"({prefix_filter} {key_filter})"
                 chunk_keys = set(chunk)
                 chunk_items = [(idx, key) for idx, key in items if key in chunk_keys]
                 results.append((filter_str, [], namespace, chunk_items))
@@ -882,6 +885,19 @@ def _namespace_to_text(
     ns_text = _token_escaper.escape(".".join(namespace))
 
     return ns_text
+
+
+def _key_tag_filter(keys: Iterable[str]) -> Optional[str]:
+    """Build the ``@key:{...}`` clause that matches any of ``keys``.
+
+    Empty keys are left out, as redisvl's ``Tag`` filter does: an empty
+    alternative is a syntax error that would fail the other keys in the same
+    query. Returns ``None`` if no key is left, so the caller can skip the query.
+    """
+    alternatives = [_tag_escaper.escape(key) for key in keys if key]
+    if not alternatives:
+        return None
+    return "@key:{" + "|".join(alternatives) + "}"
 
 
 def _decode_ns(ns: str) -> tuple[str, ...]:

@@ -11,6 +11,8 @@ a different key, and ``put()`` kept the old document next to the new one or
 removed a different key.
 """
 
+import asyncio
+
 import pytest
 from langgraph.store.base import GetOp
 
@@ -171,3 +173,51 @@ async def test_async_store_mutation_leaves_colliding_key_alone(
         results = await store.asearch(namespace)
         stored = sorted((item.key, item.value["v"]) for item in results)
         assert stored == _expected_after(operation, key, other)
+
+
+# get() batches its lookups into one query per namespace. An empty key must not
+# break the other lookups in that batch, and it finds nothing.
+EMPTY_KEY_NS = ("issue237", "empty-key")
+OTHER_NS = ("issue237", "other")
+
+EMPTY_KEY_LOOKUPS = [
+    pytest.param([(EMPTY_KEY_NS, "")], id="empty-key-alone"),
+    pytest.param([(EMPTY_KEY_NS, ""), (EMPTY_KEY_NS, "valid")], id="empty-key-first"),
+    pytest.param([(EMPTY_KEY_NS, "valid"), (EMPTY_KEY_NS, "")], id="empty-key-last"),
+    pytest.param(
+        [(OTHER_NS, ""), (EMPTY_KEY_NS, "valid")],
+        id="empty-key-first-in-other-namespace",
+    ),
+    pytest.param(
+        [(EMPTY_KEY_NS, "valid"), (OTHER_NS, "")],
+        id="empty-key-last-in-other-namespace",
+    ),
+]
+
+
+@pytest.mark.parametrize("lookups", EMPTY_KEY_LOOKUPS)
+def test_sync_batched_get_with_empty_key(redis_url, lookups) -> None:
+    with RedisStore.from_conn_string(redis_url) as store:
+        store.setup()
+        store.put(EMPTY_KEY_NS, "valid", {"v": 1})
+
+        items = store.batch([GetOp(namespace, key) for namespace, key in lookups])
+
+        assert [item.key if item else None for item in items] == [
+            key or None for _, key in lookups
+        ]
+
+
+@pytest.mark.parametrize("lookups", EMPTY_KEY_LOOKUPS)
+async def test_async_concurrent_get_with_empty_key(redis_url, lookups) -> None:
+    async with AsyncRedisStore.from_conn_string(redis_url) as store:
+        await store.setup()
+        await store.aput(EMPTY_KEY_NS, "valid", {"v": 1})
+
+        items = await asyncio.gather(
+            *(store.aget(namespace, key) for namespace, key in lookups)
+        )
+
+        assert [item.key if item else None for item in items] == [
+            key or None for _, key in lookups
+        ]
