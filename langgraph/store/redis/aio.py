@@ -27,7 +27,6 @@ from redis.exceptions import RedisError
 from redisvl.index import AsyncSearchIndex
 from redisvl.query import FilterQuery, VectorQuery
 from redisvl.redis.connection import RedisConnectionFactory
-from redisvl.utils.token_escaper import TokenEscaper
 from ulid import ULID
 
 from langgraph.checkpoint.redis.util import unwrap_connection_errors
@@ -49,9 +48,9 @@ from langgraph.store.redis.base import (
     logger,
 )
 
+from ._redisvl_compat import _tag_escaper
 from .token_unescaper import TokenUnescaper
 
-_token_escaper = TokenEscaper()
 _token_unescaper = TokenUnescaper()
 from redis.asyncio.cluster import RedisCluster as AsyncRedisCluster
 
@@ -503,7 +502,7 @@ class AsyncRedisStore(
             # Delete matching documents
             for op in deletes:
                 prefix = _namespace_to_text(op.namespace)
-                query = f"(@prefix:{prefix} @key:{{{_token_escaper.escape(op.key)}}})"
+                query = f"(@prefix:{prefix} @key:{{{_tag_escaper.escape(op.key)}}})"
                 results = await self.store_index.search(query)
                 for doc in results.docs:
                     await self._redis.delete(doc.id)
@@ -564,7 +563,7 @@ class AsyncRedisStore(
         # First delete any existing documents that are being updated/deleted
         for _, op in put_ops:
             namespace = _namespace_to_text(op.namespace)
-            query = f"@prefix:{namespace} @key:{{{_token_escaper.escape(op.key)}}}"
+            query = f"@prefix:{namespace} @key:{{{_tag_escaper.escape(op.key)}}}"
             results = await self.store_index.search(query)
 
             if self.cluster_mode:
