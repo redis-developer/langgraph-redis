@@ -1685,6 +1685,11 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
         A cycle in required ancestry raises ``ValueError`` before any keys for
         that thread are deleted.
 
+        Prune only inactive threads and keep Search configuration stable during
+        the call. Search ON_TIMEOUT must be FAIL; the saver verifies it with
+        FT.CONFIG GET ON_TIMEOUT before pruning and never changes it. The Redis
+        user needs permission for this read on every node of a cluster.
+
         Each namespace (root ``""`` and any subgraph namespaces) is treated as
         an independent checkpoint chain.  Channel values are stored inline
         within each checkpoint document, so they are automatically removed
@@ -1700,15 +1705,18 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
                 ``strategy``.  Use ``keep_last=0`` to remove all checkpoints.
                 This is not a strict storage cap: DeltaChannel dependencies may
                 cause more checkpoints to remain, including the entire chain.
-            max_results: Maximum number of checkpoints fetched from the index
-                per thread in a single query. Defaults to 10 000. Set high enough
-                to include all checkpoints across the thread's namespaces; a
-                truncated search can miss dependencies of unreturned checkpoints.
+            max_results: Maximum results per checkpoint or write-cleanup search.
+                Defaults to 10 000. Must cover all checkpoints across the thread's
+                namespaces and all writes for each checkpoint being deleted.
+                A truncated search raises before deleting keys for that thread.
                 This does not bound ancestor reads or the number of deletions.
 
         Raises:
             ValueError: If ``strategy`` is not ``"keep_latest"`` or ``"delete"``,
-                even when ``keep_last`` is provided.
+                even when ``keep_last`` is provided, or if a checkpoint or
+                write-cleanup search is truncated by ``max_results``, or Search
+                ON_TIMEOUT is not FAIL (or cannot be verified from its response).
+            ResponseError: If reading Search timeout configuration fails.
         """
         self._validate_prune_strategy(strategy)
 
@@ -1727,6 +1735,18 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
         if max_results < 1:
             raise ValueError(f"``max_results`` must be >= 1, got {max_results}")
 
+        # A timed-out search can report total == len(docs) for partial results.
+        # Read the policy on each call; never mutate deployment-wide settings.
+        timeout_config = self._redis.execute_command(
+            "FT.CONFIG",
+            "GET",
+            "ON_TIMEOUT",
+            **(
+                {"target_nodes": "all"} if isinstance(self._redis, RedisCluster) else {}
+            ),
+        )
+        self._validate_prune_search_timeout(timeout_config)
+
         for thread_id in thread_ids:
             storage_safe_thread_id = to_storage_safe_id(thread_id)
 
@@ -1737,6 +1757,11 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
                 num_results=max_results,
             )
             checkpoint_results = self.checkpoints_index.search(checkpoint_query)
+            self._validate_prune_search_result(
+                checkpoint_results,
+                thread_id=thread_id,
+                max_results=max_results,
+            )
 
             if not checkpoint_results.docs:
                 continue
@@ -1809,12 +1834,18 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
                 writes_query = FilterQuery(
                     filter_expression=(
                         (Tag("thread_id") == storage_safe_thread_id)
+                        & (Tag("checkpoint_ns") == checkpoint_ns)
                         & (Tag("checkpoint_id") == checkpoint_id)
                     ),
                     return_fields=["checkpoint_ns", "checkpoint_id", "task_id", "idx"],
                     num_results=max_results,
                 )
                 writes_results = self.checkpoint_writes_index.search(writes_query)
+                self._validate_prune_search_result(
+                    writes_results,
+                    thread_id=thread_id,
+                    max_results=max_results,
+                )
                 for wdoc in writes_results.docs:
                     keys_to_delete.append(
                         self._make_redis_checkpoint_writes_key(
