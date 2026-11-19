@@ -26,6 +26,24 @@ RETENTION_CASES = (
     pytest.param(3, 2, -1, id="older-retained-checkpoint-needs-ancestors"),
 )
 
+# (Invocation count, keep_last, oldest retained step, use the exact search limit.)
+# With staggered snapshots, support checkpoints still need each other's history.
+# The sixth invocation stores both channel snapshots together at step 16.
+MULTI_CHANNEL_RETENTION_CASES = (
+    pytest.param(5, 1, -1, True, id="staggered-snapshots-exact-limit"),
+    pytest.param(6, 1, 16, False, id="common-snapshot"),
+    pytest.param(6, 2, -1, False, id="checkpoint-before-common-snapshot"),
+    pytest.param(7, 1, 16, False, id="ancestor-common-snapshot"),
+)
+
+# A head self-cycle, a head two-checkpoint cycle, and a cycle only reached when
+# preserving support ancestors. Five invocations place the latest step at 13.
+ANCESTRY_CYCLE_CASES = (
+    pytest.param(1, 13, id="self-parent"),
+    pytest.param(2, 13, id="two-checkpoint-cycle"),
+    pytest.param(2, 6, id="support-ancestor-cycle"),
+)
+
 
 @pytest.fixture
 def saver(redis_url: str) -> Iterator[RedisSaver]:
@@ -183,12 +201,30 @@ def _assert_branch_state(state: dict[str, Any], values: list[int]) -> None:
     assert state == {"value": values[-1], "delta": values, "accumulated": values}
 
 
+def _expected_multi_channel_update(state: dict[str, Any], value: int) -> dict[str, Any]:
+    return {
+        "value": value,
+        **{channel: state.get(channel, []) + [value] for channel in ("fast", "slow")},
+    }
+
+
 def _cycle_parent_update(
-    saver: Any, checkpoints: list[Any], cycle_length: int
+    saver: Any, checkpoints: list[Any], cycle_length: int, cycle_step: int
 ) -> tuple[str, str]:
+    checkpoints = [cp for cp in checkpoints if cp.metadata["step"] <= cycle_step]
     head = checkpoints[0].config["configurable"]
     target = checkpoints[cycle_length - 1].config["configurable"]
     return saver._make_redis_checkpoint_key(**target), head["checkpoint_id"]
+
+
+def _bounded_dependency_walk(saver: Any, max_steps: int) -> Any:
+    """Fail instead of hanging if pruning stops detecting ancestry cycles."""
+    return patch.object(
+        saver,
+        "_advance_delta_prune_dependencies",
+        wraps=saver._advance_delta_prune_dependencies,
+        side_effect=[DEFAULT] * max_steps,
+    )
 
 
 @pytest.mark.parametrize(
@@ -243,9 +279,7 @@ def test_prune_preserves_delta_channel_history(
                 read.args[1]["configurable"]["checkpoint_id"]
                 for read in reads.call_args_list
             ] == read_ids
-    assert [
-        read.args[1] for read in reads.call_args_list if read.kwargs["include_metadata"]
-    ] == [checkpoint.config for checkpoint in retained]
+    assert all(read.kwargs["include_metadata"] for read in reads.call_args_list)
 
     _assert_state(graph.get_state(config).values, [1, 2, 3], 3)
     _assert_retention(before, list(saver.list(config)), oldest_step)
@@ -310,9 +344,7 @@ async def test_aprune_preserves_delta_channel_history(
                 read.args[1]["configurable"]["checkpoint_id"]
                 for read in reads.call_args_list
             ] == read_ids
-    assert [
-        read.args[1] for read in reads.call_args_list if read.kwargs["include_metadata"]
-    ] == [checkpoint.config for checkpoint in retained]
+    assert all(read.kwargs["include_metadata"] for read in reads.call_args_list)
 
     _assert_state((await graph.aget_state(config)).values, [1, 2, 3], 3)
     after = [checkpoint async for checkpoint in async_saver.alist(config)]
@@ -378,76 +410,91 @@ async def test_aprune_preserves_delta_channel_history_in_subgraph_namespace(
     _assert_retention(before, after, oldest_step=-1)
 
 
-@pytest.mark.parametrize("keep_last", [1, 2])
+@pytest.mark.parametrize(
+    ("invocations", "keep_last", "oldest_step", "exact_limit"),
+    MULTI_CHANNEL_RETENTION_CASES,
+)
 def test_prune_preserves_independent_delta_snapshots(
-    saver: RedisSaver, keep_last: int
+    saver: RedisSaver,
+    invocations: int,
+    keep_last: int,
+    oldest_step: int,
+    exact_limit: bool,
 ) -> None:
     thread_id = f"delta-multi-prune-{uuid4()}"
     config = _config(thread_id)
     graph = _compile_multi_channel_graph(saver)
-    for value in range(1, 6):
+    for value in range(1, invocations + 1):
         graph.invoke({"value": value}, config, durability="sync")
 
-    expected = {"value": 5, "fast": [1, 2, 3, 4, 5], "slow": [1, 2, 3, 4, 5]}
+    values = list(range(1, invocations + 1))
+    expected = {"value": invocations, "fast": values, "slow": values}
     assert graph.get_state(config).values == expected
     before = list(saver.list(config))
-    retained_states = [graph.get_state(cp.config).values for cp in before[:keep_last]]
-    # The nearest fast seed is at step 10; the slow seed needs history through 7.
-    for channel, index in (("fast", 3), ("slow", 6)):
-        seed = saver.get_tuple(before[index].config)
-        assert seed is not None
-        assert isinstance(seed.checkpoint["channel_values"][channel], _DeltaSnapshot)
-
-    saver.prune([thread_id], keep_last=keep_last)
-
-    _assert_retention(before, list(saver.list(config)), oldest_step=7)
-    assert graph.get_state(config).values == expected
-    assert [
-        graph.get_state(cp.config).values for cp in before[:keep_last]
-    ] == retained_states
-    graph.invoke({"value": 6}, config, durability="sync")
-    assert graph.get_state(config).values == {
-        "value": 6,
-        "fast": list(range(1, 7)),
-        "slow": list(range(1, 7)),
+    expected_states = {
+        cp.checkpoint["id"]: graph.get_state(cp.config).values for cp in before
     }
+    max_results = len(before) if exact_limit else 10000
+    for _ in range(2):
+        saver.prune([thread_id], keep_last=keep_last, max_results=max_results)
+        after = list(saver.list(config))
+        # Check support ancestors as well as the requested keep_last window.
+        for checkpoint in after:
+            assert (
+                graph.get_state(checkpoint.config).values
+                == expected_states[checkpoint.checkpoint["id"]]
+            )
+        _assert_retention(before, after, oldest_step)
+
+    # Resume an older support checkpoint, not just the latest requested state.
+    support = after[min(4, len(after)) - 1]
+    previous = expected_states[support.checkpoint["id"]]
+    assert graph.invoke(
+        {"value": 99}, support.config, durability="sync"
+    ) == _expected_multi_channel_update(previous, 99)
 
 
-@pytest.mark.parametrize("keep_last", [1, 2])
+@pytest.mark.parametrize(
+    ("invocations", "keep_last", "oldest_step", "exact_limit"),
+    MULTI_CHANNEL_RETENTION_CASES,
+)
 async def test_aprune_preserves_independent_delta_snapshots(
-    async_saver: AsyncRedisSaver, keep_last: int
+    async_saver: AsyncRedisSaver,
+    invocations: int,
+    keep_last: int,
+    oldest_step: int,
+    exact_limit: bool,
 ) -> None:
     thread_id = f"delta-multi-aprune-{uuid4()}"
     config = _config(thread_id)
     graph = _compile_multi_channel_graph(async_saver)
-    for value in range(1, 6):
+    for value in range(1, invocations + 1):
         await graph.ainvoke({"value": value}, config, durability="sync")
 
-    expected = {"value": 5, "fast": [1, 2, 3, 4, 5], "slow": [1, 2, 3, 4, 5]}
+    values = list(range(1, invocations + 1))
+    expected = {"value": invocations, "fast": values, "slow": values}
     assert (await graph.aget_state(config)).values == expected
     before = [cp async for cp in async_saver.alist(config)]
-    retained_states = [
-        (await graph.aget_state(cp.config)).values for cp in before[:keep_last]
-    ]
-    for channel, index in (("fast", 3), ("slow", 6)):
-        seed = await async_saver.aget_tuple(before[index].config)
-        assert seed is not None
-        assert isinstance(seed.checkpoint["channel_values"][channel], _DeltaSnapshot)
-
-    await async_saver.aprune([thread_id], keep_last=keep_last)
-
-    after = [cp async for cp in async_saver.alist(config)]
-    _assert_retention(before, after, oldest_step=7)
-    assert (await graph.aget_state(config)).values == expected
-    assert [
-        (await graph.aget_state(cp.config)).values for cp in before[:keep_last]
-    ] == retained_states
-    await graph.ainvoke({"value": 6}, config, durability="sync")
-    assert (await graph.aget_state(config)).values == {
-        "value": 6,
-        "fast": list(range(1, 7)),
-        "slow": list(range(1, 7)),
+    expected_states = {
+        cp.checkpoint["id"]: (await graph.aget_state(cp.config)).values for cp in before
     }
+    max_results = len(before) if exact_limit else 10000
+    for _ in range(2):
+        await async_saver.aprune(
+            [thread_id], keep_last=keep_last, max_results=max_results
+        )
+        after = [cp async for cp in async_saver.alist(config)]
+        for checkpoint in after:
+            assert (
+                await graph.aget_state(checkpoint.config)
+            ).values == expected_states[checkpoint.checkpoint["id"]]
+        _assert_retention(before, after, oldest_step)
+
+    support = after[min(4, len(after)) - 1]
+    previous = expected_states[support.checkpoint["id"]]
+    assert await graph.ainvoke(
+        {"value": 99}, support.config, durability="sync"
+    ) == _expected_multi_channel_update(previous, 99)
 
 
 @pytest.mark.parametrize(
@@ -539,60 +586,52 @@ async def test_aprune_preserves_forked_delta_history(
         _assert_branch_state(result, values + [next_value])
 
 
-@pytest.mark.parametrize(
-    "cycle_length", [1, 2], ids=["self-parent", "two-checkpoint-cycle"]
-)
-def test_prune_rejects_cyclic_ancestry(saver: RedisSaver, cycle_length: int) -> None:
+@pytest.mark.parametrize(("cycle_length", "cycle_step"), ANCESTRY_CYCLE_CASES)
+def test_prune_rejects_cyclic_ancestry(
+    saver: RedisSaver, cycle_length: int, cycle_step: int
+) -> None:
     thread_id = f"delta-cycle-{uuid4()}"
     config = _config(thread_id)
-    graph = _compile_graph(saver, snapshot_frequency=100)
-    for value in (1, 2, 3):
+    graph = _compile_multi_channel_graph(saver)
+    for value in range(1, 6):
         graph.invoke({"value": value}, config, durability="sync")
     checkpoints = list(saver.list(config))
-    key, parent_id = _cycle_parent_update(saver, checkpoints, cycle_length)
+    key, parent_id = _cycle_parent_update(saver, checkpoints, cycle_length, cycle_step)
     saver._redis.json().set(key, "$.parent_checkpoint_id", parent_id)
     before_keys = set(saver._redis.scan_iter(match=f"*{thread_id}*"))
 
-    # Bound advancement so a broken guard fails instead of hanging the test.
     with (
-        patch.object(
-            saver,
-            "_advance_delta_prune_dependencies",
-            wraps=saver._advance_delta_prune_dependencies,
-            side_effect=[DEFAULT] * cycle_length,
-        ),
+        _bounded_dependency_walk(saver, len(checkpoints) + cycle_length),
         pytest.raises(ValueError, match="Cyclic checkpoint ancestry"),
     ):
         saver.prune([thread_id], keep_last=1)
 
     assert set(saver._redis.scan_iter(match=f"*{thread_id}*")) == before_keys
+    # Complete deletion remains available even for a corrupt dependency chain.
+    saver.prune([thread_id], keep_last=0)
+    assert not list(saver._redis.scan_iter(match=f"*{thread_id}*"))
 
 
-@pytest.mark.parametrize(
-    "cycle_length", [1, 2], ids=["self-parent", "two-checkpoint-cycle"]
-)
+@pytest.mark.parametrize(("cycle_length", "cycle_step"), ANCESTRY_CYCLE_CASES)
 async def test_aprune_rejects_cyclic_ancestry(
-    async_saver: AsyncRedisSaver, cycle_length: int
+    async_saver: AsyncRedisSaver, cycle_length: int, cycle_step: int
 ) -> None:
     thread_id = f"delta-acycle-{uuid4()}"
     config = _config(thread_id)
-    graph = _compile_graph(async_saver, snapshot_frequency=100)
-    for value in (1, 2, 3):
+    graph = _compile_multi_channel_graph(async_saver)
+    for value in range(1, 6):
         await graph.ainvoke({"value": value}, config, durability="sync")
     checkpoints = [cp async for cp in async_saver.alist(config)]
-    key, parent_id = _cycle_parent_update(async_saver, checkpoints, cycle_length)
+    key, parent_id = _cycle_parent_update(
+        async_saver, checkpoints, cycle_length, cycle_step
+    )
     await async_saver._redis.json().set(key, "$.parent_checkpoint_id", parent_id)
     before_keys = {
         key async for key in async_saver._redis.scan_iter(match=f"*{thread_id}*")
     }
 
     with (
-        patch.object(
-            async_saver,
-            "_advance_delta_prune_dependencies",
-            wraps=async_saver._advance_delta_prune_dependencies,
-            side_effect=[DEFAULT] * cycle_length,
-        ),
+        _bounded_dependency_walk(async_saver, len(checkpoints) + cycle_length),
         pytest.raises(ValueError, match="Cyclic checkpoint ancestry"),
     ):
         await async_saver.aprune([thread_id], keep_last=1)
@@ -600,6 +639,10 @@ async def test_aprune_rejects_cyclic_ancestry(
     assert {
         key async for key in async_saver._redis.scan_iter(match=f"*{thread_id}*")
     } == before_keys
+    await async_saver.aprune([thread_id], keep_last=0)
+    assert not [
+        key async for key in async_saver._redis.scan_iter(match=f"*{thread_id}*")
+    ]
 
 
 def test_prune_handles_checkpoint_expiring_during_walk(saver: RedisSaver) -> None:

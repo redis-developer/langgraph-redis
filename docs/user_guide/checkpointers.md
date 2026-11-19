@@ -115,18 +115,51 @@ for ct in saver.list(config, filter={"source": "loop", "step": 3}):
 saver.delete_thread("thread-1")
 ```
 
-**prune** -- Keep only recent checkpoints to manage storage:
+**prune** -- Keep recent checkpoints and their required history to manage storage:
 
 ```python
-# Keep only the latest checkpoint per namespace
+# Request the latest checkpoint per namespace, plus any required ancestors
 saver.prune(["thread-1", "thread-2"])
 
-# Keep the last 5 checkpoints per namespace
+# Request the last 5 checkpoints per namespace, plus any required ancestors
 saver.prune(["thread-1"], keep_last=5)
 
 # Delete all checkpoints for the given threads
 saver.prune(["thread-1"], strategy="delete")
 ```
+
+#### DeltaChannel retention
+
+`DeltaChannel` values can depend on snapshots and writes stored in ancestor
+checkpoints. Pruning preserves those dependencies for **every checkpoint that
+remains**, including ancestors kept to reconstruct other checkpoints. These
+support checkpoints remain visible in history and can still be inspected or
+resumed with their complete state.
+
+As a result, `keep_last` specifies the recent checkpoint window to retain; it is
+**not a strict limit on stored checkpoints or Redis memory**. Channels that
+snapshot at different steps can require the entire chain to remain. For example,
+channels snapshotting every 2 and 3 updates may need the history before either
+channel's most recent snapshot to reconstruct an intermediate checkpoint. Older
+history can be removed once the retained checkpoints and their support ancestors
+can all be reconstructed from later stored values.
+
+`strategy="delete"` and `keep_last=0` bypass dependency preservation and remove
+the selected history. Only `"keep_latest"` and `"delete"` are valid strategies;
+an explicit `keep_last` overrides either valid strategy.
+
+#### Search limits and expiration
+
+`max_results` defaults to 10,000 and limits the initial checkpoint search across
+all namespaces in each thread. Set it high enough to include the thread's full
+checkpoint history. A truncated search can miss surviving checkpoints whose
+ancestors must be protected. This parameter is not a deletion batch size or a
+cursor for incremental pruning, and it does not limit dependency-walk reads.
+
+Pruning does not refresh TTLs, even with `refresh_on_read=True`. Dependency
+preservation assumes the required checkpoints and writes are still present; it
+cannot restore history that has already expired or been deleted. Cycles in
+required ancestry raise `ValueError` before pruning deletes keys for that thread.
 
 ## AsyncRedisSaver
 
@@ -213,6 +246,9 @@ async for ct in saver.alist(config, limit=10):
 
 # Save writes
 await saver.aput_writes(config, writes, task_id)
+
+# Prune with the same dependency-retention rules as the synchronous saver
+await saver.aprune(["thread-1"], keep_last=5)
 ```
 
 ## Using with LangGraph compile()

@@ -1012,7 +1012,7 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
                     continue
                 raise reply
         # A None command reply means the key expired, possibly between commands.
-        # Metadata is only requested for retained starting checkpoints.
+        # Metadata may expire between the field reads as well.
         if parent_id_reply is None or any(reply is None for reply in metadata_replies):
             return None
 
@@ -1056,8 +1056,11 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         checkpoint: _PruneCheckpoint,
         remaining: Optional[set[str]],
     ) -> Tuple[set[str], Optional[RunnableConfig]]:
-        """Resolve stored channels and find the next ancestor needed by this walk."""
-        unresolved = set(checkpoint.delta_channels if remaining is None else remaining)
+        """Preserve dependencies of this checkpoint and its retained descendants."""
+        unresolved = set(remaining or ())
+        # A checkpoint kept as reconstruction support is still exposed by list()
+        # and can be resumed. Its other channels must remain reconstructible too.
+        unresolved.update(checkpoint.delta_channels)
         unresolved.difference_update(checkpoint.channel_names)
         parent_config: Optional[RunnableConfig] = None
         if unresolved and checkpoint.parent_checkpoint_id:

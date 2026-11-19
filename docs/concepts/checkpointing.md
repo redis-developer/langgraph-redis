@@ -52,6 +52,19 @@ When a graph resumes, it calls `get_tuple()` to retrieve the latest (or a specif
 
 `list()` returns an iterator over all checkpoints for a given thread, ordered by recency. This supports time-travel: you can retrieve any prior state by specifying a `checkpoint_id` in the config.
 
+### Pruning
+
+`prune()` and `aprune()` retain a recent checkpoint window per namespace and
+remove older checkpoints and their associated writes. For `DeltaChannel`, a
+checkpoint may need ancestor snapshots and writes to reconstruct its state.
+Pruning therefore also preserves dependencies of every ancestor it keeps, so
+support checkpoints remain usable for time travel and resumption.
+
+This means `keep_last` is a requested recent window rather than a strict storage
+cap. Staggered snapshots across channels can require keeping the entire chain.
+See the [checkpointer guide](../user_guide/checkpointers.md#thread-management)
+for retention behavior, search-limit requirements, and expiration caveats.
+
 ## Channel Values and Blobs
 
 Channel values are the per-channel state of the graph (e.g., the `messages` list in a chat agent). Rather than storing all channel values inside the checkpoint document, the saver writes each channel as a separate **blob** keyed by channel name and version:

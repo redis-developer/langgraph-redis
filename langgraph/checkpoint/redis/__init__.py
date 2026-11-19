@@ -1677,8 +1677,10 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
 
         Retains the most-recent checkpoints **per checkpoint namespace** and
         removes the rest, along with their associated write keys and
-        key-registry sorted sets.  Ancestors needed to reconstruct a retained
-        ``DeltaChannel`` are also retained through its nearest stored snapshot.
+        key-registry sorted sets.  Ancestors needed to reconstruct every retained
+        checkpoint are also kept, including dependencies of checkpoints retained
+        as support for a ``DeltaChannel``. With staggered channel snapshots, this
+        may retain the entire checkpoint chain.
         Pruning does not refresh TTLs, even when ``refresh_on_read`` is enabled.
         A cycle in required ancestry raises ``ValueError`` before any keys for
         that thread are deleted.
@@ -1696,9 +1698,13 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
             keep_last: Optional override — number of recent checkpoints to
                 retain per namespace.  When provided, takes precedence over
                 ``strategy``.  Use ``keep_last=0`` to remove all checkpoints.
-                Delta-channel dependencies may cause more checkpoints to remain.
+                This is not a strict storage cap: DeltaChannel dependencies may
+                cause more checkpoints to remain, including the entire chain.
             max_results: Maximum number of checkpoints fetched from the index
-                per thread in a single query.  Defaults to 10 000.
+                per thread in a single query. Defaults to 10 000. Set high enough
+                to include all checkpoints across the thread's namespaces; a
+                truncated search can miss dependencies of unreturned checkpoints.
+                This does not bound ancestor reads or the number of deletions.
 
         Raises:
             ValueError: If ``strategy`` is not ``"keep_latest"`` or ``"delete"``,
@@ -1748,17 +1754,14 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
 
             # DeltaChannel checkpoints normally omit their accumulated value. Their
             # metadata names the channels that must be rebuilt by walking ancestors.
-            # Preserve that parent path through the nearest stored value for every
-            # such channel. A stored _DeltaSnapshot (or a pre-delta plain value) is a
-            # complete seed, so checkpoints older than it can still be pruned.
+            # Preserve dependencies of every checkpoint kept along the parent path,
+            # so support ancestors also remain safe to list and resume. Stop only
+            # when stored values resolve all dependencies accumulated on that path.
             retained_configs = [
                 self._prune_config_for_doc(thread_id, doc) for doc in retained
             ]
-            starting_checkpoints = {
-                self._prune_checkpoint_identity(config) for config in retained_configs
-            }
-            # Fetch each summary once per thread in this call. Starting checkpoints
-            # need metadata on their first visit, even when reached as ancestors.
+            # Fetch each summary once per thread. Every visited checkpoint needs
+            # metadata to protect its own channels as well as its descendants'.
             checkpoint_cache: Dict[Tuple[str, str], Optional[_PruneCheckpoint]] = {}
             protected: set[Tuple[str, str]] = set()
             for config in retained_configs:
@@ -1773,7 +1776,7 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
                     visited.add(identity)
                     if identity not in checkpoint_cache:
                         checkpoint_cache[identity] = self._read_prune_checkpoint(
-                            config, include_metadata=identity in starting_checkpoints
+                            config, include_metadata=True
                         )
                     checkpoint = checkpoint_cache[identity]
                     if checkpoint is None:
