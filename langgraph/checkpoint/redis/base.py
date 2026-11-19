@@ -5,7 +5,18 @@ import logging
 import random
 import time
 from abc import abstractmethod
-from typing import Any, Dict, Generic, List, Optional, Sequence, Tuple, Union, cast
+from typing import (
+    Any,
+    Dict,
+    Generic,
+    List,
+    NamedTuple,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+    cast,
+)
 
 import orjson
 from langchain_core.runnables import RunnableConfig
@@ -18,10 +29,13 @@ from langgraph.checkpoint.base import (
 )
 from langgraph.checkpoint.serde.base import SerializerProtocol
 from langgraph.checkpoint.serde.types import ChannelProtocol
+from redis.exceptions import ResponseError
 from redisvl.query import FilterQuery
 from redisvl.query.filter import Tag
 
 from langgraph.checkpoint.redis.util import (
+    from_storage_safe_id,
+    from_storage_safe_str,
     safely_decode,
     to_storage_safe_id,
     to_storage_safe_str,
@@ -36,6 +50,18 @@ logger = logging.getLogger(__name__)
 REDIS_KEY_SEPARATOR = ":"
 CHECKPOINT_PREFIX = "checkpoint"
 CHECKPOINT_WRITE_PREFIX = "checkpoint_write"
+
+
+class _PruneCheckpoint(NamedTuple):
+    channel_names: set[str]
+    parent_checkpoint_id: str
+    delta_channels: set[str]
+
+
+def _first_jsonpath_value(reply: Optional[Sequence[Any]]) -> Any:
+    """Unwrap a JSONPath match, preserving empty values; None means no value."""
+    return reply[0] if reply else None
+
 
 # Bounded retry for best-effort TTL operations. A single transient failure
 # (e.g. a MOVED error from a Redis Enterprise proxy) must not permanently
@@ -922,6 +948,145 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
             "task_id": task_id,
             "idx": idx,
         }
+
+    @staticmethod
+    def _partition_prune_candidates(
+        checkpoint_docs: Sequence[Any], keep_last: int
+    ) -> Tuple[List[Any], List[Any], set[str]]:
+        """Split checkpoint documents into retained and eviction candidates."""
+        by_ns: Dict[str, List[Any]] = {}
+        for doc in checkpoint_docs:
+            namespace = getattr(doc, "checkpoint_ns", "")
+            by_ns.setdefault(namespace, []).append(doc)
+
+        retained: List[Any] = []
+        eviction_candidates: List[Any] = []
+        fully_evicted_ns: set[str] = set()
+        for namespace, namespace_docs in by_ns.items():
+            sorted_docs = sorted(
+                namespace_docs,
+                key=lambda doc: getattr(doc, "checkpoint_id", ""),
+                reverse=True,
+            )
+            retained.extend(sorted_docs[:keep_last])
+            namespace_candidates = sorted_docs[keep_last:]
+            eviction_candidates.extend(namespace_candidates)
+            if len(namespace_candidates) == len(namespace_docs):
+                fully_evicted_ns.add(namespace)
+
+        return retained, eviction_candidates, fully_evicted_ns
+
+    @staticmethod
+    def _prune_config_for_doc(thread_id: str, doc: Any) -> RunnableConfig:
+        """Build a checkpoint lookup config from a search document."""
+        return {
+            "configurable": {
+                "thread_id": thread_id,
+                "checkpoint_ns": from_storage_safe_str(
+                    getattr(doc, "checkpoint_ns", "")
+                ),
+                "checkpoint_id": from_storage_safe_id(
+                    getattr(doc, "checkpoint_id", "")
+                ),
+            }
+        }
+
+    @staticmethod
+    def _prune_checkpoint_identity(config: RunnableConfig) -> Tuple[str, str]:
+        """Identify a checkpoint within the current thread's pruning operation."""
+        configurable = config["configurable"]
+        return (
+            to_storage_safe_str(configurable.get("checkpoint_ns", "")),
+            to_storage_safe_id(configurable["checkpoint_id"]),
+        )
+
+    @staticmethod
+    def _parse_prune_checkpoint(results: Sequence[Any]) -> Optional[_PruneCheckpoint]:
+        """Parse field-only JSONPath replies without reviving any channel values."""
+        channel_names_reply, parent_id_reply, *metadata_replies = results
+        # OBJKEYS errors on a missing key, while GET returns None. Handle that
+        # pair as an expired checkpoint, but propagate other command errors.
+        for reply in results:
+            if isinstance(reply, ResponseError):
+                if reply is channel_names_reply and parent_id_reply is None:
+                    continue
+                raise reply
+        # A None command reply means the key expired, possibly between commands.
+        # Metadata is only requested for retained starting checkpoints.
+        if parent_id_reply is None or any(reply is None for reply in metadata_replies):
+            return None
+
+        channel_names = _first_jsonpath_value(channel_names_reply)
+        # An empty channel map is valid; a missing or non-object map is not.
+        if channel_names is None:
+            return None
+        parent_id = _first_jsonpath_value(parent_id_reply) or ""
+        metadata: Any = {}
+        if metadata_replies:
+            (metadata_reply,) = metadata_replies
+            metadata = _first_jsonpath_value(metadata_reply) or {}
+        # Metadata is stored as a JSON-encoded string, not a RedisJSON object.
+        if isinstance(metadata, (str, bytes)):
+            metadata = orjson.loads(metadata)
+        counters = metadata.get("counters_since_delta_snapshot")
+        return _PruneCheckpoint(
+            channel_names={safely_decode(name) for name in channel_names},
+            parent_checkpoint_id=from_storage_safe_id(safely_decode(parent_id)),
+            delta_channels=set(counters) if isinstance(counters, dict) else set(),
+        )
+
+    def _queue_prune_checkpoint_read(
+        self, pipeline: Any, config: RunnableConfig, *, include_metadata: bool
+    ) -> None:
+        """Queue only the fields needed by pruning; never refresh their TTLs."""
+        configurable = config["configurable"]
+        key = self._make_redis_checkpoint_key(
+            configurable["thread_id"],
+            configurable.get("checkpoint_ns", ""),
+            configurable["checkpoint_id"],
+        )
+        pipeline.json().objkeys(key, "$.checkpoint.channel_values")
+        pipeline.json().get(key, "$.parent_checkpoint_id")
+        if include_metadata:
+            pipeline.json().get(key, "$.metadata")
+
+    @staticmethod
+    def _advance_delta_prune_dependencies(
+        config: RunnableConfig,
+        checkpoint: _PruneCheckpoint,
+        remaining: Optional[set[str]],
+    ) -> Tuple[set[str], Optional[RunnableConfig]]:
+        """Resolve stored channels and find the next ancestor needed by this walk."""
+        unresolved = set(checkpoint.delta_channels if remaining is None else remaining)
+        unresolved.difference_update(checkpoint.channel_names)
+        parent_config: Optional[RunnableConfig] = None
+        if unresolved and checkpoint.parent_checkpoint_id:
+            parent_config = {
+                "configurable": {
+                    **config["configurable"],
+                    "checkpoint_id": checkpoint.parent_checkpoint_id,
+                }
+            }
+        return unresolved, parent_config
+
+    @staticmethod
+    def _finalize_prune_candidates(
+        eviction_candidates: Sequence[Any],
+        fully_evicted_ns: set[str],
+        protected: set[Tuple[str, str]],
+    ) -> Tuple[List[Any], set[str]]:
+        """Remove protected DeltaChannel history from the eviction plan."""
+        to_evict = [
+            doc
+            for doc in eviction_candidates
+            if (
+                getattr(doc, "checkpoint_ns", ""),
+                getattr(doc, "checkpoint_id", ""),
+            )
+            not in protected
+        ]
+        protected_namespaces = {namespace for namespace, _ in protected}
+        return to_evict, fully_evicted_ns - protected_namespaces
 
     def _make_redis_checkpoint_key(
         self, thread_id: str, checkpoint_ns: str, checkpoint_id: str
