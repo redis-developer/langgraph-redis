@@ -778,9 +778,9 @@ def test_reads_with_max_search_results_below_the_page_size(
 def test_list_namespaces_sees_at_most_max_search_results_documents(
     redis_url: str, store: RedisStore
 ) -> None:
-    """Documented limit: an offset page past search-max-search-results comes back
-    empty, so list_namespaces sees only the first that many documents (in sort-field
-    order). The default limit is 1000000."""
+    """Documented limit: with search-max-search-results a multiple of the page size,
+    the page starting at the limit comes back empty, so list_namespaces sees only the
+    first that many documents (in sort-field order). The default limit is 1000000."""
     namespaces = _user_namespaces(1005)
     store.batch([PutOp(ns, "profile", {"name": ns[-1]}) for ns in namespaces])
 

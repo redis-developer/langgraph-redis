@@ -60,8 +60,11 @@ STORE_VECTOR_PREFIX = "store_vectors"
 # documents a page, sorted on STORE_SORT_FIELD (offset pages are only stable when
 # the sort field is unique). Batched gets query at most this many keys at a time.
 # RediSearch refuses a query asking for more than search-max-search-results
-# (MAXSEARCHRESULTS, 1000000 by default), and an offset page past that limit comes
-# back empty, so list_namespaces sees at most that many documents.
+# (MAXSEARCHRESULTS, 1000000 by default) or starting past it. When that limit is a
+# multiple of this page size, list_namespaces reads only the first that many documents
+# (the page starting at the limit comes back empty). Any other limit makes it raise
+# SEARCH_LIMIT_OVER once the matches pass the largest multiple of the page size below
+# the limit, even with fewer matches than the limit: the next page starts past it.
 STORE_SEARCH_PAGE_SIZE = 1000
 # Every store document keeps its own id (the ULID in its Redis key) in this field,
 # so list_namespaces has a unique sort key. setup() adds it to an index created
