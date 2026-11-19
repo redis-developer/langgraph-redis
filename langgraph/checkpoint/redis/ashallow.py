@@ -975,7 +975,13 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
                 shallow savers (default).  ``"delete"`` removes all.
             keep_last: Optional override.  Any value >= 1 is a no-op.
                 Pass ``0`` to delete all.
+
+        Raises:
+            ValueError: If ``strategy`` is not ``"keep_latest"`` or ``"delete"``,
+                even when ``keep_last`` is provided.
         """
+        self._validate_prune_strategy(strategy)
+
         # Resolve keep_last from strategy if not explicitly provided
         if keep_last is None:
             if strategy == "delete":

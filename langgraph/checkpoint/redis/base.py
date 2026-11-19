@@ -1088,6 +1088,14 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         protected_namespaces = {namespace for namespace, _ in protected}
         return to_evict, fully_evicted_ns - protected_namespaces
 
+    @staticmethod
+    def _validate_prune_strategy(strategy: str) -> None:
+        """Reject unsupported pruning strategies before any Redis operations."""
+        if strategy not in ("keep_latest", "delete"):
+            raise ValueError(
+                f"strategy must be 'keep_latest' or 'delete', got {strategy!r}"
+            )
+
     def _make_redis_checkpoint_key(
         self, thread_id: str, checkpoint_ns: str, checkpoint_id: str
     ) -> str:
