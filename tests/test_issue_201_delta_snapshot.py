@@ -144,7 +144,7 @@ def test_plain_dict_not_snapshot() -> None:
     [
         pytest.param([b"payload"], [b"payload"], id="bytes"),
         pytest.param([bytearray(b"payload")], [b"payload"], id="bytearray"),
-        pytest.param({1: "one"}, {"1": "one"}, id="non-string-key"),
+        pytest.param({1: "one"}, {1: "one"}, id="non-string-key"),
     ],
 )
 def test_msgpack_snapshot_roundtrip(snapshot_value: Any, expected_value: Any) -> None:

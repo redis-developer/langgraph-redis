@@ -641,9 +641,13 @@ def test_msgpack_checkpoint_with_non_string_keys_remains_json_safe() -> None:
     dumped = saver._dump_checkpoint(checkpoint)
 
     assert dumped["type"] == "msgpack"
-    assert dumped["channel_values"]["mapping"] == {"1": "one", "2": "two"}
+    stored_mapping = dumped["channel_values"]["mapping"]
+    assert stored_mapping["__redis_jsonplus_typed__"] is True
     assert isinstance(dumped["channel_values"]["messages"][0], dict)
     assert dumped["channel_values"]["binary"] == {"__bytes__": "YWJj"}
+
+    restored = saver._deserialize_channel_values(dumped["channel_values"])
+    assert restored["mapping"] == {1: "one", 2: "two"}
 
 
 def test_subgraph_state_history_pending_sends(redis_url: str) -> None:
