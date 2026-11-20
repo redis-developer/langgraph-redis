@@ -226,7 +226,10 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
             )
             if run_id := config["configurable"].get("run_id"):
                 filter_expression.append(Tag("run_id") == to_storage_safe_id(run_id))
-            if checkpoint_ns := config["configurable"].get("checkpoint_ns"):
+            # An empty string is the root namespace and is filtered on like any
+            # other; only a config with no `checkpoint_ns` lists every namespace.
+            checkpoint_ns = config["configurable"].get("checkpoint_ns")
+            if checkpoint_ns is not None:
                 filter_expression.append(
                     Tag("checkpoint_ns") == to_storage_safe_str(checkpoint_ns)
                 )
@@ -278,7 +281,7 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         # Process the results
         for doc in results.docs:
             thread_id = cast(str, getattr(doc, "thread_id", ""))
-            checkpoint_ns = cast(str, getattr(doc, "checkpoint_ns", ""))
+            checkpoint_ns = from_storage_safe_str(getattr(doc, "checkpoint_ns", ""))
             checkpoint = json.loads(doc["$.checkpoint"])
 
             # Extract channel values from the checkpoint (they're stored inline)

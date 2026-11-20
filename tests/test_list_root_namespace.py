@@ -18,6 +18,8 @@ from langgraph.graph import END, START, StateGraph
 
 from langgraph.checkpoint.redis import RedisSaver
 from langgraph.checkpoint.redis.aio import AsyncRedisSaver
+from langgraph.checkpoint.redis.ashallow import AsyncShallowRedisSaver
+from langgraph.checkpoint.redis.shallow import ShallowRedisSaver
 
 CHILD_NS = "child:1"
 METADATA: CheckpointMetadata = {"source": "loop", "step": 1}
@@ -142,10 +144,11 @@ async def test_aget_state_history_before_excludes_subgraph_checkpoints(
     assert _history_steps(before) == expected
 
 
-def test_list_filters_by_root_namespace(redis_url: str) -> None:
+@pytest.mark.parametrize("saver_class", [RedisSaver, ShallowRedisSaver])
+def test_list_filters_by_root_namespace(redis_url: str, saver_class: type) -> None:
     thread_id = f"root-ns-{uuid.uuid4()}"
 
-    with RedisSaver.from_conn_string(redis_url) as saver:
+    with saver_class.from_conn_string(redis_url) as saver:
         saver.setup()
         for checkpoint_ns in ("", CHILD_NS):
             config = _config(thread_id, checkpoint_ns)
@@ -161,10 +164,13 @@ def test_list_filters_by_root_namespace(redis_url: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_alist_filters_by_root_namespace(redis_url: str) -> None:
+@pytest.mark.parametrize("saver_class", [AsyncRedisSaver, AsyncShallowRedisSaver])
+async def test_alist_filters_by_root_namespace(
+    redis_url: str, saver_class: type
+) -> None:
     thread_id = f"root-ns-{uuid.uuid4()}"
 
-    async with AsyncRedisSaver.from_conn_string(redis_url) as saver:
+    async with saver_class.from_conn_string(redis_url) as saver:
         await saver.asetup()
         for checkpoint_ns in ("", CHILD_NS):
             config = _config(thread_id, checkpoint_ns)
@@ -179,3 +185,59 @@ async def test_alist_filters_by_root_namespace(redis_url: str) -> None:
     assert _namespaces(root) == [""]
     assert _namespaces(child) == [CHILD_NS]
     assert _namespaces(every) == ["", CHILD_NS]
+
+
+def test_shallow_get_state_history_excludes_subgraph_checkpoints(
+    redis_url: str,
+) -> None:
+    """A shallow saver keeps the latest checkpoint of each namespace."""
+    thread = {"configurable": {"thread_id": f"root-ns-{uuid.uuid4()}"}}
+
+    with ShallowRedisSaver.from_conn_string(redis_url) as saver:
+        saver.setup()
+        app = _graph(saver)
+        app.invoke({"count": 0}, thread)
+        history = list(app.get_state_history(thread))
+
+    assert [s.config["configurable"]["checkpoint_ns"] for s in history] == [""]
+    assert history[0].values == {"count": 3}
+
+
+@pytest.mark.asyncio
+async def test_ashallow_get_state_history_excludes_subgraph_checkpoints(
+    redis_url: str,
+) -> None:
+    """A shallow saver keeps the latest checkpoint of each namespace."""
+    thread = {"configurable": {"thread_id": f"root-ns-{uuid.uuid4()}"}}
+
+    async with AsyncShallowRedisSaver.from_conn_string(redis_url) as saver:
+        await saver.asetup()
+        app = _graph(saver)
+        await app.ainvoke({"count": 0}, thread)
+        history = [s async for s in app.aget_state_history(thread)]
+
+    assert [s.config["configurable"]["checkpoint_ns"] for s in history] == [""]
+    assert history[0].values == {"count": 3}
+
+
+@pytest.mark.asyncio
+async def test_shallow_savers_list_each_others_root_checkpoints(
+    redis_url: str,
+) -> None:
+    """Both shallow savers store the root namespace the same way."""
+    async_thread, sync_thread = f"root-ns-{uuid.uuid4()}", f"root-ns-{uuid.uuid4()}"
+
+    async with AsyncShallowRedisSaver.from_conn_string(redis_url) as async_saver:
+        await async_saver.asetup()
+        await async_saver.aput(
+            _config(async_thread, ""), empty_checkpoint(), METADATA, {}
+        )
+        with ShallowRedisSaver.from_conn_string(redis_url) as sync_saver:
+            sync_saver.setup()
+            sync_saver.put(_config(sync_thread, ""), empty_checkpoint(), METADATA, {})
+
+            from_sync = list(sync_saver.list(_config(async_thread, "")))
+        from_async = [t async for t in async_saver.alist(_config(sync_thread, ""))]
+
+    assert _namespaces(from_sync) == [""]
+    assert _namespaces(from_async) == [""]
