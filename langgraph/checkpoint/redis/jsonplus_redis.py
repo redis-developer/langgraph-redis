@@ -12,8 +12,10 @@ logger = logging.getLogger(__name__)
 def _interrupt_fields() -> set[str]:
     """Return the set of field names on the installed Interrupt dataclass.
 
-    langgraph <=1.0.x has Interrupt(value, id).
-    langgraph >=1.1.x has Interrupt(value, resumable, ns, when).
+    The fields differ across langgraph versions: before 0.6 Interrupt has
+    (value, resumable, ns, when), later versions have (value, id), and newer
+    ones add response_schema. Interrupts are stored with whatever fields the
+    installed version has, so none is dropped.
     """
     from langgraph.types import Interrupt
 
@@ -22,29 +24,24 @@ def _interrupt_fields() -> set[str]:
 
 def _serialize_interrupt(obj: Any, *, preprocess: Any = None) -> dict[str, Any]:
     """Serialize an Interrupt object using whichever fields exist."""
-    fields = _interrupt_fields()
     result: dict[str, Any] = {"__interrupt__": True}
-    if preprocess is not None:
-        result["value"] = preprocess(obj.value)
-    else:
-        result["value"] = obj.value
-    # Persist every field the installed Interrupt has (except value, handled above)
-    for field in ("id", "resumable", "ns", "when"):
-        if field in fields:
-            result[field] = getattr(obj, field)
+    # Persist every field the installed Interrupt has, encoded for Redis JSON
+    for field in sorted(_interrupt_fields()):
+        field_value = getattr(obj, field)
+        result[field] = preprocess(field_value) if preprocess else field_value
     return result
 
 
 def _deserialize_interrupt(obj: dict[str, Any], *, revive: Any = None) -> Any:
-    """Reconstruct an Interrupt from a serialized dict, tolerating both formats."""
+    """Reconstruct an Interrupt from a serialized dict, whichever fields it holds."""
     from langgraph.types import Interrupt
 
     fields = _interrupt_fields()
     value = revive(obj["value"]) if revive is not None else obj["value"]
     kwargs: dict[str, Any] = {"value": value}
     # Pass through whichever optional fields the installed class accepts
-    for field in ("id", "resumable", "ns", "when"):
-        if field in fields and field in obj:
+    for field in fields - {"value"}:
+        if field in obj:
             kwargs[field] = obj[field]
     return Interrupt(**kwargs)
 
@@ -397,9 +394,9 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
                 return self._reviver(revived)
 
             # Check if this is a serialized Interrupt object with type marker.
-            # Handles both formats:
-            #   langgraph <=1.0.x: {"__interrupt__": True, "value": ..., "id": ...}
-            #   langgraph >=1.1.x: {"__interrupt__": True, "value": ..., "resumable": ..., "ns": ..., "when": ...}
+            # The payload holds the fields of the Interrupt that wrote it, e.g.
+            #   {"__interrupt__": True, "value": ..., "id": ..., "response_schema": ...}
+            #   {"__interrupt__": True, "value": ..., "resumable": ..., "ns": ..., "when": ...}
             if revived.get("__interrupt__") is True and "value" in revived:
                 try:
                     return _deserialize_interrupt(revived)
