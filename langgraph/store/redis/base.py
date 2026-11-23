@@ -56,6 +56,35 @@ logger = logging.getLogger(__name__)
 REDIS_KEY_SEPARATOR = ":"
 STORE_PREFIX = "store"
 STORE_VECTOR_PREFIX = "store_vectors"
+# list_namespaces pages through every match with RedisVL's paginate(), this many
+# documents a page, sorted on STORE_SORT_FIELD (offset pages are only stable when
+# the sort field is unique). Batched gets query at most this many keys at a time.
+# RediSearch refuses a query asking for more than search-max-search-results
+# (MAXSEARCHRESULTS, 1000000 by default) or starting past it. When that limit is a
+# multiple of this page size, list_namespaces reads only the first that many documents
+# (the page starting at the limit comes back empty). Any other limit makes it raise
+# SEARCH_LIMIT_OVER once the matches pass the largest multiple of the page size below
+# the limit, even with fewer matches than the limit: the next page starts past it.
+STORE_SEARCH_PAGE_SIZE = 1000
+# Every store document keeps its own id (the ULID in its Redis key) in this field,
+# so list_namespaces has a unique sort key. setup() adds it to an index created
+# before the field existed and backfills documents written without it.
+STORE_SORT_FIELD = "doc_id"
+
+
+class StoreSetupRequiredError(RuntimeError):
+    """The store index was created by an older version and lacks STORE_SORT_FIELD.
+
+    Call setup() once, with credentials that can alter the index and write to
+    the store, to add the field and backfill existing documents.
+    """
+
+
+class StoreIndexNotReadyError(TimeoutError):
+    """The store index is still indexing its documents: setup() waited
+    index_ready_timeout seconds, or list_namespaces() found it unfinished."""
+
+
 # Smallest number of documents read per cursor round trip when a search filter is
 # applied client-side
 FILTER_READ_SIZE = 100
@@ -153,6 +182,7 @@ SCHEMAS = [
             {"name": "updated_at", "type": "numeric"},
             {"name": "ttl_minutes", "type": "numeric"},
             {"name": "expires_at", "type": "numeric"},
+            {"name": STORE_SORT_FIELD, "type": "tag", "attrs": {"sortable": True}},
         ],
     },
     {
@@ -193,6 +223,7 @@ class RedisDocument(TypedDict, total=False):
     updated_at: int
     ttl_minutes: Optional[float]
     expires_at: Optional[int]
+    doc_id: str
 
 
 class BaseRedisStore(Generic[RedisClientType, IndexType]):
@@ -205,6 +236,11 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
     _ttl_stop_event: threading.Event | None = None
     # Whether to operate in Redis cluster mode; None triggers auto-detection
     cluster_mode: Optional[bool] = None
+    # Set once this instance has seen STORE_SORT_FIELD in the store index
+    _has_sort_field: bool = False
+    # Seconds setup() waits for the store index to finish indexing after adding
+    # STORE_SORT_FIELD before it raises StoreIndexNotReadyError; set before setup()
+    index_ready_timeout: float = 60.0
     SCHEMAS = SCHEMAS
     # Storage type the vector index is forced to, overriding the caller's
     # ``index["vector_storage_type"]``. None (the sync store) honours the
@@ -360,6 +396,11 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
                 {"name": "updated_at", "type": "numeric"},
                 {"name": "ttl_minutes", "type": "numeric"},
                 {"name": "expires_at", "type": "numeric"},
+                {
+                    "name": STORE_SORT_FIELD,
+                    "type": "tag",
+                    "attrs": {"sortable": True},
+                },
             ],
         }
         if not self.index_config:
@@ -564,27 +605,99 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
         # Return as-is for backward compatibility
         return value
 
+    @staticmethod
+    def _index_has_field(info: Dict[str, Any], name: str) -> bool:
+        """Whether FT.INFO output lists an attribute called ``name``."""
+        for attr in info.get("attributes", []):
+            values = [v.decode() if isinstance(v, bytes) else v for v in attr]
+            if "attribute" in values:
+                i = values.index("attribute")
+                if i + 1 < len(values) and values[i + 1] == name:
+                    return True
+        return False
+
+    @staticmethod
+    def _still_indexing(info: Dict[str, Any]) -> bool:
+        """Whether FT.INFO says the index is still scanning existing documents,
+        as it does after FT.ALTER adds a field."""
+        indexing = info.get("indexing", 0)
+        if isinstance(indexing, bytes):
+            indexing = indexing.decode()
+        return str(indexing) not in ("0", "0.0")
+
+    def _setup_required_error(self) -> StoreSetupRequiredError:
+        return StoreSetupRequiredError(
+            f"Store index '{self.store_index.name}' has no '{STORE_SORT_FIELD}' "
+            "field, which list_namespaces() needs. The index was created by an "
+            "older version: call setup() once to add the field and backfill "
+            "existing documents."
+        )
+
+    def _index_not_ready_error(self) -> StoreIndexNotReadyError:
+        return StoreIndexNotReadyError(
+            f"Store index '{self.store_index.name}' is still indexing its "
+            "documents, and list_namespaces() pages read now could skip some. "
+            "Retry setup() once indexing completes, or raise index_ready_timeout "
+            f"(now {self.index_ready_timeout:g}s)."
+        )
+
+    def _sort_field_definition(self) -> Any:
+        """The STORE_SORT_FIELD definition as FT.ALTER takes it, built from the
+        same schema the index is created from."""
+        return self.store_index.schema.fields[STORE_SORT_FIELD].as_redis_field()
+
+    @staticmethod
+    def _missing_sort_field_request() -> AggregateRequest:
+        """One batch of store documents that have no STORE_SORT_FIELD yet."""
+        return (
+            AggregateRequest("*")
+            .load("@__key", f"@{STORE_SORT_FIELD}")
+            .filter(f"!exists(@{STORE_SORT_FIELD})")
+            .limit(0, STORE_SEARCH_PAGE_SIZE)
+        )
+
+    def _sort_field_backfill(self, rows: Iterable[Any]) -> list[tuple[str, str]]:
+        """(Redis key, doc id) for each row of _missing_sort_field_request().
+
+        The doc id is the ULID after the store prefix in the key, the same value
+        new documents get when they are written.
+        """
+        prefix = f"{self.store_prefix}{REDIS_KEY_SEPARATOR}"
+        backfill = []
+        for row in rows:
+            values = [v.decode() if isinstance(v, bytes) else v for v in row]
+            fields = dict(zip(values[::2], values[1::2]))
+            key = fields.get("__key")
+            if isinstance(key, str) and key.startswith(prefix):
+                backfill.append((key, key[len(prefix) :]))
+        return backfill
+
     def _get_batch_GET_ops_queries(
         self,
         get_ops: Sequence[tuple[int, GetOp]],
     ) -> list[tuple[str, Sequence, tuple[str, ...], list]]:
-        """Convert GET operations into Redis queries."""
+        """Convert GET operations into Redis queries.
+
+        One query per namespace and per chunk of at most STORE_SEARCH_PAGE_SIZE
+        distinct keys. Each query matches at most one document per key, so the
+        caller asks for as many results as the chunk has distinct keys.
+        """
         namespace_groups = defaultdict(list)
         for idx, op in get_ops:
             namespace_groups[op.namespace].append((idx, op.key))
 
         results: list[tuple[str, Sequence, tuple[str, ...], list]] = []
         for namespace, items in namespace_groups.items():
-            _, keys = zip(*items)
+            keys = list(dict.fromkeys(key for _, key in items))
             # Use Tag helper to properly escape all special characters
             prefix_filter = Text("prefix") == _namespace_to_text(namespace)
-            filter_str = f"({prefix_filter} "
-            if keys:
-                key_filter = Tag("key") == list(keys)
-                filter_str += f"{key_filter})"
-            else:
-                filter_str += ")"
-            results.append((filter_str, [], namespace, items))
+            for start in range(0, len(keys), STORE_SEARCH_PAGE_SIZE):
+                chunk = keys[start : start + STORE_SEARCH_PAGE_SIZE]
+                key_filter = Tag("key") == chunk
+                filter_str = f"({prefix_filter} {key_filter})"
+                chunk_keys = set(chunk)
+                chunk_items = [(idx, key) for idx, key in items if key in chunk_keys]
+                results.append((filter_str, [], namespace, chunk_items))
         return results
 
     def _prepare_batch_PUT_queries(
