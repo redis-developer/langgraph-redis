@@ -211,6 +211,8 @@ async def test_async_cluster_mode_behavior_differs(
     mock_index_cluster.load = AsyncMock(return_value=None)
     mock_index_cluster.query = AsyncMock(return_value=[])  # For vector search mocks
     mock_index_cluster.create = AsyncMock(return_value=None)  # For setup
+    # Puts are checked against the store schema before anything is written.
+    mock_index_cluster.schema = async_cluster_store.store_index.schema
     async_cluster_store.store_index = mock_index_cluster
     async_cluster_store.vector_index = mock_index_cluster
     # Adding the sort field needs a real search index (see
@@ -238,6 +240,7 @@ async def test_async_cluster_mode_behavior_differs(
     mock_index_non_cluster.load = AsyncMock(return_value=None)
     mock_index_non_cluster.query = AsyncMock(return_value=[])
     mock_index_non_cluster.create = AsyncMock(return_value=None)
+    mock_index_non_cluster.schema = async_non_cluster_store.store_index.schema
     async_non_cluster_store.store_index = mock_index_non_cluster
     async_non_cluster_store.vector_index = mock_index_non_cluster
     # Adding the sort field needs a real search index (see

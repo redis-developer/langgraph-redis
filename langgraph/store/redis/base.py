@@ -41,6 +41,7 @@ from redis.commands.search.aggregation import AggregateRequest
 from redis.exceptions import ResponseError
 from redisvl.index import SearchIndex
 from redisvl.query.filter import Tag, Text
+from redisvl.schema import validate_object
 from redisvl.utils.token_escaper import TokenEscaper
 
 from langgraph.checkpoint.redis.jsonplus_redis import JsonPlusRedisSerializer
@@ -699,6 +700,30 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
                 chunk_items = [(idx, key) for idx, key in items if key in chunk_keys]
                 results.append((filter_str, [], namespace, chunk_items))
         return results
+
+    def _validate_put_ops(self, put_ops: Sequence[tuple[int, PutOp]]) -> None:
+        """Check every put and delete in a batch before any op reaches Redis.
+
+        A batch writes op by op and deletes each key's old documents first, so an
+        op that failed part-way through would leave the ops before it with their
+        old documents deleted and their new ones unwritten. Raises ValueError, as
+        BaseStore does for an invalid namespace.
+        """
+        for _, op in put_ops:
+            if op.key == "":
+                # Redis doesn't index an empty tag, so the key query for "" is
+                # a syntax error and the item could never be read back.
+                raise ValueError(
+                    "Store keys cannot be empty strings. "
+                    f"Got an empty key in namespace {op.namespace}."
+                )
+            if op.value is not None:
+                # RedisVL checks the document fields that come from the caller;
+                # the store fills in the rest.
+                validate_object(
+                    self.store_index.schema,
+                    {"prefix": _namespace_to_text(op.namespace), "key": op.key},
+                )
 
     def _prepare_batch_PUT_queries(
         self,

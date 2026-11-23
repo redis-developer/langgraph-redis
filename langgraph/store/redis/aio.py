@@ -402,6 +402,9 @@ class AsyncRedisStore(
         grouped_ops, num_ops = _group_ops(ops)
         results: list[Result] = [None] * num_ops
 
+        if PutOp in grouped_ops:
+            self._validate_put_ops(cast(list[tuple[int, PutOp]], grouped_ops[PutOp]))
+
         tasks = []
 
         if GetOp in grouped_ops:
