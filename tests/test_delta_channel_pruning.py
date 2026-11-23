@@ -9,6 +9,7 @@ import pytest
 from langgraph.channels import DeltaChannel
 from langgraph.checkpoint.serde.types import _DeltaSnapshot
 from langgraph.graph import START, StateGraph
+from langgraph.types import Command, interrupt
 from redis.exceptions import ResponseError
 
 from langgraph.checkpoint.redis import RedisSaver
@@ -44,10 +45,18 @@ class _Checkpointer:
             "_aread_prune_checkpoint" if self.is_async else "_read_prune_checkpoint"
         )
 
-    async def invoke(self, graph: Any, value: int, config: Any) -> Any:
+    async def invoke(
+        self, graph: Any, value: Any, config: Any, *, durability: str = "sync"
+    ) -> Any:
+        graph_input = value if isinstance(value, Command) else {"value": value}
         if self.is_async:
-            return await graph.ainvoke({"value": value}, config, durability="sync")
-        return graph.invoke({"value": value}, config, durability="sync")
+            return await graph.ainvoke(graph_input, config, durability=durability)
+        return graph.invoke(graph_input, config, durability=durability)
+
+    async def update_state(self, graph: Any, config: Any, values: Any) -> Any:
+        if self.is_async:
+            return await graph.aupdate_state(config, values)
+        return graph.update_state(config, values)
 
     async def state(self, graph: Any, config: Any) -> Any:
         if self.is_async:
@@ -75,12 +84,18 @@ class _Checkpointer:
 async def checkpointer(
     request: pytest.FixtureRequest, redis_url: str
 ) -> AsyncIterator[_Checkpointer]:
-    if request.param == "sync":
-        with RedisSaver.from_conn_string(redis_url) as saver:
+    mode, _, decoded = request.param.partition("-")
+    connection_args = {"decode_responses": True} if decoded else None
+    if mode == "sync":
+        with RedisSaver.from_conn_string(
+            redis_url, connection_args=connection_args
+        ) as saver:
             saver.setup()
             yield _Checkpointer(saver)
     else:
-        async with AsyncRedisSaver.from_conn_string(redis_url) as async_saver:
+        async with AsyncRedisSaver.from_conn_string(
+            redis_url, connection_args=connection_args
+        ) as async_saver:
             await async_saver.asetup()
             yield _Checkpointer(async_saver)
 
@@ -131,6 +146,38 @@ def _compile_multi_channel_graph(checkpointer: Any) -> Any:
         "append", lambda state: {"fast": [state["value"]], "slow": [state["value"]]}
     )
     builder.add_edge(START, "append")
+    return builder.compile(checkpointer=checkpointer)
+
+
+def _compile_late_channel_graph(checkpointer: Any) -> Any:
+    class State(TypedDict, total=False):
+        value: int
+        delta: Annotated[list[int], DeltaChannel(_append_writes, snapshot_frequency=2)]
+        late: Annotated[list[int], DeltaChannel(_append_writes, snapshot_frequency=2)]
+
+    def append(state: dict[str, Any]) -> dict[str, list[int]]:
+        update = {"delta": [state["value"]]}
+        # `late` gets its first version on the third invocation.
+        if state["value"] >= 3:
+            update["late"] = [state["value"]]
+        return update
+
+    builder = StateGraph(State)
+    builder.add_node("append", append)
+    builder.add_edge(START, "append")
+    return builder.compile(checkpointer=checkpointer)
+
+
+def _compile_interrupt_graph(checkpointer: Any) -> Any:
+    class State(TypedDict, total=False):
+        value: int
+        delta: Annotated[list[int], DeltaChannel(_append_writes, snapshot_frequency=2)]
+
+    builder = StateGraph(State)
+    builder.add_node("append", lambda state: {"delta": [state["value"]]})
+    builder.add_node("ask", lambda state: {"delta": [interrupt("next value")]})
+    builder.add_edge(START, "append")
+    builder.add_edge("append", "ask")
     return builder.compile(checkpointer=checkpointer)
 
 
@@ -211,6 +258,23 @@ def _assert_retention(
 ) -> None:
     expected = [cp for cp in before if cp.metadata["step"] >= oldest_step]
     assert [cp.config for cp in after] == [cp.config for cp in expected]
+
+
+def _nearest_seed_step(checkpoints: list[Any], *channels: str) -> int:
+    """Oldest step a linear thread needs: each channel's newest stored value.
+
+    `checkpoints` is newest-first. A channel with no stored value anywhere is
+    rebuilt from the start of the thread, so it needs every checkpoint (-1).
+    """
+    steps = []
+    for channel in channels:
+        stored = [
+            cp.metadata["step"]
+            for cp in checkpoints
+            if channel in cp.checkpoint["channel_values"]
+        ]
+        steps.append(stored[0] if stored else -1)
+    return min(steps)
 
 
 def _expected_fork_retention(
@@ -439,6 +503,134 @@ async def test_prune_preserves_forked_delta_history(
         _assert_branch_state((await checkpointer.state(graph, branch)).values, values)
         result = await checkpointer.invoke(graph, next_value, branch)
         _assert_branch_state(result, values + [next_value])
+
+
+@pytest.mark.parametrize(
+    "checkpointer", ["sync-decoded", "async-decoded"], indirect=True
+)
+@pytest.mark.parametrize("unused_channel", UNUSED_CHANNEL_CASES)
+async def test_prune_preserves_delta_channel_history_with_decoded_responses(
+    checkpointer: _Checkpointer, unused_channel: bool
+) -> None:
+    # decode_responses=True returns str channel names instead of bytes.
+    thread_id = f"delta-decoded-{uuid4()}"
+    config = _config(thread_id)
+    graph = _compile_graph(
+        checkpointer.saver, snapshot_frequency=2, unused_channel=unused_channel
+    )
+    for value in (1, 2, 3):
+        await checkpointer.invoke(graph, value, config)
+    before = await checkpointer.checkpoints(config)
+
+    await checkpointer.prune([thread_id], keep_last=1)
+
+    _assert_retention(before, await checkpointer.checkpoints(config), oldest_step=4)
+    state = await checkpointer.state(graph, config)
+    _assert_state(state.values, [1, 2, 3], 3, unused_channel=unused_channel)
+
+
+@pytest.mark.parametrize("durability", ["async", "exit"])
+async def test_prune_preserves_delta_channel_history_with_durability(
+    checkpointer: _Checkpointer, durability: str
+) -> None:
+    thread_id = f"delta-durability-{uuid4()}"
+    config = _config(thread_id)
+    graph = _compile_graph(checkpointer.saver, snapshot_frequency=2)
+    for value in range(1, 6):
+        await checkpointer.invoke(graph, value, config, durability=durability)
+    before = await checkpointer.checkpoints(config)
+    oldest_step = _nearest_seed_step(before, "delta")
+    assert oldest_step > before[-1].metadata["step"]
+
+    await checkpointer.prune([thread_id], keep_last=1)
+
+    _assert_retention(before, await checkpointer.checkpoints(config), oldest_step)
+    state = await checkpointer.state(graph, config)
+    _assert_state(state.values, [1, 2, 3, 4, 5], 5)
+    await checkpointer.invoke(graph, 6, config, durability=durability)
+    state = await checkpointer.state(graph, config)
+    _assert_state(state.values, list(range(1, 7)), 6)
+
+
+@pytest.mark.parametrize(
+    "invocations", [3, 5], ids=["late-not-snapshotted", "late-snapshotted"]
+)
+async def test_prune_preserves_channel_first_written_later(
+    checkpointer: _Checkpointer, invocations: int
+) -> None:
+    thread_id = f"delta-late-{uuid4()}"
+    config = _config(thread_id)
+    graph = _compile_late_channel_graph(checkpointer.saver)
+    for value in range(1, invocations + 1):
+        await checkpointer.invoke(graph, value, config)
+    before = await checkpointer.checkpoints(config)
+    oldest_step = _nearest_seed_step(before, "delta", "late")
+    # Until `late` has a snapshot, rebuilding it needs the whole thread.
+    assert (oldest_step == -1) == (invocations == 3)
+
+    await checkpointer.prune([thread_id], keep_last=1)
+
+    _assert_retention(before, await checkpointer.checkpoints(config), oldest_step)
+    expected = {
+        "value": invocations,
+        "delta": list(range(1, invocations + 1)),
+        "late": list(range(3, invocations + 1)),
+    }
+    assert (await checkpointer.state(graph, config)).values == expected
+    await checkpointer.invoke(graph, invocations + 1, config)
+    state = await checkpointer.state(graph, config)
+    assert state.values["late"] == list(range(3, invocations + 2))
+
+
+async def test_prune_preserves_delta_channel_history_after_update_state(
+    checkpointer: _Checkpointer,
+) -> None:
+    thread_id = f"delta-update-state-{uuid4()}"
+    config = _config(thread_id)
+    graph = _compile_graph(checkpointer.saver, snapshot_frequency=2)
+    for value in (1, 2):
+        await checkpointer.invoke(graph, value, config)
+    await checkpointer.update_state(graph, config, {"delta": [99]})
+    before = await checkpointer.checkpoints(config)
+    # The update_state head stores no value, so it needs the snapshot at value 2.
+    assert before[0].metadata["source"] == "update"
+    assert "delta" not in before[0].checkpoint["channel_values"]
+    oldest_step = _nearest_seed_step(before, "delta")
+    assert oldest_step > before[-1].metadata["step"]
+
+    await checkpointer.prune([thread_id], keep_last=1)
+
+    _assert_retention(before, await checkpointer.checkpoints(config), oldest_step)
+    state = await checkpointer.state(graph, config)
+    assert state.values["delta"] == [1, 2, 99]
+    await checkpointer.invoke(graph, 3, config)
+    state = await checkpointer.state(graph, config)
+    assert state.values["delta"] == [1, 2, 99, 3]
+
+
+async def test_prune_preserves_interrupted_delta_run(
+    checkpointer: _Checkpointer,
+) -> None:
+    thread_id = f"delta-interrupt-{uuid4()}"
+    config = _config(thread_id)
+    graph = _compile_interrupt_graph(checkpointer.saver)
+    for value in (1, 2):
+        await checkpointer.invoke(graph, value, config)
+        await checkpointer.invoke(graph, Command(resume=value * 10), config)
+    await checkpointer.invoke(graph, 3, config)  # Pauses at the interrupt.
+    paused = await checkpointer.state(graph, config)
+    assert paused.next == ("ask",)
+    before = await checkpointer.checkpoints(config)
+    oldest_step = _nearest_seed_step(before, "delta")
+    assert oldest_step > before[-1].metadata["step"]
+
+    await checkpointer.prune([thread_id], keep_last=1)
+
+    _assert_retention(before, await checkpointer.checkpoints(config), oldest_step)
+    state = await checkpointer.state(graph, config)
+    assert (state.values, state.next) == (paused.values, paused.next)
+    result = await checkpointer.invoke(graph, Command(resume=30), config)
+    assert result["delta"] == [1, 10, 2, 20, 3, 30]
 
 
 @pytest.mark.parametrize(
