@@ -76,6 +76,9 @@ class AsyncRedisStore(
     _async_ttl_stop_event: asyncio.Event | None = None
     _ttl_sweeper_task: asyncio.Task | None = None
     ttl_config: Optional[TTLConfig] = None
+    # Event loop the store runs on; captured in setup() so that synchronous
+    # calls from worker threads can be submitted to it.
+    loop: Optional[asyncio.AbstractEventLoop] = None
     # Whether to assume the Redis server is a cluster; None triggers auto-detection
     cluster_mode: Optional[bool] = None
     # The async store has ALWAYS written vectors as JSON documents — its
@@ -150,6 +153,9 @@ class AsyncRedisStore(
 
     async def setup(self) -> None:
         """Initialize store indices."""
+        # Remember the loop so that batch() can be called from another thread.
+        self.loop = asyncio.get_running_loop()
+
         # Handle embeddings in same way as sync store
         if self.index_config:
             self.embeddings = ensure_embeddings(
@@ -454,9 +460,16 @@ class AsyncRedisStore(
 
         Raises:
             asyncio.InvalidStateError: If called from the main event loop
+            RuntimeError: If the store has not been set up with ``setup()``
         """
+        if self.loop is None:
+            raise RuntimeError(
+                "AsyncRedisStore must be set up before calling synchronous methods. "
+                "Call `await store.setup()` or use "
+                "`async with AsyncRedisStore.from_conn_string(...)` first."
+            )
         try:
-            if asyncio.get_running_loop():
+            if asyncio.get_running_loop() is self.loop:
                 raise asyncio.InvalidStateError(
                     "Synchronous calls to AsyncRedisStore are only allowed from a "
                     "different thread. From the main thread, use the async interface."
@@ -465,9 +478,7 @@ class AsyncRedisStore(
                 )
         except RuntimeError:
             pass
-        return asyncio.run_coroutine_threadsafe(
-            self.abatch(ops), asyncio.get_event_loop()
-        ).result()
+        return asyncio.run_coroutine_threadsafe(self.abatch(ops), self.loop).result()
 
     async def _search_all(self, query: FilterQuery) -> AsyncIterator[dict[str, Any]]:
         """Yield every document in the store index that matches ``query``.
