@@ -1,5 +1,6 @@
 import operator
 from collections.abc import AsyncIterator, Iterator
+from functools import partial
 from typing import Annotated, Any, TypedDict
 from unittest.mock import DEFAULT, Mock, call, patch
 from uuid import uuid4
@@ -25,6 +26,11 @@ RETENTION_CASES = (
     pytest.param(2, 2, 4, id="overlapping-chains"),
     pytest.param(3, 2, -1, id="older-retained-checkpoint-needs-ancestors"),
 )
+# A declared DeltaChannel that is never written must not change what is retained.
+UNUSED_CHANNEL_CASES = (
+    pytest.param(False, id="written-channels-only"),
+    pytest.param(True, id="with-unwritten-channel"),
+)
 
 
 @pytest.fixture
@@ -45,7 +51,9 @@ def _append_writes(state: list[int], writes: list[list[int]]) -> list[int]:
     return state + [value for write in writes for value in write]
 
 
-def _compile_graph(checkpointer: Any, snapshot_frequency: int) -> Any:
+def _compile_graph(
+    checkpointer: Any, snapshot_frequency: int, *, unused_channel: bool = False
+) -> Any:
     class State(TypedDict, total=False):
         value: int
         delta: Annotated[
@@ -54,7 +62,15 @@ def _compile_graph(checkpointer: Any, snapshot_frequency: int) -> Any:
         ]
         accumulated: Annotated[list[int], operator.add]
 
-    builder = StateGraph(State)
+    class StateWithUnusedChannel(State, total=False):
+        # Declared but never written: LangGraph still counts it in
+        # counters_since_delta_snapshot, but never versions, snapshots or replays it.
+        unused: Annotated[
+            list[int],
+            DeltaChannel(_append_writes, snapshot_frequency=snapshot_frequency),
+        ]
+
+    builder = StateGraph(StateWithUnusedChannel if unused_channel else State)
     builder.add_node(
         "append",
         lambda state: {
@@ -133,12 +149,21 @@ def _subgraph_namespace(checkpoints: list[Any]) -> str:
     return namespaces.pop()
 
 
-def _assert_state(state: dict[str, Any], values: list[int], value: int) -> None:
-    assert state == {
+def _assert_state(
+    state: dict[str, Any],
+    values: list[int],
+    value: int,
+    *,
+    unused_channel: bool = False,
+) -> None:
+    expected = {
         "value": value,
         "delta": values,
         "accumulated": list(range(1, value + 1)),
     }
+    if unused_channel:
+        expected["unused"] = []
+    assert state == expected
 
 
 def _assert_retention(
@@ -191,6 +216,7 @@ def _cycle_parent_update(
     return saver._make_redis_checkpoint_key(**target), head["checkpoint_id"]
 
 
+@pytest.mark.parametrize("unused_channel", UNUSED_CHANNEL_CASES)
 @pytest.mark.parametrize(
     ("snapshot_frequency", "keep_last", "oldest_step"),
     RETENTION_CASES,
@@ -200,20 +226,26 @@ def test_prune_preserves_delta_channel_history(
     snapshot_frequency: int,
     keep_last: int,
     oldest_step: int,
+    unused_channel: bool,
 ) -> None:
     thread_id = f"delta-prune-{uuid4()}"
     config = _config(thread_id)
+    assert_state = partial(_assert_state, unused_channel=unused_channel)
 
-    graph = _compile_graph(saver, snapshot_frequency)
+    graph = _compile_graph(saver, snapshot_frequency, unused_channel=unused_channel)
     for value in (1, 2, 3):
         graph.invoke({"value": value}, config, durability="sync")
 
-    _assert_state(graph.get_state(config).values, [1, 2, 3], 3)
+    assert_state(graph.get_state(config).values, [1, 2, 3], 3)
     before = list(saver.list(config))
     retained = before[:keep_last]
     expected_states = [graph.get_state(cp.config).values for cp in retained]
     latest = saver.get_tuple(config)
     assert latest is not None
+    if unused_channel:
+        # Counted like every declared DeltaChannel, but never given a version.
+        assert "unused" in latest.metadata["counters_since_delta_snapshot"]
+        assert "unused" not in latest.checkpoint["channel_versions"]
     if snapshot_frequency == 3:
         assert isinstance(
             latest.checkpoint["channel_values"].get("delta"), _DeltaSnapshot
@@ -247,16 +279,17 @@ def test_prune_preserves_delta_channel_history(
         read.args[1] for read in reads.call_args_list if read.kwargs["include_metadata"]
     ] == [checkpoint.config for checkpoint in retained]
 
-    _assert_state(graph.get_state(config).values, [1, 2, 3], 3)
+    assert_state(graph.get_state(config).values, [1, 2, 3], 3)
     _assert_retention(before, list(saver.list(config)), oldest_step)
     for checkpoint, expected_state in zip(retained, expected_states):
         assert saver.get_tuple(checkpoint.config) is not None
         assert graph.get_state(checkpoint.config).values == expected_state
 
     graph.invoke({"value": 4}, config, durability="sync")
-    _assert_state(graph.get_state(config).values, [1, 2, 3, 4], 4)
+    assert_state(graph.get_state(config).values, [1, 2, 3, 4], 4)
 
 
+@pytest.mark.parametrize("unused_channel", UNUSED_CHANNEL_CASES)
 @pytest.mark.parametrize(
     ("snapshot_frequency", "keep_last", "oldest_step"),
     RETENTION_CASES,
@@ -266,20 +299,28 @@ async def test_aprune_preserves_delta_channel_history(
     snapshot_frequency: int,
     keep_last: int,
     oldest_step: int,
+    unused_channel: bool,
 ) -> None:
     thread_id = f"delta-aprune-{uuid4()}"
     config = _config(thread_id)
+    assert_state = partial(_assert_state, unused_channel=unused_channel)
 
-    graph = _compile_graph(async_saver, snapshot_frequency)
+    graph = _compile_graph(
+        async_saver, snapshot_frequency, unused_channel=unused_channel
+    )
     for value in (1, 2, 3):
         await graph.ainvoke({"value": value}, config, durability="sync")
 
-    _assert_state((await graph.aget_state(config)).values, [1, 2, 3], 3)
+    assert_state((await graph.aget_state(config)).values, [1, 2, 3], 3)
     before = [checkpoint async for checkpoint in async_saver.alist(config)]
     retained = before[:keep_last]
     expected_states = [(await graph.aget_state(cp.config)).values for cp in retained]
     latest = await async_saver.aget_tuple(config)
     assert latest is not None
+    if unused_channel:
+        # Counted like every declared DeltaChannel, but never given a version.
+        assert "unused" in latest.metadata["counters_since_delta_snapshot"]
+        assert "unused" not in latest.checkpoint["channel_versions"]
     if snapshot_frequency == 3:
         assert isinstance(
             latest.checkpoint["channel_values"].get("delta"), _DeltaSnapshot
@@ -314,7 +355,7 @@ async def test_aprune_preserves_delta_channel_history(
         read.args[1] for read in reads.call_args_list if read.kwargs["include_metadata"]
     ] == [checkpoint.config for checkpoint in retained]
 
-    _assert_state((await graph.aget_state(config)).values, [1, 2, 3], 3)
+    assert_state((await graph.aget_state(config)).values, [1, 2, 3], 3)
     after = [checkpoint async for checkpoint in async_saver.alist(config)]
     _assert_retention(before, after, oldest_step)
     for checkpoint, expected_state in zip(retained, expected_states):
@@ -322,7 +363,7 @@ async def test_aprune_preserves_delta_channel_history(
         assert (await graph.aget_state(checkpoint.config)).values == expected_state
 
     await graph.ainvoke({"value": 4}, config, durability="sync")
-    _assert_state((await graph.aget_state(config)).values, [1, 2, 3, 4], 4)
+    assert_state((await graph.aget_state(config)).values, [1, 2, 3, 4], 4)
 
 
 def test_prune_preserves_delta_channel_history_in_subgraph_namespace(
@@ -676,12 +717,12 @@ def test_prune_reads_only_dependency_fields(
         pipeline, config, include_metadata=include_metadata
     )
 
-    expected = [
-        call.json(),
-        call.json().objkeys(key, "$.checkpoint.channel_values"),
-        call.json(),
-        call.json().get(key, "$.parent_checkpoint_id"),
-    ]
+    expected = [call.json(), call.json().objkeys(key, "$.checkpoint.channel_values")]
+    if include_metadata:
+        expected.extend(
+            [call.json(), call.json().objkeys(key, "$.checkpoint.channel_versions")]
+        )
+    expected.extend([call.json(), call.json().get(key, "$.parent_checkpoint_id")])
     if include_metadata:
         expected.extend([call.json(), call.json().get(key, "$.metadata")])
     assert pipeline.mock_calls == expected
@@ -731,6 +772,9 @@ async def test_aprune_does_not_refresh_ttls(async_saver: AsyncRedisSaver) -> Non
     _assert_state((await graph.aget_state(config)).values, [1, 2, 3], 3)
 
 
+_COUNTERS = '{"counters_since_delta_snapshot": {"delta": [1, 3], "unused": [0, 3]}}'
+
+
 @pytest.mark.parametrize(
     ("results", "expected"),
     [
@@ -739,16 +783,29 @@ async def test_aprune_does_not_refresh_ttls(async_saver: AsyncRedisSaver) -> Non
         ([[], [""]], None),  # Missing channel-values path.
         ([[None], [""]], None),  # Non-object channel values.
         ([[[]], None], None),  # Expired between pipelined commands.
-        ([[[]], [""], None], None),
+        # Starting checkpoints: channel values, channel versions, parent, metadata.
+        ([ResponseError("missing"), ResponseError("missing"), None, None], None),
+        ([[[]], ResponseError("missing"), None, None], None),  # Expired mid-read.
+        ([[[]], [["delta"]], [""], None], None),
         (
-            [[[]], [""], ['{"counters_since_delta_snapshot": {"delta": [1, 3]}}']],
+            [[[]], [["delta"]], [""], [_COUNTERS]],
             _PruneCheckpoint(
                 channel_names=set(), parent_checkpoint_id="", delta_channels={"delta"}
             ),
         ),
+        (  # Counted but never written: no version, so nothing to replay.
+            [[[]], [[]], [""], [_COUNTERS]],
+            _PruneCheckpoint(
+                channel_names=set(), parent_checkpoint_id="", delta_channels=set()
+            ),
+        ),
         ([ResponseError("OBJKEYS failed"), [""]], ResponseError),
         ([[[]], ResponseError("parent GET failed")], ResponseError),
-        ([[[]], [""], ResponseError("metadata GET failed")], ResponseError),
+        ([[[]], ResponseError("OBJKEYS failed"), [""], [_COUNTERS]], ResponseError),
+        (
+            [[[]], [["delta"]], [""], ResponseError("metadata GET failed")],
+            ResponseError,
+        ),
     ],
 )
 def test_prune_reader_responses(results: list[Any], expected: Any) -> None:

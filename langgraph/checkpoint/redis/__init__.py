@@ -1741,7 +1741,8 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
                 continue
 
             # DeltaChannel checkpoints normally omit their accumulated value. Their
-            # metadata names the channels that must be rebuilt by walking ancestors.
+            # metadata counts them, and those that also have a version must be rebuilt
+            # by walking ancestors.
             # Preserve that parent path through the nearest stored value for every
             # such channel. A stored _DeltaSnapshot (or a pre-delta plain value) is a
             # complete seed, so checkpoints older than it can still be pruned.

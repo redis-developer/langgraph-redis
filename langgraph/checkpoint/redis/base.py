@@ -1002,18 +1002,33 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
 
     @staticmethod
     def _parse_prune_checkpoint(results: Sequence[Any]) -> Optional[_PruneCheckpoint]:
-        """Parse field-only JSONPath replies without reviving any channel values."""
-        channel_names_reply, parent_id_reply, *metadata_replies = results
-        # OBJKEYS errors on a missing key, while GET returns None. Handle that
-        # pair as an expired checkpoint, but propagate other command errors.
+        """Parse field-only JSONPath replies without reviving any channel values.
+
+        Replies follow ``_queue_prune_checkpoint_read``: two for an ancestor, or
+        four for a retained starting checkpoint (which adds channel versions and
+        metadata).
+        """
+        is_starting = len(results) == 4
+        if is_starting:
+            channel_names_reply, versions_reply, parent_id_reply, metadata_reply = (
+                results
+            )
+        else:
+            channel_names_reply, parent_id_reply = results
+            versions_reply = metadata_reply = None
+        objkeys_replies = (channel_names_reply, versions_reply)
+        # OBJKEYS errors on a missing key, while GET returns None. Every OBJKEYS is
+        # queued before the parent GET, so an OBJKEYS error paired with a None
+        # parent means the checkpoint expired. Propagate other command errors.
         for reply in results:
             if isinstance(reply, ResponseError):
-                if reply is channel_names_reply and parent_id_reply is None:
+                if parent_id_reply is None and any(
+                    reply is objkeys for objkeys in objkeys_replies
+                ):
                     continue
                 raise reply
         # A None command reply means the key expired, possibly between commands.
-        # Metadata is only requested for retained starting checkpoints.
-        if parent_id_reply is None or any(reply is None for reply in metadata_replies):
+        if parent_id_reply is None or (is_starting and metadata_reply is None):
             return None
 
         channel_names = _first_jsonpath_value(channel_names_reply)
@@ -1021,18 +1036,25 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         if channel_names is None:
             return None
         parent_id = _first_jsonpath_value(parent_id_reply) or ""
-        metadata: Any = {}
-        if metadata_replies:
-            (metadata_reply,) = metadata_replies
+        delta_channels: set[str] = set()
+        if is_starting:
             metadata = _first_jsonpath_value(metadata_reply) or {}
-        # Metadata is stored as a JSON-encoded string, not a RedisJSON object.
-        if isinstance(metadata, (str, bytes)):
-            metadata = orjson.loads(metadata)
-        counters = metadata.get("counters_since_delta_snapshot")
+            # Metadata is stored as a JSON-encoded string, not a RedisJSON object.
+            if isinstance(metadata, (str, bytes)):
+                metadata = orjson.loads(metadata)
+            counters = metadata.get("counters_since_delta_snapshot")
+            if isinstance(counters, dict):
+                # LangGraph counts every declared DeltaChannel, including ones never
+                # written. It only replays channels that have a version, so an
+                # unversioned channel needs no ancestors and must not pin history.
+                versioned = _first_jsonpath_value(versions_reply) or []
+                delta_channels = set(counters).intersection(
+                    safely_decode(name) for name in versioned
+                )
         return _PruneCheckpoint(
             channel_names={safely_decode(name) for name in channel_names},
             parent_checkpoint_id=from_storage_safe_id(safely_decode(parent_id)),
-            delta_channels=set(counters) if isinstance(counters, dict) else set(),
+            delta_channels=delta_channels,
         )
 
     def _queue_prune_checkpoint_read(
@@ -1046,6 +1068,10 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
             configurable["checkpoint_id"],
         )
         pipeline.json().objkeys(key, "$.checkpoint.channel_values")
+        # Keep every OBJKEYS ahead of the parent GET; the parser relies on that
+        # order to tell an expired key from a real command error.
+        if include_metadata:
+            pipeline.json().objkeys(key, "$.checkpoint.channel_versions")
         pipeline.json().get(key, "$.parent_checkpoint_id")
         if include_metadata:
             pipeline.json().get(key, "$.metadata")
