@@ -1655,15 +1655,16 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
                 pipeline.delete(key)
             pipeline.execute()
 
-    def _read_prune_checkpoint(
-        self, config: RunnableConfig, *, include_metadata: bool
-    ) -> Optional[_PruneCheckpoint]:
-        """Read pruning dependencies without loading values or refreshing TTLs."""
+    def _read_prune_checkpoints(
+        self, configs: Sequence[RunnableConfig]
+    ) -> Dict[Tuple[str, str], Optional[_PruneCheckpoint]]:
+        """Read pruning dependencies in one pipeline, without values or TTL refresh."""
         with self._redis.pipeline(transaction=False) as pipeline:
-            self._queue_prune_checkpoint_read(
-                pipeline, config, include_metadata=include_metadata
+            for config in configs:
+                self._queue_prune_checkpoint_read(pipeline, config)
+            return self._parse_prune_checkpoints(
+                configs, pipeline.execute(raise_on_error=False)
             )
-            return self._parse_prune_checkpoint(pipeline.execute(raise_on_error=False))
 
     def prune(
         self,
@@ -1696,11 +1697,11 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
         when the checkpoint document is deleted.
 
         Args:
-            thread_ids: Thread IDs whose old checkpoints should be pruned.
+            thread_ids: Non-empty sequence of thread IDs to prune.
             strategy: Pruning strategy.  ``"keep_latest"`` retains only the
                 most recent checkpoint per namespace (default).  ``"delete"``
                 removes all checkpoints for the thread.
-            keep_last: Optional override — number of recent checkpoints to
+            keep_last: Optional integer override — number of recent checkpoints to
                 retain per namespace.  When provided, takes precedence over
                 ``strategy``.  Use ``keep_last=0`` to remove all checkpoints.
                 This is not a strict storage cap: DeltaChannel dependencies may
@@ -1708,28 +1709,16 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
             max_results: Maximum results per checkpoint or write-cleanup search.
                 Defaults to 10 000. Must cover all checkpoints across the thread's
                 namespaces and all writes for each checkpoint being deleted.
-                A truncated search raises before deleting keys for that thread.
-                This does not bound ancestor reads or the number of deletions.
+                It does not limit dependency-walk reads.
 
         Raises:
-            ValueError: If ``strategy`` is not ``"keep_latest"`` or ``"delete"``,
-                even when ``keep_last`` is provided, or if a checkpoint or
-                write-cleanup search is truncated by ``max_results``.
+            ValueError: If ``thread_ids`` is a bare string or empty, ``keep_last``
+                is not a non-negative integer, or ``strategy`` is not
+                ``"keep_latest"`` or ``"delete"`` (even with ``keep_last``).
+                If a search is truncated by ``max_results``, raises before
+                deleting any keys for the affected thread.
         """
-        self._validate_prune_strategy(strategy)
-
-        # Resolve keep_last from strategy if not explicitly provided
-        if keep_last is None:
-            if strategy == "delete":
-                keep_last = 0
-            else:
-                keep_last = 1
-
-        # Validate input
-        if not thread_ids:
-            raise ValueError("``thread_ids`` must be a non-empty sequence")
-        if keep_last < 0:
-            raise ValueError(f"``keep_last`` must be >= 0, got {keep_last}")
+        keep_last = self._resolve_prune_keep_last(thread_ids, strategy, keep_last)
         if max_results < 1:
             raise ValueError(f"``max_results`` must be >= 1, got {max_results}")
 
@@ -1737,10 +1726,9 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
             storage_safe_thread_id = to_storage_safe_id(thread_id)
 
             # Fetch all checkpoints for this thread across all namespaces
-            checkpoint_query = self._make_prune_checkpoint_query(
-                storage_safe_thread_id, max_results
+            checkpoint_results = self.checkpoints_index.search(
+                self._prune_checkpoint_query(storage_safe_thread_id, max_results)
             )
-            checkpoint_results = self.checkpoints_index.search(checkpoint_query)
             self._validate_prune_search_result(
                 checkpoint_results,
                 thread_id=thread_id,
@@ -1769,12 +1757,17 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
             retained_configs = [
                 self._prune_config_for_doc(thread_id, doc) for doc in retained
             ]
-            # Fetch each summary once per thread. Every visited checkpoint needs
-            # metadata to protect its own channels as well as its descendants'.
+            # Fetch each summary once per thread, batched along the searched parent
+            # chain. Every visited checkpoint needs metadata to protect its own
+            # channels as well as its descendants'.
+            parents = self._prune_parent_map(thread_id, checkpoint_results.docs)
             checkpoint_cache: Dict[Tuple[str, str], Optional[_PruneCheckpoint]] = {}
-            protected: set[Tuple[str, str]] = set()
+            batch_size = 1
+            # Channels carried into each protected checkpoint. A later walk that
+            # arrives needing no more than that would protect nothing new.
+            covered: Dict[Tuple[str, str], frozenset[str]] = {}
             for config in retained_configs:
-                remaining: Optional[set[str]] = None
+                remaining: set[str] = set()
                 visited: set[Tuple[str, str]] = set()
                 while config is not None:
                     identity = self._prune_checkpoint_identity(config)
@@ -1783,20 +1776,25 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
                             f"Cyclic checkpoint ancestry for thread {thread_id!r} at {identity!r}"
                         )
                     visited.add(identity)
+                    seen = covered.get(identity, frozenset())
+                    if identity in covered and remaining <= seen:
+                        break
                     if identity not in checkpoint_cache:
-                        checkpoint_cache[identity] = self._read_prune_checkpoint(
-                            config, include_metadata=True
+                        batch, batch_size = self._prune_read_batch(
+                            config, parents, checkpoint_cache.keys(), batch_size
                         )
+                        checkpoint_cache.update(self._read_prune_checkpoints(batch))
                     checkpoint = checkpoint_cache[identity]
                     if checkpoint is None:
                         break
-                    protected.add(identity)
+                    remaining |= seen
+                    covered[identity] = frozenset(remaining)
                     remaining, config = self._advance_delta_prune_dependencies(
                         config, checkpoint, remaining
                     )
 
             to_evict, fully_evicted_ns = self._finalize_prune_candidates(
-                eviction_candidates, fully_evicted_ns, protected
+                eviction_candidates, fully_evicted_ns, covered.keys()
             )
 
             if not to_evict:

@@ -298,6 +298,24 @@ async def prune(
             yield prune_sync
 
 
+@pytest.fixture
+async def prune_call(
+    request: pytest.FixtureRequest, redis_url: str
+) -> AsyncIterator[Callable[..., Awaitable[None]]]:
+    saver_cls = request.param
+    if saver_cls in (AsyncRedisSaver, AsyncShallowRedisSaver):
+        async with saver_cls.from_conn_string(redis_url) as saver:
+            yield saver.aprune
+    else:
+        with saver_cls.from_conn_string(redis_url) as saver:
+            saver.setup()
+
+            async def prune_sync(thread_ids: Sequence[str], **kwargs: Any) -> None:
+                saver.prune(thread_ids, **kwargs)
+
+            yield prune_sync
+
+
 def _expected_pruned_data(
     before: dict[bytes, Optional[bytes]],
     checkpoints: list[RunnableConfig],
@@ -319,6 +337,21 @@ def _expected_pruned_data(
         for key, value in before.items()
         if not any(cp_id in key for cp_id in evicted_ids)
     }
+
+
+def _seed_prune_checkpoint(
+    saver: RedisSaver | ShallowRedisSaver, thread_id: str, writes: int = 1
+) -> None:
+    checkpoint_id = _make_ulid()
+    config = _config(thread_id, checkpoint_id)
+    saver.put(
+        config,
+        _make_checkpoint(checkpoint_id),
+        CheckpointMetadata(source="input", step=0, writes={}),
+        {"messages": "1"},
+    )
+    for write in range(writes):
+        saver.put_writes(config, [("messages", f"write-{write}")], f"task-{write}")
 
 
 # ---------------------------------------------------------------------------
@@ -855,6 +888,74 @@ async def test_aprune_rejects_invalid_strategy_without_changing_data(
         assert "strategy must be 'keep_latest' or 'delete'" in str(error.value)
         assert repr(strategy) in str(error.value)
         assert _thread_data(client, thread_id) == before
+
+
+@pytest.mark.parametrize(
+    ("prune_call", "writer_cls"),
+    [
+        (RedisSaver, RedisSaver),
+        (AsyncRedisSaver, RedisSaver),
+        (ShallowRedisSaver, ShallowRedisSaver),
+        (AsyncShallowRedisSaver, ShallowRedisSaver),
+    ],
+    indirect=["prune_call"],
+    ids=["sync", "async", "shallow", "async-shallow"],
+)
+@pytest.mark.parametrize(
+    ("thread_ids", "kwargs", "invalid_arg"),
+    [
+        ("ab", {"strategy": "delete"}, "thread_ids"),
+        (["ab"], {"keep_last": 0.5}, "keep_last"),
+    ],
+    ids=["bare-thread-id", "fractional-keep-last"],
+)
+async def test_prune_rejects_invalid_arguments_without_deleting_checkpoints(
+    redis_url: str,
+    client: Redis,
+    prune_call: Callable[..., Awaitable[None]],
+    writer_cls: type[RedisSaver] | type[ShallowRedisSaver],
+    thread_ids: Sequence[str],
+    kwargs: dict[str, Any],
+    invalid_arg: str,
+) -> None:
+    with writer_cls.from_conn_string(redis_url) as saver:
+        saver.setup()
+        for thread_id in ("ab", "a", "b"):
+            _seed_prune_checkpoint(saver, thread_id)
+
+    before = _thread_data(client, "")
+    assert before
+    with pytest.raises(ValueError, match=invalid_arg):
+        await prune_call(thread_ids, **kwargs)
+    assert _thread_data(client, "") == before
+
+
+@pytest.mark.parametrize(
+    "prune_call", [RedisSaver, AsyncRedisSaver], indirect=True, ids=["sync", "async"]
+)
+@pytest.mark.parametrize(
+    "write_counts", [(1, 1, 1), (3, 1)], ids=["checkpoint-search", "write-search"]
+)
+async def test_prune_rejects_truncated_search_before_deleting_thread_data(
+    redis_url: str,
+    client: Redis,
+    prune_call: Callable[..., Awaitable[None]],
+    write_counts: tuple[int, ...],
+) -> None:
+    thread_id = f"truncated-prune-{_make_ulid()}"
+    with RedisSaver.from_conn_string(redis_url) as saver:
+        saver.setup()
+        for write_count in write_counts:
+            _seed_prune_checkpoint(saver, thread_id, writes=write_count)
+
+    before = _thread_data(client, thread_id)
+    assert before
+    with pytest.raises(ValueError, match=r"search returned 2 of 3.*max_results=2"):
+        await prune_call([thread_id], strategy="delete", max_results=2)
+    assert _thread_data(client, thread_id) == before
+
+    await prune_call([thread_id], strategy="delete", max_results=3)
+    assert not _thread_data(client, thread_id)
 
 
 def test_prune_negative_keep_last_raises(redis_url: str) -> None:

@@ -128,6 +128,9 @@ saver.prune(["thread-1"], keep_last=5)
 saver.prune(["thread-1"], strategy="delete")
 ```
 
+Pass thread IDs in a non-empty sequence, even when pruning one thread. Use a
+non-negative integer for `keep_last`.
+
 #### DeltaChannel retention
 
 `DeltaChannel` values can depend on snapshots and writes stored in ancestor
@@ -163,23 +166,15 @@ reading or changing any server configuration, so pruning works on Redis Cloud an
 Redis Software and does not need `FT.CONFIG` permission. A search over a very
 large thread runs until it finishes instead of stopping at the server's timeout.
 
-`max_results` defaults to 10,000 and limits each search: the initial checkpoint
-search across all namespaces in a thread, and each search for an evicted
-checkpoint's writes. Pruning compares the total matches with the returned
-records. If any of these searches is truncated, it raises `ValueError` before
-deleting any keys for that thread. This also applies to explicit deletion and
-calls with a `keep_last` override.
+`max_results` defaults to 10,000 and limits each checkpoint search across a
+thread's namespaces and each write-cleanup search. If it truncates a checkpoint
+or write search, `prune` raises `ValueError` before deleting anything from the
+affected thread. Increase `max_results` and retry. This parameter is not a
+deletion batch size or a cursor for incremental pruning, and it does not limit
+dependency-walk reads.
 
-Set the limit high enough to cover both the thread's full checkpoint history and
-the writes for each checkpoint being deleted, then retry. A result count equal
-to the limit is accepted when the complete result set was returned. A too-small
-limit no longer causes partial deletion or silently removes a surviving branch's
-required history.
-
-This parameter is not a deletion batch size or a cursor for incremental pruning,
-and it does not limit dependency-walk reads. Completeness checks apply per thread:
-if a later thread in the same call fails, previously processed threads are not
-rolled back.
+Completeness checks apply per thread: if a later thread in the same call
+fails, previously processed threads are not rolled back.
 
 Write cleanup uses the full checkpoint identity: thread ID, namespace, and
 checkpoint ID. Reusing a checkpoint ID in another namespace does not remove that
