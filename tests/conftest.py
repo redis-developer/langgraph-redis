@@ -74,11 +74,7 @@ def redis_url(redis_container):
                 )
             time.sleep(0.5)
 
-    redis_url = f"redis://{host}:{port}"
-    # Pruning requires Search to raise on timeout instead of returning partial data.
-    with RedisConnectionFactory.get_redis_connection(redis_url) as client:
-        client.execute_command("FT.CONFIG", "SET", "ON_TIMEOUT", "FAIL")
-    return redis_url
+    return f"redis://{host}:{port}"
 
 
 @pytest.fixture

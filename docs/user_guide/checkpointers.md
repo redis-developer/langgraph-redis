@@ -152,27 +152,16 @@ an explicit `keep_last` overrides either valid strategy.
 
 Prune only inactive threads: checkpoint creation, updates, and other pruning calls
 for those threads must be paused until pruning finishes. The search inventory and
-deletions are not atomic with concurrent writers. Keep Search configuration stable
-during pruning as well.
+deletions are not atomic with concurrent writers.
 
-Pruning requires Search's timeout policy to be `FAIL`. With `RETURN` (the default)
-or `RETURN_STRICT`, a timed-out search can report a partial set whose total matches
-its returned count, so the count check alone cannot establish completeness.
-An administrator must configure `search-on-timeout FAIL` on Redis 8, or
-`ON_TIMEOUT FAIL` on older Redis Stack deployments, before using pruning.
-For example, on Redis 8:
-
-```text
-CONFIG SET search-on-timeout FAIL
-```
-
-This is a deployment-wide setting and also affects other Search users. The saver
-never changes it. Each `prune()` / `aprune()` call verifies it using
-`FT.CONFIG GET ON_TIMEOUT` (supported by Redis Stack and Redis 8), on every node
-known to a cluster client. The application's Redis user needs permission for that
-read. A non-`FAIL` or missing policy raises `ValueError`; configuration-read errors
-propagate. These checks happen before any thread is pruned. Under `FAIL`, a search
-timeout raises before any keys for the affected thread are deleted.
+Pruning's searches disable the Search query timeout for themselves (`TIMEOUT 0`),
+so they always return their complete result set. Under Search's default
+`search-on-timeout` policy (`RETURN`), a search that times out returns a partial
+set whose reported total matches its returned count, which pruning could not
+tell apart from a complete result. The per-query override avoids this without
+reading or changing any server configuration, so pruning works on Redis Cloud and
+Redis Software and does not need `FT.CONFIG` permission. A search over a very
+large thread runs until it finishes instead of stopping at the server's timeout.
 
 `max_results` defaults to 10,000 and limits each search: the initial checkpoint
 search across all namespaces in a thread, and each search for an evicted

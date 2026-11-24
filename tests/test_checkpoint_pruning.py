@@ -22,7 +22,7 @@ import pytest
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import Checkpoint, CheckpointMetadata
 from redis import Redis
-from redis.exceptions import NoPermissionError, ResponseError
+from redis.exceptions import ResponseError
 from redisvl.query import FilterQuery
 from redisvl.query.filter import Tag
 from ulid import ULID
@@ -103,28 +103,9 @@ def _put_checkpoint_with_writes(
         saver.put_writes(config, [("messages", f"write-{write}")], f"task-{write}")
 
 
-def _get_search_timeout_policy(client: Redis) -> str:
-    config = dict(client.execute_command("FT.CONFIG", "GET", "ON_TIMEOUT"))
+def _get_search_config(client: Redis, option: str) -> str:
+    config = dict(client.execute_command("FT.CONFIG", "GET", option))
     return safely_decode(next(iter(config.values()))).lower()
-
-
-@pytest.mark.parametrize(
-    "other_node",
-    [
-        pytest.param({"ON_TIMEOUT": "FAIL"}, id="all-fail"),
-        pytest.param({b"ON_TIMEOUT": b"return"}, id="mixed-policy"),
-        pytest.param({}, id="missing-policy"),
-        pytest.param({"ON_TIMEOUT": None}, id="invalid-policy"),
-    ],
-)
-def test_prune_requires_fail_policy_on_every_node(other_node: dict[Any, Any]) -> None:
-    """Validate mixed RESP2/RESP3 replies returned by cluster clients."""
-    config = {"node-a": [[b"ON_TIMEOUT", b"fail"]], "node-b": other_node}
-    if other_node == {"ON_TIMEOUT": "FAIL"}:
-        RedisSaver._validate_prune_search_timeout(config)
-    else:
-        with pytest.raises(ValueError, match="ON_TIMEOUT.*FAIL"):
-            RedisSaver._validate_prune_search_timeout(config)
 
 
 @pytest.mark.asyncio
@@ -168,29 +149,29 @@ async def test_prune_preserves_writes_for_same_id_in_another_namespace(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("policy", ["return", "return-strict", "fail", "unreadable"])
 @pytest.mark.parametrize(
-    ("policy", "error", "message"),
-    [
-        ("return", ValueError, "ON_TIMEOUT.*FAIL"),
-        ("return-strict", ValueError, "ON_TIMEOUT.*FAIL"),
-        ("unreadable", NoPermissionError, "FT.CONFIG|ft.config"),
-    ],
+    ("strategy", "retained_per_ns"), [("keep_latest", 1), ("delete", 0)]
 )
-@pytest.mark.parametrize("strategy", ["keep_latest", "delete"])
-async def test_prune_rejects_unverifiable_timeout_policy(
+async def test_prune_does_not_depend_on_search_timeout_configuration(
     saver: RedisSaver,
     client: Redis,
     prune: Callable[..., Awaitable[None]],
     policy: str,
-    error: type[Exception],
-    message: str,
     strategy: str,
+    retained_per_ns: int,
 ) -> None:
-    thread_id = f"prune-timeout-{_make_ulid()}"
-    for _ in range(2):
-        _put_checkpoint_with_writes(saver, _config(thread_id, _make_ulid()))
+    """Prune works under every timeout policy and without FT.CONFIG access.
+
+    Redis Cloud and Redis Software do not support FT.CONFIG, and ACL users
+    without @admin cannot run it.
+    """
+    thread_id = f"prune-timeout-policy-{_make_ulid()}"
+    checkpoints = [_config(thread_id, _make_ulid()) for _ in range(3)]
+    for config in checkpoints:
+        _put_checkpoint_with_writes(saver, config, write_count=2)
     before = _thread_data(client, thread_id)
-    original = _get_search_timeout_policy(client)
+    original = _get_search_config(client, "ON_TIMEOUT")
     try:
         if policy == "unreadable":
             client.execute_command("ACL", "SETUSER", "default", "-ft.config")
@@ -204,16 +185,79 @@ async def test_prune_rejects_unverifiable_timeout_policy(
                 if policy == "return-strict":
                     pytest.skip("RETURN_STRICT requires Redis 8.10 or later")
                 raise
-        with pytest.raises(error, match=message):
-            await prune([thread_id], strategy=strategy)
-        assert _thread_data(client, thread_id) == before
-        # The saver must never change deployment-wide configuration itself.
-        if policy != "unreadable":
-            assert _get_search_timeout_policy(client) == policy
+
+        await prune([thread_id], strategy=strategy)
     finally:
         if policy == "unreadable":
             client.execute_command("ACL", "SETUSER", "default", "+ft.config")
+        policy_after_prune = _get_search_config(client, "ON_TIMEOUT")
         client.execute_command("FT.CONFIG", "SET", "ON_TIMEOUT", original)
+
+    assert _thread_data(client, thread_id) == _expected_pruned_data(
+        before, checkpoints, retained_per_ns
+    )
+    # The saver must never change deployment-wide configuration itself.
+    assert policy_after_prune == (original if policy == "unreadable" else policy)
+
+
+@pytest.mark.asyncio
+async def test_prune_removes_every_write_when_search_exceeds_timeout(
+    saver: RedisSaver,
+    client: Redis,
+    prune: Callable[..., Awaitable[None]],
+) -> None:
+    """A search that exceeds the Search timeout must still remove every write.
+
+    Under the default ON_TIMEOUT=RETURN policy, a timed-out search returns a
+    partial set whose total equals its returned count, so the ``max_results``
+    truncation check alone cannot detect it.
+    """
+    write_count = 50_000
+    thread_id = f"prune-search-timeout-{_make_ulid()}"
+    evicted = _config(thread_id, _make_ulid())
+    retained = _config(thread_id, _make_ulid())
+    evicted_id = evicted["configurable"]["checkpoint_id"]
+    saver.put(
+        evicted,
+        _make_checkpoint(evicted_id),
+        CheckpointMetadata(source="input", step=0, writes={}),
+        {"messages": "1"},
+    )
+    # One call seeds every write in a single pipeline.
+    saver.put_writes(evicted, [("messages", "v")] * write_count, "task")
+    _put_checkpoint_with_writes(saver, retained)
+
+    original_timeout = _get_search_config(client, "TIMEOUT")
+    original_policy = _get_search_config(client, "ON_TIMEOUT")
+    try:
+        client.execute_command("FT.CONFIG", "SET", "TIMEOUT", "1")
+        client.execute_command("FT.CONFIG", "SET", "ON_TIMEOUT", "RETURN")
+        # Precondition: without an override, this search times out and returns
+        # a partial set. Skip on hardware fast enough to finish within 1 ms.
+        plain_result = saver.checkpoint_writes_index.search(
+            FilterQuery(
+                filter_expression=(Tag("thread_id") == thread_id)
+                & (Tag("checkpoint_id") == evicted_id),
+                return_fields=["task_id", "idx"],
+                num_results=write_count,
+            )
+        )
+        if len(plain_result.docs) == write_count:
+            pytest.skip("Search finished within 1 ms; cannot exercise a timeout")
+
+        await prune([thread_id], max_results=write_count)
+    finally:
+        client.execute_command("FT.CONFIG", "SET", "TIMEOUT", original_timeout)
+        client.execute_command("FT.CONFIG", "SET", "ON_TIMEOUT", original_policy)
+
+    assert saver.get_tuple(evicted) is None
+    orphaned = list(
+        client.scan_iter(match=f"checkpoint_write:*{evicted_id}*", count=10_000)
+    )
+    assert orphaned == []
+    retained_tuple = saver.get_tuple(retained)
+    assert retained_tuple is not None
+    assert retained_tuple.pending_writes == [("task-0", "messages", "write-0")]
 
 
 @pytest.fixture(params=["checkpoints", "writes"])
