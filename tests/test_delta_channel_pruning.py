@@ -6,6 +6,8 @@ from unittest.mock import DEFAULT, Mock, call, patch
 from uuid import uuid4
 
 import pytest
+from langchain_core.runnables import RunnableConfig
+from langchain_core.runnables.config import set_config_context
 from langgraph.channels import DeltaChannel
 from langgraph.checkpoint.serde.types import _DeltaSnapshot
 from langgraph.graph import START, StateGraph
@@ -173,9 +175,14 @@ def _compile_interrupt_graph(checkpointer: Any) -> Any:
         value: int
         delta: Annotated[list[int], DeltaChannel(_append_writes, snapshot_frequency=2)]
 
+    def ask(_state: State, config: RunnableConfig) -> dict[str, list[int]]:
+        # LangGraph does not set the runnable context on async Python 3.10 calls.
+        with set_config_context(config) as context:
+            return {"delta": [context.run(interrupt, "next value")]}
+
     builder = StateGraph(State)
     builder.add_node("append", lambda state: {"delta": [state["value"]]})
-    builder.add_node("ask", lambda state: {"delta": [interrupt("next value")]})
+    builder.add_node("ask", ask)
     builder.add_edge(START, "append")
     builder.add_edge("append", "ask")
     return builder.compile(checkpointer=checkpointer)
