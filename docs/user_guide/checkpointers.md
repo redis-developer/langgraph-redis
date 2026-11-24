@@ -128,6 +128,11 @@ saver.prune(["thread-1"], keep_last=5)
 saver.prune(["thread-1"], strategy="delete")
 ```
 
+Pass thread IDs in a non-empty sequence, even when pruning one thread. Use a
+non-negative integer for `keep_last`. If `max_results` truncates a checkpoint
+or write search, `prune` raises `ValueError` before deleting anything from the
+affected thread. Increase `max_results` and retry.
+
 ## AsyncRedisSaver
 
 `AsyncRedisSaver` provides the same API for async applications, using async

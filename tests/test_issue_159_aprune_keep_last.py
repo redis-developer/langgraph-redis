@@ -10,13 +10,17 @@ Tests cover:
 - associated writes are removed for evicted checkpoints
 - sync (RedisSaver.prune) and async (AsyncRedisSaver.aprune) variants
 - shallow savers: keep_last>=1 is no-op, keep_last=0 deletes all
+- invalid strategies raise without changing stored data (issue #238)
 """
 
 import time
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from typing import Any, Optional
 
 import pytest
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import Checkpoint, CheckpointMetadata
+from redis import Redis
 from redisvl.query import FilterQuery
 from redisvl.query.filter import Tag
 from ulid import ULID
@@ -25,6 +29,8 @@ from langgraph.checkpoint.redis import RedisSaver
 from langgraph.checkpoint.redis.aio import AsyncRedisSaver
 from langgraph.checkpoint.redis.ashallow import AsyncShallowRedisSaver
 from langgraph.checkpoint.redis.shallow import ShallowRedisSaver
+
+INVALID_STRATEGIES = ("keep_last", "Delete", "KEEP_LATEST", "zzz", "", "keep_latest ")
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -60,13 +66,57 @@ def _config(thread_id: str, cp_id: str, ns: str = "") -> RunnableConfig:
     }
 
 
+def _thread_data(client: Redis, thread_id: str) -> dict[bytes, Optional[bytes]]:
+    """Snapshot checkpoints, writes, registries, and pointers without changing TTLs."""
+    return {key: client.dump(key) for key in client.scan_iter(match=f"*{thread_id}*")}
+
+
+@pytest.fixture
+async def prune_call(
+    request: pytest.FixtureRequest, redis_url: str
+) -> AsyncIterator[Callable[..., Awaitable[None]]]:
+    saver_cls = request.param
+    if saver_cls in (AsyncRedisSaver, AsyncShallowRedisSaver):
+        async with saver_cls.from_conn_string(redis_url) as saver:
+            yield saver.aprune
+    else:
+        with saver_cls.from_conn_string(redis_url) as saver:
+            saver.setup()
+
+            async def prune_sync(thread_ids: Sequence[str], **kwargs: Any) -> None:
+                saver.prune(thread_ids, **kwargs)
+
+            yield prune_sync
+
+
+def _seed_prune_checkpoint(
+    saver: RedisSaver | ShallowRedisSaver, thread_id: str, writes: int = 1
+) -> None:
+    checkpoint_id = _make_ulid()
+    config = _config(thread_id, checkpoint_id)
+    saver.put(
+        config,
+        _make_checkpoint(checkpoint_id),
+        CheckpointMetadata(source="input", step=0, writes={}),
+        {"messages": "1"},
+    )
+    for write in range(writes):
+        saver.put_writes(config, [("messages", f"write-{write}")], f"task-{write}")
+
+
 # ---------------------------------------------------------------------------
 # Async tests
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_aprune_keep_last_1_removes_older_checkpoints(redis_url: str) -> None:
+@pytest.mark.parametrize(
+    ("strategy", "keep_last"),
+    [("keep_latest", None), ("keep_latest", 1), ("delete", 1)],
+)
+async def test_aprune_keep_last_1_removes_older_checkpoints(
+    redis_url: str, strategy: str, keep_last: Optional[int]
+) -> None:
     """aprune(keep_last=1) retains only the single most-recent checkpoint."""
     async with AsyncRedisSaver.from_conn_string(redis_url) as saver:
         thread_id = f"prune-keep-1-{_make_ulid()}"
@@ -80,7 +130,7 @@ async def test_aprune_keep_last_1_removes_older_checkpoints(redis_url: str) -> N
                 new_versions={"messages": "1"},
             )
 
-        await saver.aprune([thread_id], keep_last=1)
+        await saver.aprune([thread_id], strategy=strategy, keep_last=keep_last)
 
         # Only the latest should survive
         result = await saver.aget_tuple(_config(thread_id, cp_ids[-1]))
@@ -93,7 +143,8 @@ async def test_aprune_keep_last_1_removes_older_checkpoints(redis_url: str) -> N
 
 
 @pytest.mark.asyncio
-async def test_aprune_keep_last_n_retains_window(redis_url: str) -> None:
+@pytest.mark.parametrize("strategy", ["keep_latest", "delete"])
+async def test_aprune_keep_last_n_retains_window(redis_url: str, strategy: str) -> None:
     """aprune(keep_last=N) retains the N most-recent checkpoints."""
     async with AsyncRedisSaver.from_conn_string(redis_url) as saver:
         thread_id = f"prune-keep-n-{_make_ulid()}"
@@ -108,7 +159,7 @@ async def test_aprune_keep_last_n_retains_window(redis_url: str) -> None:
                 new_versions={"messages": "1"},
             )
 
-        await saver.aprune([thread_id], keep_last=N)
+        await saver.aprune([thread_id], strategy=strategy, keep_last=N)
 
         # Last N should survive
         for cp_id in cp_ids[-N:]:
@@ -122,7 +173,12 @@ async def test_aprune_keep_last_n_retains_window(redis_url: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_aprune_keep_last_0_removes_all_checkpoints(redis_url: str) -> None:
+@pytest.mark.parametrize(
+    ("strategy", "keep_last"), [("keep_latest", 0), ("delete", None)]
+)
+async def test_aprune_keep_last_0_removes_all_checkpoints(
+    redis_url: str, strategy: str, keep_last: Optional[int]
+) -> None:
     """aprune(keep_last=0) removes every checkpoint for the thread."""
     async with AsyncRedisSaver.from_conn_string(redis_url) as saver:
         thread_id = f"prune-delete-{_make_ulid()}"
@@ -136,7 +192,7 @@ async def test_aprune_keep_last_0_removes_all_checkpoints(redis_url: str) -> Non
                 new_versions={"messages": "1"},
             )
 
-        await saver.aprune([thread_id], keep_last=0)
+        await saver.aprune([thread_id], strategy=strategy, keep_last=keep_last)
 
         for cp_id in cp_ids:
             result = await saver.aget_tuple(_config(thread_id, cp_id))
@@ -279,7 +335,13 @@ async def test_aprune_removes_associated_writes(redis_url: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_prune_keep_last_1_sync(redis_url: str) -> None:
+@pytest.mark.parametrize(
+    ("strategy", "keep_last"),
+    [("keep_latest", None), ("keep_latest", 1), ("delete", 1)],
+)
+def test_prune_keep_last_1_sync(
+    redis_url: str, strategy: str, keep_last: Optional[int]
+) -> None:
     """Sync prune(keep_last=1) removes older checkpoints."""
     with RedisSaver.from_conn_string(redis_url) as saver:
         saver.setup()
@@ -294,14 +356,15 @@ def test_prune_keep_last_1_sync(redis_url: str) -> None:
                 new_versions={"messages": "1"},
             )
 
-        saver.prune([thread_id], keep_last=1)
+        saver.prune([thread_id], strategy=strategy, keep_last=keep_last)
 
         assert saver.get_tuple(_config(thread_id, cp_ids[-1])) is not None
         for old_cp_id in cp_ids[:-1]:
             assert saver.get_tuple(_config(thread_id, old_cp_id)) is None
 
 
-def test_prune_keep_last_n_sync(redis_url: str) -> None:
+@pytest.mark.parametrize("strategy", ["keep_latest", "delete"])
+def test_prune_keep_last_n_sync(redis_url: str, strategy: str) -> None:
     """Sync prune(keep_last=N) retains the N most-recent checkpoints."""
     with RedisSaver.from_conn_string(redis_url) as saver:
         saver.setup()
@@ -317,7 +380,7 @@ def test_prune_keep_last_n_sync(redis_url: str) -> None:
                 new_versions={"messages": "1"},
             )
 
-        saver.prune([thread_id], keep_last=N)
+        saver.prune([thread_id], strategy=strategy, keep_last=N)
 
         for cp_id in cp_ids[-N:]:
             assert saver.get_tuple(_config(thread_id, cp_id)) is not None
@@ -326,7 +389,12 @@ def test_prune_keep_last_n_sync(redis_url: str) -> None:
             assert saver.get_tuple(_config(thread_id, cp_id)) is None
 
 
-def test_prune_keep_last_0_sync(redis_url: str) -> None:
+@pytest.mark.parametrize(
+    ("strategy", "keep_last"), [("keep_latest", 0), ("delete", None)]
+)
+def test_prune_keep_last_0_sync(
+    redis_url: str, strategy: str, keep_last: Optional[int]
+) -> None:
     """Sync prune(keep_last=0) removes all checkpoints."""
     with RedisSaver.from_conn_string(redis_url) as saver:
         saver.setup()
@@ -341,7 +409,7 @@ def test_prune_keep_last_0_sync(redis_url: str) -> None:
                 new_versions={"messages": "1"},
             )
 
-        saver.prune([thread_id], keep_last=0)
+        saver.prune([thread_id], strategy=strategy, keep_last=keep_last)
 
         for cp_id in cp_ids:
             assert saver.get_tuple(_config(thread_id, cp_id)) is None
@@ -353,7 +421,13 @@ def test_prune_keep_last_0_sync(redis_url: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_ashallow_aprune_keep_last_1_is_noop(redis_url: str) -> None:
+@pytest.mark.parametrize(
+    ("strategy", "keep_last"),
+    [("keep_latest", None), ("keep_latest", 1), ("delete", 1)],
+)
+async def test_ashallow_aprune_keep_last_1_is_noop(
+    redis_url: str, strategy: str, keep_last: Optional[int]
+) -> None:
     """aprune(keep_last>=1) is a no-op for AsyncShallowRedisSaver."""
     async with AsyncShallowRedisSaver.from_conn_string(redis_url) as saver:
         thread_id = f"shallow-noop-{_make_ulid()}"
@@ -366,7 +440,7 @@ async def test_ashallow_aprune_keep_last_1_is_noop(redis_url: str) -> None:
             new_versions={"messages": "1"},
         )
 
-        await saver.aprune([thread_id], keep_last=1)
+        await saver.aprune([thread_id], strategy=strategy, keep_last=keep_last)
 
         # Checkpoint must still be there
         result = await saver.aget_tuple(_config(thread_id, cp_id))
@@ -374,7 +448,12 @@ async def test_ashallow_aprune_keep_last_1_is_noop(redis_url: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_ashallow_aprune_keep_last_0_deletes_all(redis_url: str) -> None:
+@pytest.mark.parametrize(
+    ("strategy", "keep_last"), [("keep_latest", 0), ("delete", None)]
+)
+async def test_ashallow_aprune_keep_last_0_deletes_all(
+    redis_url: str, strategy: str, keep_last: Optional[int]
+) -> None:
     """aprune(keep_last=0) removes all checkpoints for AsyncShallowRedisSaver."""
     async with AsyncShallowRedisSaver.from_conn_string(redis_url) as saver:
         thread_id = f"shallow-delete-{_make_ulid()}"
@@ -387,13 +466,19 @@ async def test_ashallow_aprune_keep_last_0_deletes_all(redis_url: str) -> None:
             new_versions={"messages": "1"},
         )
 
-        await saver.aprune([thread_id], keep_last=0)
+        await saver.aprune([thread_id], strategy=strategy, keep_last=keep_last)
 
         result = await saver.aget_tuple(_config(thread_id, cp_id))
         assert result is None, "Shallow checkpoint must be deleted with keep_last=0"
 
 
-def test_shallow_prune_keep_last_1_is_noop(redis_url: str) -> None:
+@pytest.mark.parametrize(
+    ("strategy", "keep_last"),
+    [("keep_latest", None), ("keep_latest", 1), ("delete", 1)],
+)
+def test_shallow_prune_keep_last_1_is_noop(
+    redis_url: str, strategy: str, keep_last: Optional[int]
+) -> None:
     """prune(keep_last>=1) is a no-op for ShallowRedisSaver."""
     with ShallowRedisSaver.from_conn_string(redis_url) as saver:
         saver.setup()
@@ -407,13 +492,18 @@ def test_shallow_prune_keep_last_1_is_noop(redis_url: str) -> None:
             new_versions={"messages": "1"},
         )
 
-        saver.prune([thread_id], keep_last=1)
+        saver.prune([thread_id], strategy=strategy, keep_last=keep_last)
 
         result = saver.get_tuple(_config(thread_id, cp_id))
         assert result is not None, "Shallow checkpoint must survive keep_last=1"
 
 
-def test_shallow_prune_keep_last_0_deletes_all(redis_url: str) -> None:
+@pytest.mark.parametrize(
+    ("strategy", "keep_last"), [("keep_latest", 0), ("delete", None)]
+)
+def test_shallow_prune_keep_last_0_deletes_all(
+    redis_url: str, strategy: str, keep_last: Optional[int]
+) -> None:
     """prune(keep_last=0) removes all checkpoints for ShallowRedisSaver."""
     with ShallowRedisSaver.from_conn_string(redis_url) as saver:
         saver.setup()
@@ -427,7 +517,7 @@ def test_shallow_prune_keep_last_0_deletes_all(redis_url: str) -> None:
             new_versions={"messages": "1"},
         )
 
-        saver.prune([thread_id], keep_last=0)
+        saver.prune([thread_id], strategy=strategy, keep_last=keep_last)
 
         result = saver.get_tuple(_config(thread_id, cp_id))
         assert result is None, "Shallow checkpoint must be deleted with keep_last=0"
@@ -436,6 +526,153 @@ def test_shallow_prune_keep_last_0_deletes_all(redis_url: str) -> None:
 # ---------------------------------------------------------------------------
 # Validation tests
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "saver_cls", [RedisSaver, ShallowRedisSaver], ids=["full", "shallow"]
+)
+@pytest.mark.parametrize("strategy", INVALID_STRATEGIES)
+@pytest.mark.parametrize(
+    "keep_last", [None, 0, 2], ids=["implicit", "delete", "keep-two"]
+)
+def test_prune_rejects_invalid_strategy_without_changing_data(
+    redis_url: str,
+    client: Redis,
+    saver_cls: type[RedisSaver] | type[ShallowRedisSaver],
+    strategy: str,
+    keep_last: Optional[int],
+) -> None:
+    """Issue #238: reject unsupported strategies, including with an override."""
+    with saver_cls.from_conn_string(redis_url) as saver:
+        saver.setup()
+        thread_id = f"invalid-strategy-{_make_ulid()}"
+        for _ in range(3):
+            cp_id = _make_ulid()
+            config = _config(thread_id, cp_id)
+            saver.put(
+                config,
+                _make_checkpoint(cp_id),
+                CheckpointMetadata(source="input", step=0, writes={}),
+                {"messages": "1"},
+            )
+            saver.put_writes(config, [("messages", "write")], f"task-{cp_id}")
+        before = _thread_data(client, thread_id)
+        assert before
+
+        with pytest.raises(ValueError) as error:
+            saver.prune([thread_id], strategy=strategy, keep_last=keep_last)
+
+        assert "strategy must be 'keep_latest' or 'delete'" in str(error.value)
+        assert repr(strategy) in str(error.value)
+        assert _thread_data(client, thread_id) == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "saver_cls", [AsyncRedisSaver, AsyncShallowRedisSaver], ids=["full", "shallow"]
+)
+@pytest.mark.parametrize("strategy", INVALID_STRATEGIES)
+@pytest.mark.parametrize(
+    "keep_last", [None, 0, 2], ids=["implicit", "delete", "keep-two"]
+)
+async def test_aprune_rejects_invalid_strategy_without_changing_data(
+    redis_url: str,
+    client: Redis,
+    saver_cls: type[AsyncRedisSaver] | type[AsyncShallowRedisSaver],
+    strategy: str,
+    keep_last: Optional[int],
+) -> None:
+    """Issue #238: invalid async pruning must leave all thread data intact."""
+    async with saver_cls.from_conn_string(redis_url) as saver:
+        await saver.asetup()
+        thread_id = f"invalid-strategy-{_make_ulid()}"
+        for _ in range(3):
+            cp_id = _make_ulid()
+            config = _config(thread_id, cp_id)
+            await saver.aput(
+                config,
+                _make_checkpoint(cp_id),
+                CheckpointMetadata(source="input", step=0, writes={}),
+                {"messages": "1"},
+            )
+            await saver.aput_writes(config, [("messages", "write")], f"task-{cp_id}")
+        before = _thread_data(client, thread_id)
+        assert before
+
+        with pytest.raises(ValueError) as error:
+            await saver.aprune([thread_id], strategy=strategy, keep_last=keep_last)
+
+        assert "strategy must be 'keep_latest' or 'delete'" in str(error.value)
+        assert repr(strategy) in str(error.value)
+        assert _thread_data(client, thread_id) == before
+
+
+@pytest.mark.parametrize(
+    ("prune_call", "writer_cls"),
+    [
+        (RedisSaver, RedisSaver),
+        (AsyncRedisSaver, RedisSaver),
+        (ShallowRedisSaver, ShallowRedisSaver),
+        (AsyncShallowRedisSaver, ShallowRedisSaver),
+    ],
+    indirect=["prune_call"],
+    ids=["sync", "async", "shallow", "async-shallow"],
+)
+@pytest.mark.parametrize(
+    ("thread_ids", "kwargs", "invalid_arg"),
+    [
+        ("ab", {"strategy": "delete"}, "thread_ids"),
+        (["ab"], {"keep_last": 0.5}, "keep_last"),
+    ],
+    ids=["bare-thread-id", "fractional-keep-last"],
+)
+async def test_prune_rejects_invalid_arguments_without_deleting_checkpoints(
+    redis_url: str,
+    client: Redis,
+    prune_call: Callable[..., Awaitable[None]],
+    writer_cls: type[RedisSaver] | type[ShallowRedisSaver],
+    thread_ids: Sequence[str],
+    kwargs: dict[str, Any],
+    invalid_arg: str,
+) -> None:
+    with writer_cls.from_conn_string(redis_url) as saver:
+        saver.setup()
+        for thread_id in ("ab", "a", "b"):
+            _seed_prune_checkpoint(saver, thread_id)
+
+    before = _thread_data(client, "")
+    assert before
+    with pytest.raises(ValueError, match=invalid_arg):
+        await prune_call(thread_ids, **kwargs)
+    assert _thread_data(client, "") == before
+
+
+@pytest.mark.parametrize(
+    "prune_call", [RedisSaver, AsyncRedisSaver], indirect=True, ids=["sync", "async"]
+)
+@pytest.mark.parametrize(
+    "write_counts", [(1, 1, 1), (3, 1)], ids=["checkpoint-search", "write-search"]
+)
+async def test_prune_rejects_truncated_search_before_deleting_thread_data(
+    redis_url: str,
+    client: Redis,
+    prune_call: Callable[..., Awaitable[None]],
+    write_counts: tuple[int, ...],
+) -> None:
+    thread_id = f"truncated-prune-{_make_ulid()}"
+    with RedisSaver.from_conn_string(redis_url) as saver:
+        saver.setup()
+        for write_count in write_counts:
+            _seed_prune_checkpoint(saver, thread_id, writes=write_count)
+
+    before = _thread_data(client, thread_id)
+    assert before
+    with pytest.raises(ValueError, match=r"search returned 2 of 3.*max_results=2"):
+        await prune_call([thread_id], strategy="delete", max_results=2)
+    assert _thread_data(client, thread_id) == before
+
+    await prune_call([thread_id], strategy="delete", max_results=3)
+    assert not _thread_data(client, thread_id)
 
 
 def test_prune_negative_keep_last_raises(redis_url: str) -> None:
