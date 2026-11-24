@@ -7,6 +7,7 @@ import time
 from abc import abstractmethod
 from operator import index
 from typing import (
+    AbstractSet,
     Any,
     Dict,
     Generic,
@@ -58,6 +59,8 @@ class _PruneCheckpoint(NamedTuple):
     channel_names: set[str]
     parent_checkpoint_id: str
     delta_channels: set[str]
+    # Channels with a version at this checkpoint; None when it cannot be read.
+    versioned_channels: Optional[set[str]] = None
 
 
 def _first_jsonpath_value(reply: Optional[Sequence[Any]]) -> Any:
@@ -70,6 +73,10 @@ def _first_jsonpath_value(reply: Optional[Sequence[Any]]) -> Any:
 # leave a RediSearch-indexed key without a TTL, since that key would then
 # never expire and never leave the search index.
 _TTL_RETRY_ATTEMPTS = 3
+
+# Largest number of checkpoint summaries one prune read pipeline fetches. Batches
+# start at one and double, so short walks stay cheap and long ones need few trips.
+_PRUNE_READ_BATCH_LIMIT = 128
 _TTL_RETRY_BASE_DELAY_SECONDS = 0.05
 
 
@@ -979,6 +986,22 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         return retained, eviction_candidates, fully_evicted_ns
 
     @staticmethod
+    def _prune_checkpoint_query(
+        storage_safe_thread_id: str, max_results: int
+    ) -> FilterQuery:
+        """Search a thread's checkpoints across namespaces, with their parents."""
+        return FilterQuery(
+            filter_expression=Tag("thread_id") == storage_safe_thread_id,
+            return_fields=["checkpoint_ns", "checkpoint_id", "parent_checkpoint_id"],
+            num_results=max_results,
+        )
+
+    @staticmethod
+    def _prune_parent_config(config: RunnableConfig, parent_id: str) -> RunnableConfig:
+        """Build the lookup config of ``config``'s parent checkpoint."""
+        return {"configurable": {**config["configurable"], "checkpoint_id": parent_id}}
+
+    @staticmethod
     def _prune_config_for_doc(thread_id: str, doc: Any) -> RunnableConfig:
         """Build a checkpoint lookup config from a search document."""
         return {
@@ -1004,33 +1027,18 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
 
     @staticmethod
     def _parse_prune_checkpoint(results: Sequence[Any]) -> Optional[_PruneCheckpoint]:
-        """Parse field-only JSONPath replies without reviving any channel values.
-
-        Replies follow ``_queue_prune_checkpoint_read``: two for an ancestor, or
-        four for a retained starting checkpoint (which adds channel versions and
-        metadata).
-        """
-        is_starting = len(results) == 4
-        if is_starting:
-            channel_names_reply, versions_reply, parent_id_reply, metadata_reply = (
-                results
-            )
-        else:
-            channel_names_reply, parent_id_reply = results
-            versions_reply = metadata_reply = None
-        objkeys_replies = (channel_names_reply, versions_reply)
-        # OBJKEYS errors on a missing key, while GET returns None. Every OBJKEYS is
-        # queued before the parent GET, so an OBJKEYS error paired with a None
-        # parent means the checkpoint expired. Propagate other command errors.
+        """Parse field-only JSONPath replies without reviving any channel values."""
+        channel_names_reply, parent_id_reply, metadata_reply, versions_reply = results
+        # OBJKEYS errors on a missing key, while GET returns None. Handle that
+        # pair as an expired checkpoint, but propagate other command errors.
         for reply in results:
             if isinstance(reply, ResponseError):
-                if parent_id_reply is None and any(
-                    reply is objkeys for objkeys in objkeys_replies
-                ):
+                if reply is channel_names_reply and parent_id_reply is None:
                     continue
                 raise reply
         # A None command reply means the key expired, possibly between commands.
-        if parent_id_reply is None or (is_starting and metadata_reply is None):
+        # The later field reads may expire as well.
+        if parent_id_reply is None or metadata_reply is None or versions_reply is None:
             return None
 
         channel_names = _first_jsonpath_value(channel_names_reply)
@@ -1038,29 +1046,89 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         if channel_names is None:
             return None
         parent_id = _first_jsonpath_value(parent_id_reply) or ""
-        delta_channels: set[str] = set()
-        if is_starting:
-            metadata = _first_jsonpath_value(metadata_reply) or {}
-            # Metadata is stored as a JSON-encoded string, not a RedisJSON object.
-            if isinstance(metadata, (str, bytes)):
-                metadata = orjson.loads(metadata)
-            counters = metadata.get("counters_since_delta_snapshot")
-            if isinstance(counters, dict):
-                # LangGraph counts every declared DeltaChannel, including ones never
-                # written. It only replays channels that have a version, so an
-                # unversioned channel needs no ancestors and must not pin history.
-                versioned = _first_jsonpath_value(versions_reply) or []
-                delta_channels = set(counters).intersection(
-                    safely_decode(name) for name in versioned
-                )
+        metadata: Any = _first_jsonpath_value(metadata_reply) or {}
+        # Metadata is stored as a JSON-encoded string, not a RedisJSON object.
+        if isinstance(metadata, (str, bytes)):
+            metadata = orjson.loads(metadata)
+        counters = metadata.get("counters_since_delta_snapshot")
+        versions = _first_jsonpath_value(versions_reply)
         return _PruneCheckpoint(
             channel_names={safely_decode(name) for name in channel_names},
             parent_checkpoint_id=from_storage_safe_id(safely_decode(parent_id)),
-            delta_channels=delta_channels,
+            delta_channels=set(counters) if isinstance(counters, dict) else set(),
+            # An unreadable version map must not release any history.
+            versioned_channels=(
+                {safely_decode(name) for name in versions}
+                if isinstance(versions, dict)
+                else None
+            ),
         )
 
+    @classmethod
+    def _parse_prune_checkpoints(
+        cls, configs: Sequence[RunnableConfig], results: Sequence[Any]
+    ) -> Dict[Tuple[str, str], Optional[_PruneCheckpoint]]:
+        """Split one pipeline's replies into a summary per queued checkpoint."""
+        width = len(results) // len(configs)
+        return {
+            cls._prune_checkpoint_identity(config): cls._parse_prune_checkpoint(
+                results[index * width : (index + 1) * width]
+            )
+            for index, config in enumerate(configs)
+        }
+
+    @classmethod
+    def _prune_parent_map(
+        cls, thread_id: str, docs: Sequence[Any]
+    ) -> Dict[Tuple[str, str], RunnableConfig]:
+        """Map each searched checkpoint to its parent, when the search found it."""
+        searched: Dict[Tuple[str, str], Tuple[RunnableConfig, str]] = {}
+        for doc in docs:
+            config = cls._prune_config_for_doc(thread_id, doc)
+            parent_id = from_storage_safe_id(getattr(doc, "parent_checkpoint_id", ""))
+            searched[cls._prune_checkpoint_identity(config)] = (config, parent_id)
+
+        parents: Dict[Tuple[str, str], RunnableConfig] = {}
+        for identity, (config, parent_id) in searched.items():
+            if not parent_id:
+                continue
+            parent_identity = cls._prune_checkpoint_identity(
+                cls._prune_parent_config(config, parent_id)
+            )
+            if parent_identity in searched:
+                parents[identity] = searched[parent_identity][0]
+        return parents
+
+    @classmethod
+    def _prune_read_batch(
+        cls,
+        config: RunnableConfig,
+        parents: Dict[Tuple[str, str], RunnableConfig],
+        cache: AbstractSet[Tuple[str, str]],
+        size: int,
+    ) -> Tuple[List[RunnableConfig], int]:
+        """Batch ``config`` with uncached searched ancestors; return the next size.
+
+        Only ancestors the prune search returned are prefetched. A parent it did
+        not return is read on demand when the walk reaches it.
+        """
+        batch = [config]
+        identity = cls._prune_checkpoint_identity(config)
+        batched = {identity}
+        while len(batch) < size:
+            parent = parents.get(identity)
+            if parent is None:
+                break
+            identity = cls._prune_checkpoint_identity(parent)
+            # Stop at a cycle in stored ancestry; the walk itself reports it.
+            if identity in batched or identity in cache:
+                break
+            batch.append(parent)
+            batched.add(identity)
+        return batch, min(2 * size, _PRUNE_READ_BATCH_LIMIT)
+
     def _queue_prune_checkpoint_read(
-        self, pipeline: Any, config: RunnableConfig, *, include_metadata: bool
+        self, pipeline: Any, config: RunnableConfig
     ) -> None:
         """Queue only the fields needed by pruning; never refresh their TTLs."""
         configurable = config["configurable"]
@@ -1070,38 +1138,41 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
             configurable["checkpoint_id"],
         )
         pipeline.json().objkeys(key, "$.checkpoint.channel_values")
-        # Keep every OBJKEYS ahead of the parent GET; the parser relies on that
-        # order to tell an expired key from a real command error.
-        if include_metadata:
-            pipeline.json().objkeys(key, "$.checkpoint.channel_versions")
         pipeline.json().get(key, "$.parent_checkpoint_id")
-        if include_metadata:
-            pipeline.json().get(key, "$.metadata")
+        pipeline.json().get(key, "$.metadata")
+        pipeline.json().get(key, "$.checkpoint.channel_versions")
 
-    @staticmethod
+    @classmethod
     def _advance_delta_prune_dependencies(
+        cls,
         config: RunnableConfig,
         checkpoint: _PruneCheckpoint,
         remaining: Optional[set[str]],
     ) -> Tuple[set[str], Optional[RunnableConfig]]:
-        """Resolve stored channels and find the next ancestor needed by this walk."""
-        unresolved = set(checkpoint.delta_channels if remaining is None else remaining)
+        """Preserve dependencies of this checkpoint and its retained descendants."""
+        unresolved = set(remaining or ())
+        # A checkpoint kept as reconstruction support is still exposed by list()
+        # and can be resumed. Its other channels must remain reconstructible too.
+        unresolved.update(checkpoint.delta_channels)
         unresolved.difference_update(checkpoint.channel_names)
+        # A channel without a version here was never written at or before this
+        # checkpoint, so no older ancestor holds its writes. LangGraph skips such
+        # channels when replaying. Its first write, if any, is on this checkpoint,
+        # which the caller protects before following the parent.
+        if checkpoint.versioned_channels is not None:
+            unresolved.intersection_update(checkpoint.versioned_channels)
         parent_config: Optional[RunnableConfig] = None
         if unresolved and checkpoint.parent_checkpoint_id:
-            parent_config = {
-                "configurable": {
-                    **config["configurable"],
-                    "checkpoint_id": checkpoint.parent_checkpoint_id,
-                }
-            }
+            parent_config = cls._prune_parent_config(
+                config, checkpoint.parent_checkpoint_id
+            )
         return unresolved, parent_config
 
     @staticmethod
     def _finalize_prune_candidates(
         eviction_candidates: Sequence[Any],
         fully_evicted_ns: set[str],
-        protected: set[Tuple[str, str]],
+        protected: AbstractSet[Tuple[str, str]],
     ) -> Tuple[List[Any], set[str]]:
         """Remove protected DeltaChannel history from the eviction plan."""
         to_evict = [
