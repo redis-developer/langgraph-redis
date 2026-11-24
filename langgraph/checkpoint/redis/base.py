@@ -56,6 +56,8 @@ class _PruneCheckpoint(NamedTuple):
     channel_names: set[str]
     parent_checkpoint_id: str
     delta_channels: set[str]
+    # Channels with a version at this checkpoint; None when it cannot be read.
+    versioned_channels: Optional[set[str]] = None
 
 
 def _first_jsonpath_value(reply: Optional[Sequence[Any]]) -> Any:
@@ -1003,7 +1005,7 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
     @staticmethod
     def _parse_prune_checkpoint(results: Sequence[Any]) -> Optional[_PruneCheckpoint]:
         """Parse field-only JSONPath replies without reviving any channel values."""
-        channel_names_reply, parent_id_reply, metadata_reply = results
+        channel_names_reply, parent_id_reply, metadata_reply, versions_reply = results
         # OBJKEYS errors on a missing key, while GET returns None. Handle that
         # pair as an expired checkpoint, but propagate other command errors.
         for reply in results:
@@ -1012,8 +1014,8 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
                     continue
                 raise reply
         # A None command reply means the key expired, possibly between commands.
-        # Metadata may expire between the field reads as well.
-        if parent_id_reply is None or metadata_reply is None:
+        # The later field reads may expire as well.
+        if parent_id_reply is None or metadata_reply is None or versions_reply is None:
             return None
 
         channel_names = _first_jsonpath_value(channel_names_reply)
@@ -1026,10 +1028,17 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         if isinstance(metadata, (str, bytes)):
             metadata = orjson.loads(metadata)
         counters = metadata.get("counters_since_delta_snapshot")
+        versions = _first_jsonpath_value(versions_reply)
         return _PruneCheckpoint(
             channel_names={safely_decode(name) for name in channel_names},
             parent_checkpoint_id=from_storage_safe_id(safely_decode(parent_id)),
             delta_channels=set(counters) if isinstance(counters, dict) else set(),
+            # An unreadable version map must not release any history.
+            versioned_channels=(
+                {safely_decode(name) for name in versions}
+                if isinstance(versions, dict)
+                else None
+            ),
         )
 
     def _queue_prune_checkpoint_read(
@@ -1045,6 +1054,7 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         pipeline.json().objkeys(key, "$.checkpoint.channel_values")
         pipeline.json().get(key, "$.parent_checkpoint_id")
         pipeline.json().get(key, "$.metadata")
+        pipeline.json().get(key, "$.checkpoint.channel_versions")
 
     @staticmethod
     def _advance_delta_prune_dependencies(
@@ -1058,6 +1068,12 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         # and can be resumed. Its other channels must remain reconstructible too.
         unresolved.update(checkpoint.delta_channels)
         unresolved.difference_update(checkpoint.channel_names)
+        # A channel without a version here was never written at or before this
+        # checkpoint, so no older ancestor holds its writes. LangGraph skips such
+        # channels when replaying. Its first write, if any, is on this checkpoint,
+        # which the caller protects before following the parent.
+        if checkpoint.versioned_channels is not None:
+            unresolved.intersection_update(checkpoint.versioned_channels)
         parent_config: Optional[RunnableConfig] = None
         if unresolved and checkpoint.parent_checkpoint_id:
             parent_config = {

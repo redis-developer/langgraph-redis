@@ -1,6 +1,6 @@
 import operator
 from collections.abc import AsyncIterator, Iterator
-from typing import Annotated, Any, TypedDict
+from typing import Annotated, Any, Optional, TypedDict
 from unittest.mock import DEFAULT, Mock, call, patch
 from uuid import uuid4
 
@@ -17,23 +17,36 @@ from langgraph.checkpoint.redis.base import BaseRedisSaver, _PruneCheckpoint
 # Rows: (snapshot frequency, keep_last, oldest checkpoint step to retain).
 # Three invocations produce steps -1 through 7: -1 is the initial checkpoint;
 # snapshots after the second and third invocations are at steps 4 and 7.
-# Retaining from -1 keeps the whole chain when no snapshot can seed a retained state.
+# Step 0 holds the channel's first write. Retaining from 0 keeps every checkpoint
+# the channel's history needs when no snapshot can seed a retained state; step -1
+# predates the channel's first version and holds nothing it needs.
 RETENTION_CASES = (
-    pytest.param(100, 1, -1, id="before-first-snapshot"),
+    pytest.param(100, 1, 0, id="before-first-snapshot"),
     pytest.param(2, 1, 4, id="ancestor-snapshot"),
     pytest.param(3, 1, 7, id="latest-is-snapshot"),
     pytest.param(2, 2, 4, id="overlapping-chains"),
-    pytest.param(3, 2, -1, id="older-retained-checkpoint-needs-ancestors"),
+    pytest.param(3, 2, 0, id="older-retained-checkpoint-needs-ancestors"),
 )
 
 # (Invocation count, keep_last, oldest retained step, use the exact search limit.)
 # With staggered snapshots, support checkpoints still need each other's history.
-# The sixth invocation stores both channel snapshots together at step 16.
+# The sixth invocation stores both channel snapshots together at step 16. Both
+# channels are first written on step 0, so the whole chain from there may remain.
 MULTI_CHANNEL_RETENTION_CASES = (
-    pytest.param(5, 1, -1, True, id="staggered-snapshots-exact-limit"),
+    pytest.param(5, 1, 0, True, id="staggered-snapshots-exact-limit"),
     pytest.param(6, 1, 16, False, id="common-snapshot"),
-    pytest.param(6, 2, -1, False, id="checkpoint-before-common-snapshot"),
+    pytest.param(6, 2, 0, False, id="checkpoint-before-common-snapshot"),
     pytest.param(7, 1, 16, False, id="ancestor-common-snapshot"),
+)
+
+# (Value of the first invocation that writes the channel, oldest retained step.)
+# Five invocations place the latest step at 13. Invocation v stores its input at
+# step 3v - 4, records the node's writes on the step 3v - 3 checkpoint, and gives
+# the channel its first version at step 3v - 2. The channel never snapshots, so
+# only the checkpoint holding its first write bounds retention.
+UNVERSIONED_CHANNEL_CASES = (
+    pytest.param(None, 13, id="never-written"),
+    pytest.param(3, 6, id="first-written-later"),
 )
 
 # A head self-cycle, a head two-checkpoint cycle, and a cycle only reached when
@@ -94,6 +107,24 @@ def _compile_multi_channel_graph(checkpointer: Any) -> Any:
     builder.add_node(
         "append", lambda state: {"fast": [state["value"]], "slow": [state["value"]]}
     )
+    builder.add_edge(START, "append")
+    return builder.compile(checkpointer=checkpointer)
+
+
+def _compile_late_channel_graph(checkpointer: Any, first_value: Optional[int]) -> Any:
+    """Write a never-snapshotted DeltaChannel from ``first_value`` on, or never."""
+
+    class State(TypedDict, total=False):
+        value: int
+        late: Annotated[list[int], DeltaChannel(_append_writes, snapshot_frequency=100)]
+
+    def append(state: dict[str, Any]) -> dict[str, Any]:
+        if first_value is None or state["value"] < first_value:
+            return {}
+        return {"late": [state["value"]]}
+
+    builder = StateGraph(State)
+    builder.add_node("append", append)
     builder.add_edge(START, "append")
     return builder.compile(checkpointer=checkpointer)
 
@@ -373,7 +404,8 @@ def test_prune_preserves_delta_channel_history_in_subgraph_namespace(
     saver.prune([thread_id], strategy="keep_latest")
 
     _assert_state(graph.get_state(subgraph_config).values, [1, 2, 3], 3)
-    _assert_retention(before, list(saver.list(subgraph_config)), oldest_step=-1)
+    # append_1's write is recorded on the subgraph's step 0, its oldest dependency.
+    _assert_retention(before, list(saver.list(subgraph_config)), oldest_step=0)
 
 
 async def test_aprune_preserves_delta_channel_history_in_subgraph_namespace(
@@ -405,7 +437,7 @@ async def test_aprune_preserves_delta_channel_history_in_subgraph_namespace(
         3,
     )
     after = [checkpoint async for checkpoint in async_saver.alist(subgraph_config)]
-    _assert_retention(before, after, oldest_step=-1)
+    _assert_retention(before, after, oldest_step=0)
 
 
 @pytest.mark.parametrize(
@@ -493,6 +525,58 @@ async def test_aprune_preserves_independent_delta_snapshots(
     assert await graph.ainvoke(
         {"value": 99}, support.config, durability="sync"
     ) == _expected_multi_channel_update(previous, 99)
+
+
+@pytest.mark.parametrize(("first_value", "oldest_step"), UNVERSIONED_CHANNEL_CASES)
+def test_prune_releases_history_before_delta_channel_was_written(
+    saver: RedisSaver, first_value: Optional[int], oldest_step: int
+) -> None:
+    thread_id = f"delta-unversioned-prune-{uuid4()}"
+    config = _config(thread_id)
+    graph = _compile_late_channel_graph(saver, first_value)
+    for value in range(1, 6):
+        graph.invoke({"value": value}, config, durability="sync")
+    before = list(saver.list(config))
+    expected_states = {
+        cp.checkpoint["id"]: graph.get_state(cp.config).values for cp in before
+    }
+
+    saver.prune([thread_id], keep_last=1)
+
+    after = list(saver.list(config))
+    # Nothing older than the checkpoint holding the first write can contribute
+    # to the channel, so that history is released instead of the whole chain.
+    # The first versioned checkpoint still replays the write kept on its parent.
+    _assert_retention(before, after, oldest_step)
+    for checkpoint in after:
+        assert (
+            graph.get_state(checkpoint.config).values
+            == expected_states[checkpoint.checkpoint["id"]]
+        )
+
+
+@pytest.mark.parametrize(("first_value", "oldest_step"), UNVERSIONED_CHANNEL_CASES)
+async def test_aprune_releases_history_before_delta_channel_was_written(
+    async_saver: AsyncRedisSaver, first_value: Optional[int], oldest_step: int
+) -> None:
+    thread_id = f"delta-unversioned-aprune-{uuid4()}"
+    config = _config(thread_id)
+    graph = _compile_late_channel_graph(async_saver, first_value)
+    for value in range(1, 6):
+        await graph.ainvoke({"value": value}, config, durability="sync")
+    before = [cp async for cp in async_saver.alist(config)]
+    expected_states = {
+        cp.checkpoint["id"]: (await graph.aget_state(cp.config)).values for cp in before
+    }
+
+    await async_saver.aprune([thread_id], keep_last=1)
+
+    after = [cp async for cp in async_saver.alist(config)]
+    _assert_retention(before, after, oldest_step)
+    for checkpoint in after:
+        assert (await graph.aget_state(checkpoint.config)).values == expected_states[
+            checkpoint.checkpoint["id"]
+        ]
 
 
 @pytest.mark.parametrize(
@@ -719,8 +803,29 @@ def test_prune_reads_only_dependency_fields(saver: RedisSaver) -> None:
         call.json().get(key, "$.parent_checkpoint_id"),
         call.json(),
         call.json().get(key, "$.metadata"),
+        call.json(),
+        call.json().get(key, "$.checkpoint.channel_versions"),
     ]
     assert pipeline.mock_calls == expected
+
+
+def test_prune_walk_keeps_channels_when_versions_are_unreadable() -> None:
+    config = _config("walk-versions")
+    config["configurable"]["checkpoint_id"] = "child"
+    checkpoint = _PruneCheckpoint(
+        channel_names=set(),
+        parent_checkpoint_id="parent",
+        delta_channels={"delta"},
+        versioned_channels=None,
+    )
+
+    remaining, parent = BaseRedisSaver._advance_delta_prune_dependencies(
+        config, checkpoint, None
+    )
+
+    assert remaining == {"delta"}
+    assert parent is not None
+    assert parent["configurable"]["checkpoint_id"] == "parent"
 
 
 def test_prune_does_not_refresh_ttls(saver: RedisSaver) -> None:
@@ -742,7 +847,10 @@ def test_prune_does_not_refresh_ttls(saver: RedisSaver) -> None:
     saver.prune([thread_id], keep_last=1)
 
     for key, ttl in before.items():
-        assert 0 < saver._redis.pttl(key) <= ttl
+        remaining = saver._redis.pttl(key)
+        # -2 means pruning deleted the key. Every surviving key keeps its TTL.
+        if remaining != -2:
+            assert 0 < remaining <= ttl
     _assert_state(graph.get_state(config).values, [1, 2, 3], 3)
 
 
@@ -763,37 +871,58 @@ async def test_aprune_does_not_refresh_ttls(async_saver: AsyncRedisSaver) -> Non
     await async_saver.aprune([thread_id], keep_last=1)
 
     for key, ttl in before.items():
-        assert 0 < await async_saver._redis.pttl(key) <= ttl
+        remaining = await async_saver._redis.pttl(key)
+        if remaining != -2:
+            assert 0 < remaining <= ttl
     _assert_state((await graph.aget_state(config)).values, [1, 2, 3], 3)
 
 
 @pytest.mark.parametrize(
     ("results", "expected"),
     [
-        ([None, None, None], None),  # Expired checkpoint.
+        ([None, None, None, None], None),  # Expired checkpoint.
         # OBJKEYS on an expired key.
-        ([ResponseError("missing key"), None, None], None),
-        ([[], [""], ["{}"]], None),  # Missing channel-values path.
-        ([[None], [""], ["{}"]], None),  # Non-object channel values.
-        ([[[]], None, None], None),  # Expired between pipelined commands.
-        ([[[]], [""], None], None),  # Expired before the metadata read.
+        ([ResponseError("missing key"), None, None, None], None),
+        ([[], [""], ["{}"], [{}]], None),  # Missing channel-values path.
+        ([[None], [""], ["{}"], [{}]], None),  # Non-object channel values.
+        ([[[]], None, None, None], None),  # Expired between pipelined commands.
+        ([[[]], [""], None, None], None),  # Expired before the metadata read.
         (
-            [[["value"]], ["parent"], []],  # Missing metadata path.
+            [[["value"]], ["parent"], [], [{"value": "1"}]],  # Missing metadata path.
             _PruneCheckpoint(
                 channel_names={"value"},
                 parent_checkpoint_id="parent",
                 delta_channels=set(),
+                versioned_channels={"value"},
             ),
         ),
         (
-            [[[]], [""], ['{"counters_since_delta_snapshot": {"delta": [1, 3]}}']],
+            [
+                [[]],
+                [""],
+                ['{"counters_since_delta_snapshot": {"delta": [1, 3]}}'],
+                [{"delta": "2"}],
+            ],
             _PruneCheckpoint(
-                channel_names=set(), parent_checkpoint_id="", delta_channels={"delta"}
+                channel_names=set(),
+                parent_checkpoint_id="",
+                delta_channels={"delta"},
+                versioned_channels={"delta"},
             ),
         ),
-        ([ResponseError("OBJKEYS failed"), [""], ["{}"]], ResponseError),
-        ([[[]], ResponseError("parent GET failed"), ["{}"]], ResponseError),
-        ([[[]], [""], ResponseError("metadata GET failed")], ResponseError),
+        (
+            # An unreadable version map keeps every delta channel unresolved.
+            [[[]], [""], ['{"counters_since_delta_snapshot": {"delta": [1, 3]}}'], []],
+            _PruneCheckpoint(
+                channel_names=set(),
+                parent_checkpoint_id="",
+                delta_channels={"delta"},
+                versioned_channels=None,
+            ),
+        ),
+        ([ResponseError("OBJKEYS failed"), [""], ["{}"], [{}]], ResponseError),
+        ([[[]], ResponseError("parent GET failed"), ["{}"], [{}]], ResponseError),
+        ([[[]], [""], ResponseError("metadata GET failed"), [{}]], ResponseError),
     ],
 )
 def test_prune_reader_responses(results: list[Any], expected: Any) -> None:
