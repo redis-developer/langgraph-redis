@@ -6,6 +6,7 @@ import random
 import time
 from abc import abstractmethod
 from typing import (
+    AbstractSet,
     Any,
     Dict,
     Generic,
@@ -70,6 +71,10 @@ def _first_jsonpath_value(reply: Optional[Sequence[Any]]) -> Any:
 # leave a RediSearch-indexed key without a TTL, since that key would then
 # never expire and never leave the search index.
 _TTL_RETRY_ATTEMPTS = 3
+
+# Largest number of checkpoint summaries one prune read pipeline fetches. Batches
+# start at one and double, so short walks stay cheap and long ones need few trips.
+_PRUNE_READ_BATCH_LIMIT = 128
 _TTL_RETRY_BASE_DELAY_SECONDS = 0.05
 
 
@@ -979,6 +984,22 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         return retained, eviction_candidates, fully_evicted_ns
 
     @staticmethod
+    def _prune_checkpoint_query(
+        storage_safe_thread_id: str, max_results: int
+    ) -> FilterQuery:
+        """Search a thread's checkpoints across namespaces, with their parents."""
+        return FilterQuery(
+            filter_expression=Tag("thread_id") == storage_safe_thread_id,
+            return_fields=["checkpoint_ns", "checkpoint_id", "parent_checkpoint_id"],
+            num_results=max_results,
+        )
+
+    @staticmethod
+    def _prune_parent_config(config: RunnableConfig, parent_id: str) -> RunnableConfig:
+        """Build the lookup config of ``config``'s parent checkpoint."""
+        return {"configurable": {**config["configurable"], "checkpoint_id": parent_id}}
+
+    @staticmethod
     def _prune_config_for_doc(thread_id: str, doc: Any) -> RunnableConfig:
         """Build a checkpoint lookup config from a search document."""
         return {
@@ -1041,6 +1062,69 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
             ),
         )
 
+    @classmethod
+    def _parse_prune_checkpoints(
+        cls, configs: Sequence[RunnableConfig], results: Sequence[Any]
+    ) -> Dict[Tuple[str, str], Optional[_PruneCheckpoint]]:
+        """Split one pipeline's replies into a summary per queued checkpoint."""
+        width = len(results) // len(configs)
+        return {
+            cls._prune_checkpoint_identity(config): cls._parse_prune_checkpoint(
+                results[index * width : (index + 1) * width]
+            )
+            for index, config in enumerate(configs)
+        }
+
+    @classmethod
+    def _prune_parent_map(
+        cls, thread_id: str, docs: Sequence[Any]
+    ) -> Dict[Tuple[str, str], RunnableConfig]:
+        """Map each searched checkpoint to its parent, when the search found it."""
+        searched: Dict[Tuple[str, str], Tuple[RunnableConfig, str]] = {}
+        for doc in docs:
+            config = cls._prune_config_for_doc(thread_id, doc)
+            parent_id = from_storage_safe_id(getattr(doc, "parent_checkpoint_id", ""))
+            searched[cls._prune_checkpoint_identity(config)] = (config, parent_id)
+
+        parents: Dict[Tuple[str, str], RunnableConfig] = {}
+        for identity, (config, parent_id) in searched.items():
+            if not parent_id:
+                continue
+            parent_identity = cls._prune_checkpoint_identity(
+                cls._prune_parent_config(config, parent_id)
+            )
+            if parent_identity in searched:
+                parents[identity] = searched[parent_identity][0]
+        return parents
+
+    @classmethod
+    def _prune_read_batch(
+        cls,
+        config: RunnableConfig,
+        parents: Dict[Tuple[str, str], RunnableConfig],
+        cache: AbstractSet[Tuple[str, str]],
+        size: int,
+    ) -> Tuple[List[RunnableConfig], int]:
+        """Batch ``config`` with uncached searched ancestors; return the next size.
+
+        Only ancestors the prune search returned are prefetched. A parent it did
+        not return is read on demand when the walk reaches it.
+        """
+        batch = [config]
+        identity = cls._prune_checkpoint_identity(config)
+        batched = {identity}
+        while len(batch) < size:
+            parent = parents.get(identity)
+            if parent is None:
+                break
+            identity = cls._prune_checkpoint_identity(parent)
+            # Stop at a cycle in stored ancestry; the walk itself reports it.
+            if identity in batched or identity in cache:
+                break
+            batch.append(parent)
+            batched.add(identity)
+        return batch, min(2 * size, _PRUNE_READ_BATCH_LIMIT)
+
     def _queue_prune_checkpoint_read(
         self, pipeline: Any, config: RunnableConfig
     ) -> None:
@@ -1056,8 +1140,9 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         pipeline.json().get(key, "$.metadata")
         pipeline.json().get(key, "$.checkpoint.channel_versions")
 
-    @staticmethod
+    @classmethod
     def _advance_delta_prune_dependencies(
+        cls,
         config: RunnableConfig,
         checkpoint: _PruneCheckpoint,
         remaining: Optional[set[str]],
@@ -1076,19 +1161,16 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
             unresolved.intersection_update(checkpoint.versioned_channels)
         parent_config: Optional[RunnableConfig] = None
         if unresolved and checkpoint.parent_checkpoint_id:
-            parent_config = {
-                "configurable": {
-                    **config["configurable"],
-                    "checkpoint_id": checkpoint.parent_checkpoint_id,
-                }
-            }
+            parent_config = cls._prune_parent_config(
+                config, checkpoint.parent_checkpoint_id
+            )
         return unresolved, parent_config
 
     @staticmethod
     def _finalize_prune_candidates(
         eviction_candidates: Sequence[Any],
         fully_evicted_ns: set[str],
-        protected: set[Tuple[str, str]],
+        protected: AbstractSet[Tuple[str, str]],
     ) -> Tuple[List[Any], set[str]]:
         """Remove protected DeltaChannel history from the eviction plan."""
         to_evict = [

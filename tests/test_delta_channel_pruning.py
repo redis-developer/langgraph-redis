@@ -1,5 +1,6 @@
 import operator
 from collections.abc import AsyncIterator, Iterator
+from contextlib import contextmanager
 from typing import Annotated, Any, Optional, TypedDict
 from unittest.mock import DEFAULT, Mock, call, patch
 from uuid import uuid4
@@ -48,6 +49,11 @@ UNVERSIONED_CHANNEL_CASES = (
     pytest.param(None, 13, id="never-written"),
     pytest.param(3, 6, id="first-written-later"),
 )
+
+# Forty invocations keep 120 checkpoints alive when the channel never snapshots.
+# Retaining twenty of them makes repeated ancestor walks easy to detect.
+LONG_CHAIN_INVOCATIONS = 40
+KEEP_LAST = 20
 
 # A head self-cycle, a head two-checkpoint cycle, and a cycle only reached when
 # preserving support ancestors. Five invocations place the latest step at 13.
@@ -239,6 +245,33 @@ def _expected_multi_channel_update(state: dict[str, Any], value: int) -> dict[st
     }
 
 
+def _checkpoint_at_step(checkpoints: list[Any], step: int) -> Any:
+    return next(cp for cp in checkpoints if cp.metadata["step"] == step)
+
+
+def _long_chain_checkpoints_to_check(checkpoints: list[Any]) -> list[Any]:
+    """The requested window plus the oldest checkpoint the chain still needs."""
+    return checkpoints[:KEEP_LAST] + [_checkpoint_at_step(checkpoints, 0)]
+
+
+@contextmanager
+def _assert_linear_walk_cost(saver: Any, chain: int) -> Iterator[None]:
+    """Fail if pruning inside the block repeats walks or reads ancestors one by one."""
+    with (
+        patch.object(
+            saver,
+            "_advance_delta_prune_dependencies",
+            wraps=saver._advance_delta_prune_dependencies,
+        ) as steps,
+        patch.object(saver._redis, "pipeline", wraps=saver._redis.pipeline) as trips,
+    ):
+        yield
+    # Walks from overlapping retained checkpoints share their ancestors.
+    assert steps.call_count <= chain + KEEP_LAST
+    # Reads are pipelined in batches rather than one round trip per ancestor.
+    assert trips.call_count <= chain // 10
+
+
 def _cycle_parent_update(
     saver: Any, checkpoints: list[Any], cycle_length: int, cycle_step: int
 ) -> tuple[str, str]:
@@ -303,13 +336,15 @@ def test_prune_preserves_delta_channel_history(
         ]
         assert len(read_ids) == len(set(read_ids))
         if keep_last > 1:
-            # A second call must build a fresh cache, reading the surviving chain again.
+            # A second call must build a fresh cache, reading the surviving chain
+            # again. Ancestors prefetched past the protected history were deleted.
+            surviving = {cp.checkpoint["id"] for cp in saver.list(config)}
             reads.reset_mock()
             saver.prune([thread_id], keep_last=keep_last)
             assert [
                 read.args[1]["configurable"]["checkpoint_id"]
                 for read in reads.call_args_list
-            ] == read_ids
+            ] == [read_id for read_id in read_ids if read_id in surviving]
 
     _assert_state(graph.get_state(config).values, [1, 2, 3], 3)
     _assert_retention(before, list(saver.list(config)), oldest_step)
@@ -368,12 +403,13 @@ async def test_aprune_preserves_delta_channel_history(
         ]
         assert len(read_ids) == len(set(read_ids))
         if keep_last > 1:
+            surviving = {cp.checkpoint["id"] async for cp in async_saver.alist(config)}
             reads.reset_mock()
             await async_saver.aprune([thread_id], keep_last=keep_last)
             assert [
                 read.args[1]["configurable"]["checkpoint_id"]
                 for read in reads.call_args_list
-            ] == read_ids
+            ] == [read_id for read_id in read_ids if read_id in surviving]
 
     _assert_state((await graph.aget_state(config)).values, [1, 2, 3], 3)
     after = [checkpoint async for checkpoint in async_saver.alist(config)]
@@ -579,6 +615,46 @@ async def test_aprune_releases_history_before_delta_channel_was_written(
         ]
 
 
+def test_prune_walks_long_retained_chains_in_linear_time(saver: RedisSaver) -> None:
+    thread_id = f"delta-long-chain-prune-{uuid4()}"
+    config = _config(thread_id)
+    # The channel never snapshots, so every checkpoint from step 0 must remain.
+    graph = _compile_graph(saver, snapshot_frequency=10_000)
+    for value in range(1, LONG_CHAIN_INVOCATIONS + 1):
+        graph.invoke({"value": value}, config, durability="sync")
+    before = list(saver.list(config))
+    checked = _long_chain_checkpoints_to_check(before)
+    expected_states = [graph.get_state(cp.config).values for cp in checked]
+
+    with _assert_linear_walk_cost(saver, chain=len(before)):
+        saver.prune([thread_id], keep_last=KEEP_LAST)
+
+    _assert_retention(before, list(saver.list(config)), oldest_step=0)
+    assert [graph.get_state(cp.config).values for cp in checked] == expected_states
+
+
+async def test_aprune_walks_long_retained_chains_in_linear_time(
+    async_saver: AsyncRedisSaver,
+) -> None:
+    thread_id = f"delta-long-chain-aprune-{uuid4()}"
+    config = _config(thread_id)
+    graph = _compile_graph(async_saver, snapshot_frequency=10_000)
+    for value in range(1, LONG_CHAIN_INVOCATIONS + 1):
+        await graph.ainvoke({"value": value}, config, durability="sync")
+    before = [cp async for cp in async_saver.alist(config)]
+    checked = _long_chain_checkpoints_to_check(before)
+    expected_states = [(await graph.aget_state(cp.config)).values for cp in checked]
+
+    with _assert_linear_walk_cost(async_saver, chain=len(before)):
+        await async_saver.aprune([thread_id], keep_last=KEEP_LAST)
+
+    after = [cp async for cp in async_saver.alist(config)]
+    _assert_retention(before, after, oldest_step=0)
+    assert [
+        (await graph.aget_state(cp.config)).values for cp in checked
+    ] == expected_states
+
+
 @pytest.mark.parametrize(
     "separate_snapshots", [False, True], ids=["shared-snapshot", "different-snapshots"]
 )
@@ -737,20 +813,22 @@ def test_prune_handles_checkpoint_expiring_during_walk(saver: RedisSaver) -> Non
     ancestor_key = saver._make_redis_checkpoint_key(
         thread_id, "", ancestor.config["configurable"]["checkpoint_id"]
     )
-    read_checkpoint = saver._read_prune_checkpoint
+    read_checkpoints = saver._read_prune_checkpoints
 
-    def expire_ancestor(read_config: Any) -> Any:
-        if read_config == ancestor.config:
+    def expire_ancestor(batch: list[Any]) -> Any:
+        if ancestor.config in batch:
             # Remove the ancestor after the search found it, just before its read.
             assert saver._redis.delete(ancestor_key) == 1
-        return read_checkpoint(read_config)
+        return read_checkpoints(batch)
 
     with patch.object(
-        saver, "_read_prune_checkpoint", side_effect=expire_ancestor
+        saver, "_read_prune_checkpoints", side_effect=expire_ancestor
     ) as reads:
         saver.prune([thread_id], keep_last=1)
 
-    assert [read.args[0] for read in reads.call_args_list] == [
+    # Each batch starts at the checkpoint the walk needs next; it stops after the
+    # expired ancestor instead of failing or reading further for it.
+    assert [read.args[0][0] for read in reads.call_args_list] == [
         latest.config,
         ancestor.config,
     ]
@@ -769,19 +847,19 @@ async def test_aprune_handles_checkpoint_expiring_during_walk(
     ancestor_key = async_saver._make_redis_checkpoint_key(
         thread_id, "", ancestor.config["configurable"]["checkpoint_id"]
     )
-    read_checkpoint = async_saver._aread_prune_checkpoint
+    read_checkpoints = async_saver._aread_prune_checkpoints
 
-    async def expire_ancestor(read_config: Any) -> Any:
-        if read_config == ancestor.config:
+    async def expire_ancestor(batch: list[Any]) -> Any:
+        if ancestor.config in batch:
             assert await async_saver._redis.delete(ancestor_key) == 1
-        return await read_checkpoint(read_config)
+        return await read_checkpoints(batch)
 
     with patch.object(
-        async_saver, "_aread_prune_checkpoint", side_effect=expire_ancestor
+        async_saver, "_aread_prune_checkpoints", side_effect=expire_ancestor
     ) as reads:
         await async_saver.aprune([thread_id], keep_last=1)
 
-    assert [read.args[0] for read in reads.call_args_list] == [
+    assert [read.args[0][0] for read in reads.call_args_list] == [
         latest.config,
         ancestor.config,
     ]
