@@ -2068,39 +2068,28 @@ class AsyncRedisSaver(
         when the checkpoint document is deleted.
 
         Args:
-            thread_ids: Thread IDs whose old checkpoints should be pruned.
+            thread_ids: Non-empty sequence of thread IDs to prune.
             strategy: Pruning strategy.  ``"keep_latest"`` retains only the
                 most recent checkpoint per namespace (default).  ``"delete"``
                 removes all checkpoints for the thread.
-            keep_last: Optional override — number of recent checkpoints to
+            keep_last: Optional integer override — number of recent checkpoints to
                 retain per namespace.  When provided, takes precedence over
                 ``strategy``.  Use ``keep_last=0`` to remove all checkpoints.
                 This is not a strict storage cap: DeltaChannel dependencies may
                 cause more checkpoints to remain, including the entire chain.
-            max_results: Maximum number of checkpoints fetched from the index
-                per thread in a single query. Defaults to 10 000. Set high enough
-                to include all checkpoints across the thread's namespaces; a
-                truncated search can miss dependencies of unreturned checkpoints.
-                This does not bound ancestor reads or the number of deletions.
+            max_results: Maximum results per checkpoint or write-cleanup search.
+                Defaults to 10 000. Must cover all checkpoints across the thread's
+                namespaces and all writes for each checkpoint being deleted.
+                It does not limit dependency-walk reads.
 
         Raises:
-            ValueError: If ``strategy`` is not ``"keep_latest"`` or ``"delete"``,
-                even when ``keep_last`` is provided.
+            ValueError: If ``thread_ids`` is a bare string or empty, ``keep_last``
+                is not a non-negative integer, or ``strategy`` is not
+                ``"keep_latest"`` or ``"delete"`` (even with ``keep_last``).
+                If a search is truncated by ``max_results``, raises before
+                deleting any keys for the affected thread.
         """
-        self._validate_prune_strategy(strategy)
-
-        # Resolve keep_last from strategy if not explicitly provided
-        if keep_last is None:
-            if strategy == "delete":
-                keep_last = 0
-            else:
-                keep_last = 1
-
-        # Validate inputs
-        if not thread_ids:
-            raise ValueError("``thread_ids`` must be a non-empty sequence")
-        if keep_last < 0:
-            raise ValueError(f"``keep_last`` must be >= 0, got {keep_last}")
+        keep_last = self._resolve_prune_keep_last(thread_ids, strategy, keep_last)
         if max_results < 1:
             raise ValueError(f"``max_results`` must be >= 1, got {max_results}")
 
@@ -2110,6 +2099,11 @@ class AsyncRedisSaver(
             # Fetch all checkpoints for this thread across all namespaces
             checkpoint_results = await self.checkpoints_index.search(
                 self._prune_checkpoint_query(storage_safe_thread_id, max_results)
+            )
+            self._validate_prune_search_result(
+                checkpoint_results,
+                thread_id=thread_id,
+                max_results=max_results,
             )
 
             if not checkpoint_results.docs:
@@ -2199,6 +2193,11 @@ class AsyncRedisSaver(
                     num_results=max_results,
                 )
                 writes_results = await self.checkpoint_writes_index.search(writes_query)
+                self._validate_prune_search_result(
+                    writes_results,
+                    thread_id=thread_id,
+                    max_results=max_results,
+                )
                 for wdoc in writes_results.docs:
                     keys_to_delete.append(
                         self._make_redis_checkpoint_writes_key(

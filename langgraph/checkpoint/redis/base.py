@@ -5,6 +5,7 @@ import logging
 import random
 import time
 from abc import abstractmethod
+from operator import index
 from typing import (
     AbstractSet,
     Any,
@@ -30,6 +31,7 @@ from langgraph.checkpoint.base import (
 )
 from langgraph.checkpoint.serde.base import SerializerProtocol
 from langgraph.checkpoint.serde.types import ChannelProtocol
+from redis.commands.search.result import Result
 from redis.exceptions import ResponseError
 from redisvl.query import FilterQuery
 from redisvl.query.filter import Tag
@@ -1186,11 +1188,43 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         return to_evict, fully_evicted_ns - protected_namespaces
 
     @staticmethod
-    def _validate_prune_strategy(strategy: str) -> None:
-        """Reject unsupported pruning strategies before any Redis operations."""
+    def _resolve_prune_keep_last(
+        thread_ids: Sequence[str], strategy: str, keep_last: Optional[int]
+    ) -> int:
+        """Validate shared pruning arguments and resolve the retention count."""
         if strategy not in ("keep_latest", "delete"):
             raise ValueError(
                 f"strategy must be 'keep_latest' or 'delete', got {strategy!r}"
+            )
+        if isinstance(thread_ids, (str, bytes, bytearray)):
+            raise ValueError(
+                "``thread_ids`` must be a sequence of thread IDs, e.g. [thread_id]"
+            )
+        if not thread_ids:
+            raise ValueError("``thread_ids`` must be a non-empty sequence")
+        if keep_last is None:
+            return 0 if strategy == "delete" else 1
+        try:
+            keep_last = index(keep_last)
+        except TypeError as exc:
+            raise ValueError(
+                f"``keep_last`` must be an integer, got {keep_last!r}"
+            ) from exc
+        if keep_last < 0:
+            raise ValueError(f"``keep_last`` must be >= 0, got {keep_last}")
+        return keep_last
+
+    @staticmethod
+    def _validate_prune_search_result(
+        result: Result, *, thread_id: str, max_results: int
+    ) -> None:
+        """Reject partial search results before deleting any keys for this thread."""
+        returned = len(result.docs)
+        if result.total > returned:
+            raise ValueError(
+                f"Cannot safely prune thread {thread_id!r}: "
+                f"search returned {returned} of {result.total} records "
+                f"(max_results={max_results}). Increase max_results and retry."
             )
 
     def _make_redis_checkpoint_key(

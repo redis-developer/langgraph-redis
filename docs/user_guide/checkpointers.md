@@ -128,6 +128,9 @@ saver.prune(["thread-1"], keep_last=5)
 saver.prune(["thread-1"], strategy="delete")
 ```
 
+Pass thread IDs in a non-empty sequence, even when pruning one thread. Use a
+non-negative integer for `keep_last`.
+
 #### DeltaChannel retention
 
 `DeltaChannel` values can depend on snapshots and writes stored in ancestor
@@ -150,11 +153,12 @@ an explicit `keep_last` overrides either valid strategy.
 
 #### Search limits and expiration
 
-`max_results` defaults to 10,000 and limits the initial checkpoint search across
-all namespaces in each thread. Set it high enough to include the thread's full
-checkpoint history. A truncated search can miss surviving checkpoints whose
-ancestors must be protected. This parameter is not a deletion batch size or a
-cursor for incremental pruning, and it does not limit dependency-walk reads.
+`max_results` defaults to 10,000 and limits each checkpoint search across a
+thread's namespaces and each write-cleanup search. If it truncates a checkpoint
+or write search, `prune` raises `ValueError` before deleting anything from the
+affected thread. Increase `max_results` and retry. This parameter is not a
+deletion batch size or a cursor for incremental pruning, and it does not limit
+dependency-walk reads.
 
 Pruning does not refresh TTLs, even with `refresh_on_read=True`. Dependency
 preservation assumes the required checkpoints and writes are still present; it
