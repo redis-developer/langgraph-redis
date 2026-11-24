@@ -970,31 +970,18 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         all checkpoints for each thread (equivalent to ``adelete_thread``).
 
         Args:
-            thread_ids: Thread IDs to prune.
+            thread_ids: Non-empty sequence of thread IDs to prune.
             strategy: Pruning strategy.  ``"keep_latest"`` is a no-op for
                 shallow savers (default).  ``"delete"`` removes all.
-            keep_last: Optional override.  Any value >= 1 is a no-op.
+            keep_last: Optional integer override.  Any value >= 1 is a no-op.
                 Pass ``0`` to delete all.
 
         Raises:
-            ValueError: If ``strategy`` is not ``"keep_latest"`` or ``"delete"``,
-                even when ``keep_last`` is provided.
+            ValueError: If ``thread_ids`` is a bare string or empty, ``keep_last``
+                is not a non-negative integer, or ``strategy`` is not
+                ``"keep_latest"`` or ``"delete"`` (even with ``keep_last``).
         """
-        self._validate_prune_strategy(strategy)
-
-        # Resolve keep_last from strategy if not explicitly provided
-        if keep_last is None:
-            if strategy == "delete":
-                keep_last = 0
-            else:
-                keep_last = 1
-
-        # Validate input
-        if not thread_ids:
-            raise ValueError("``thread_ids`` must be a non-empty sequence")
-
-        if keep_last < 0:
-            raise ValueError(f"``keep_last`` must be >= 0, got {keep_last}")
+        keep_last = self._resolve_prune_keep_last(thread_ids, strategy, keep_last)
 
         if keep_last >= 1:
             return
