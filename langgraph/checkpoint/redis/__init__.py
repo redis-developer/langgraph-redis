@@ -1656,13 +1656,11 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
             pipeline.execute()
 
     def _read_prune_checkpoint(
-        self, config: RunnableConfig, *, include_metadata: bool
+        self, config: RunnableConfig
     ) -> Optional[_PruneCheckpoint]:
         """Read pruning dependencies without loading values or refreshing TTLs."""
         with self._redis.pipeline(transaction=False) as pipeline:
-            self._queue_prune_checkpoint_read(
-                pipeline, config, include_metadata=include_metadata
-            )
+            self._queue_prune_checkpoint_read(pipeline, config)
             return self._parse_prune_checkpoint(pipeline.execute(raise_on_error=False))
 
     def prune(
@@ -1775,9 +1773,7 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
                         )
                     visited.add(identity)
                     if identity not in checkpoint_cache:
-                        checkpoint_cache[identity] = self._read_prune_checkpoint(
-                            config, include_metadata=True
-                        )
+                        checkpoint_cache[identity] = self._read_prune_checkpoint(config)
                     checkpoint = checkpoint_cache[identity]
                     if checkpoint is None:
                         break

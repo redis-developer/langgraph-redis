@@ -279,7 +279,6 @@ def test_prune_preserves_delta_channel_history(
                 read.args[1]["configurable"]["checkpoint_id"]
                 for read in reads.call_args_list
             ] == read_ids
-    assert all(read.kwargs["include_metadata"] for read in reads.call_args_list)
 
     _assert_state(graph.get_state(config).values, [1, 2, 3], 3)
     _assert_retention(before, list(saver.list(config)), oldest_step)
@@ -344,7 +343,6 @@ async def test_aprune_preserves_delta_channel_history(
                 read.args[1]["configurable"]["checkpoint_id"]
                 for read in reads.call_args_list
             ] == read_ids
-    assert all(read.kwargs["include_metadata"] for read in reads.call_args_list)
 
     _assert_state((await graph.aget_state(config)).values, [1, 2, 3], 3)
     after = [checkpoint async for checkpoint in async_saver.alist(config)]
@@ -657,11 +655,11 @@ def test_prune_handles_checkpoint_expiring_during_walk(saver: RedisSaver) -> Non
     )
     read_checkpoint = saver._read_prune_checkpoint
 
-    def expire_ancestor(read_config: Any, *, include_metadata: bool) -> Any:
+    def expire_ancestor(read_config: Any) -> Any:
         if read_config == ancestor.config:
             # Remove the ancestor after the search found it, just before its read.
             assert saver._redis.delete(ancestor_key) == 1
-        return read_checkpoint(read_config, include_metadata=include_metadata)
+        return read_checkpoint(read_config)
 
     with patch.object(
         saver, "_read_prune_checkpoint", side_effect=expire_ancestor
@@ -689,10 +687,10 @@ async def test_aprune_handles_checkpoint_expiring_during_walk(
     )
     read_checkpoint = async_saver._aread_prune_checkpoint
 
-    async def expire_ancestor(read_config: Any, *, include_metadata: bool) -> Any:
+    async def expire_ancestor(read_config: Any) -> Any:
         if read_config == ancestor.config:
             assert await async_saver._redis.delete(ancestor_key) == 1
-        return await read_checkpoint(read_config, include_metadata=include_metadata)
+        return await read_checkpoint(read_config)
 
     with patch.object(
         async_saver, "_aread_prune_checkpoint", side_effect=expire_ancestor
@@ -706,27 +704,22 @@ async def test_aprune_handles_checkpoint_expiring_during_walk(
     assert await async_saver.aget_tuple(latest.config) is not None
 
 
-@pytest.mark.parametrize("include_metadata", [False, True])
-def test_prune_reads_only_dependency_fields(
-    saver: RedisSaver, include_metadata: bool
-) -> None:
+def test_prune_reads_only_dependency_fields(saver: RedisSaver) -> None:
     config = _config("field-selection")
     config["configurable"]["checkpoint_id"] = "checkpoint-id"
     key = "checkpoint:field-selection:__empty__:checkpoint-id"
     pipeline = Mock()
 
-    saver._queue_prune_checkpoint_read(
-        pipeline, config, include_metadata=include_metadata
-    )
+    saver._queue_prune_checkpoint_read(pipeline, config)
 
     expected = [
         call.json(),
         call.json().objkeys(key, "$.checkpoint.channel_values"),
         call.json(),
         call.json().get(key, "$.parent_checkpoint_id"),
+        call.json(),
+        call.json().get(key, "$.metadata"),
     ]
-    if include_metadata:
-        expected.extend([call.json(), call.json().get(key, "$.metadata")])
     assert pipeline.mock_calls == expected
 
 
@@ -777,20 +770,29 @@ async def test_aprune_does_not_refresh_ttls(async_saver: AsyncRedisSaver) -> Non
 @pytest.mark.parametrize(
     ("results", "expected"),
     [
-        ([None, None], None),  # Expired checkpoint.
-        ([ResponseError("missing key"), None], None),  # OBJKEYS on an expired key.
-        ([[], [""]], None),  # Missing channel-values path.
-        ([[None], [""]], None),  # Non-object channel values.
-        ([[[]], None], None),  # Expired between pipelined commands.
-        ([[[]], [""], None], None),
+        ([None, None, None], None),  # Expired checkpoint.
+        # OBJKEYS on an expired key.
+        ([ResponseError("missing key"), None, None], None),
+        ([[], [""], ["{}"]], None),  # Missing channel-values path.
+        ([[None], [""], ["{}"]], None),  # Non-object channel values.
+        ([[[]], None, None], None),  # Expired between pipelined commands.
+        ([[[]], [""], None], None),  # Expired before the metadata read.
+        (
+            [[["value"]], ["parent"], []],  # Missing metadata path.
+            _PruneCheckpoint(
+                channel_names={"value"},
+                parent_checkpoint_id="parent",
+                delta_channels=set(),
+            ),
+        ),
         (
             [[[]], [""], ['{"counters_since_delta_snapshot": {"delta": [1, 3]}}']],
             _PruneCheckpoint(
                 channel_names=set(), parent_checkpoint_id="", delta_channels={"delta"}
             ),
         ),
-        ([ResponseError("OBJKEYS failed"), [""]], ResponseError),
-        ([[[]], ResponseError("parent GET failed")], ResponseError),
+        ([ResponseError("OBJKEYS failed"), [""], ["{}"]], ResponseError),
+        ([[[]], ResponseError("parent GET failed"), ["{}"]], ResponseError),
         ([[[]], [""], ResponseError("metadata GET failed")], ResponseError),
     ],
 )

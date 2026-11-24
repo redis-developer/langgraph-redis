@@ -2032,13 +2032,11 @@ class AsyncRedisSaver(
             await pipeline.execute()
 
     async def _aread_prune_checkpoint(
-        self, config: RunnableConfig, *, include_metadata: bool
+        self, config: RunnableConfig
     ) -> Optional[_PruneCheckpoint]:
         """Read pruning dependencies without loading values or refreshing TTLs."""
         async with self._redis.pipeline(transaction=False) as pipeline:
-            self._queue_prune_checkpoint_read(
-                pipeline, config, include_metadata=include_metadata
-            )
+            self._queue_prune_checkpoint_read(pipeline, config)
             return self._parse_prune_checkpoint(
                 await pipeline.execute(raise_on_error=False)
             )
@@ -2152,7 +2150,7 @@ class AsyncRedisSaver(
                     visited.add(identity)
                     if identity not in checkpoint_cache:
                         checkpoint_cache[identity] = await self._aread_prune_checkpoint(
-                            config, include_metadata=True
+                            config
                         )
                     checkpoint = checkpoint_cache[identity]
                     if checkpoint is None:

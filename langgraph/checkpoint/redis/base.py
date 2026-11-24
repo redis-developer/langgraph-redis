@@ -1003,7 +1003,7 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
     @staticmethod
     def _parse_prune_checkpoint(results: Sequence[Any]) -> Optional[_PruneCheckpoint]:
         """Parse field-only JSONPath replies without reviving any channel values."""
-        channel_names_reply, parent_id_reply, *metadata_replies = results
+        channel_names_reply, parent_id_reply, metadata_reply = results
         # OBJKEYS errors on a missing key, while GET returns None. Handle that
         # pair as an expired checkpoint, but propagate other command errors.
         for reply in results:
@@ -1013,7 +1013,7 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
                 raise reply
         # A None command reply means the key expired, possibly between commands.
         # Metadata may expire between the field reads as well.
-        if parent_id_reply is None or any(reply is None for reply in metadata_replies):
+        if parent_id_reply is None or metadata_reply is None:
             return None
 
         channel_names = _first_jsonpath_value(channel_names_reply)
@@ -1021,10 +1021,7 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         if channel_names is None:
             return None
         parent_id = _first_jsonpath_value(parent_id_reply) or ""
-        metadata: Any = {}
-        if metadata_replies:
-            (metadata_reply,) = metadata_replies
-            metadata = _first_jsonpath_value(metadata_reply) or {}
+        metadata: Any = _first_jsonpath_value(metadata_reply) or {}
         # Metadata is stored as a JSON-encoded string, not a RedisJSON object.
         if isinstance(metadata, (str, bytes)):
             metadata = orjson.loads(metadata)
@@ -1036,7 +1033,7 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         )
 
     def _queue_prune_checkpoint_read(
-        self, pipeline: Any, config: RunnableConfig, *, include_metadata: bool
+        self, pipeline: Any, config: RunnableConfig
     ) -> None:
         """Queue only the fields needed by pruning; never refresh their TTLs."""
         configurable = config["configurable"]
@@ -1047,8 +1044,7 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         )
         pipeline.json().objkeys(key, "$.checkpoint.channel_values")
         pipeline.json().get(key, "$.parent_checkpoint_id")
-        if include_metadata:
-            pipeline.json().get(key, "$.metadata")
+        pipeline.json().get(key, "$.metadata")
 
     @staticmethod
     def _advance_delta_prune_dependencies(
