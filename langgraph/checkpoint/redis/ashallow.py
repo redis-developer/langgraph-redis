@@ -36,6 +36,7 @@ from langgraph.checkpoint.redis.base import (
 )
 from langgraph.checkpoint.redis.util import (
     checkpoint_id_timestamp,
+    from_storage_safe_str,
     to_storage_safe_id,
     to_storage_safe_str,
     unwrap_connection_errors,
@@ -216,7 +217,9 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             checkpoint_data = {
                 "thread_id": thread_id,
                 "run_id": to_storage_safe_id(run_id) if run_id else "",
-                "checkpoint_ns": checkpoint_ns,
+                # Stored like ShallowRedisSaver does, so the root namespace ("") can be
+                # filtered on: an empty tag value cannot be searched.
+                "checkpoint_ns": to_storage_safe_str(checkpoint_ns),
                 "checkpoint_id": checkpoint["id"],
                 "checkpoint_ts": checkpoint_ts,
                 "checkpoint": self._dump_checkpoint(copy),
@@ -289,7 +292,10 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             )
             if run_id := config["configurable"].get("run_id"):
                 query_filter.append(Tag("run_id") == to_storage_safe_id(run_id))
-            if checkpoint_ns := config["configurable"].get("checkpoint_ns"):
+            # An empty string is the root namespace and is filtered on like any
+            # other; only a config with no `checkpoint_ns` lists every namespace.
+            checkpoint_ns = config["configurable"].get("checkpoint_ns")
+            if checkpoint_ns is not None:
                 query_filter.append(
                     Tag("checkpoint_ns") == to_storage_safe_str(checkpoint_ns)
                 )
@@ -336,7 +342,7 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         results = await self.checkpoints_index.search(query)
         for doc in results.docs:
             thread_id = cast(str, getattr(doc, "thread_id", ""))
-            checkpoint_ns = cast(str, getattr(doc, "checkpoint_ns", ""))
+            checkpoint_ns = from_storage_safe_str(getattr(doc, "checkpoint_ns", ""))
 
             # Channel values are stored inline in the checkpoint, as list() reads them
             checkpoint = json.loads(doc["$.checkpoint"])
@@ -491,7 +497,7 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
                 type_, blob = self.serde.dumps_typed(value)
                 write_obj = {
                     "thread_id": thread_id,
-                    "checkpoint_ns": checkpoint_ns,
+                    "checkpoint_ns": to_storage_safe_str(checkpoint_ns),
                     "checkpoint_id": checkpoint_id,
                     "task_id": task_id,
                     "task_path": task_path,
@@ -915,7 +921,8 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         checkpoint_namespaces = set()
 
         for doc in checkpoint_results.docs:
-            checkpoint_ns = getattr(doc, "checkpoint_ns", "")
+            # The key builders take the raw namespace
+            checkpoint_ns = from_storage_safe_str(getattr(doc, "checkpoint_ns", ""))
             # Collect namespaces to clean write_keys_zset later
             checkpoint_namespaces.add(checkpoint_ns)
 
@@ -934,7 +941,7 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             checkpoint_writes_query
         )
         for doc in checkpoint_writes_results.docs:
-            checkpoint_ns = getattr(doc, "checkpoint_ns", "")
+            checkpoint_ns = from_storage_safe_str(getattr(doc, "checkpoint_ns", ""))
             checkpoint_id = getattr(doc, "checkpoint_id", "")
             task_id = getattr(doc, "task_id", "")
             idx = getattr(doc, "idx", 0)
