@@ -94,11 +94,11 @@ print("All required modules are available.")
 
 ## Python Version
 
-The library supports **Python 3.10 through 3.15**. Verify your Python version:
+The library supports **Python 3.11 through 3.15**. Verify your Python version:
 
 ```bash
 python --version
-# Should show 3.10.x through 3.15.x
+# Should show 3.11.x through 3.15.x
 ```
 
 ## Next Steps
