@@ -238,6 +238,9 @@ class RedisDocument(TypedDict, total=False):
 # Redis strips these from both ends of each comma-separated part of a TAG value
 # and indexes nothing for a part that is left empty.
 _TAG_STRIPPED_CHARS = " \t\n\r\x0b\x0c"
+# The key query drops these from both ends of a key too (the space is escaped),
+# so a key that is "_" without them leaves a lone "_", a syntax error.
+_QUERY_STRIPPED_CHARS = "\t\n\r\x0b\x0c"
 # The query reads these as a break between words, so the query for a key holding
 # one misses the key and can match other keys instead (NUL is a syntax error).
 # Tab, line feed, VT, FF and CR are whitespace, so they aren't here: a key holding
@@ -287,28 +290,37 @@ def _check_namespace(namespace: tuple[str, ...], *, allow_empty: bool = False) -
             )
 
 
-def _check_key(namespace: tuple[str, ...], key: Any) -> None:
-    """Raise ValueError for a key that a put or delete can't match."""
+def _key_error(namespace: tuple[str, ...], key: Any) -> Optional[str]:
+    """Why the store's key query can't match ``key``, or None if it can."""
     if not isinstance(key, str):
-        raise ValueError(
+        return (
             f"Store keys must be strings, but got {type(key).__name__} {key!r} in "
             f"namespace {namespace}."
         )
     if not any(part.strip(_TAG_STRIPPED_CHARS) for part in key.split(",")):
-        raise ValueError(
+        return (
             f"Store key {key!r} in namespace {namespace} has nothing Redis can "
             "index: keys need a character other than commas and whitespace."
         )
     control = next((c for c in key if c in _KEY_UNQUERYABLE_CHARS), None)
     if control is not None:
-        raise ValueError(
+        return (
             f"Store key {key!r} in namespace {namespace} contains the control "
             f"character U+{ord(control):04X}, which Redis search can't match."
         )
-    if key == "_":
-        raise ValueError(
-            f"Store key '_' in namespace {namespace} is a Redis search syntax error."
+    if key.strip(_QUERY_STRIPPED_CHARS) == "_":
+        return (
+            f"Store key {key!r} in namespace {namespace} is a Redis search syntax "
+            "error: the query is left with a lone '_'."
         )
+    return None
+
+
+def _check_key(namespace: tuple[str, ...], key: Any) -> None:
+    """Raise ValueError for a key that a put or delete can't match."""
+    error = _key_error(namespace, key)
+    if error is not None:
+        raise ValueError(error)
 
 
 def _check_op(op: Op) -> None:
@@ -317,8 +329,8 @@ def _check_op(op: Op) -> None:
         _check_namespace(op.namespace)
         _check_key(op.namespace, op.key)
     elif isinstance(op, GetOp):
-        # Only the namespace: a get writes nothing, so its key can't leave
-        # another op half done.
+        # Only the namespace: a get of a key _key_error() rejects finds nothing
+        # (see _get_batch_GET_ops_queries), so it doesn't fail the batch.
         _check_namespace(op.namespace)
     elif isinstance(op, SearchOp):
         _check_namespace(op.namespace_prefix, allow_empty=True)
@@ -785,7 +797,12 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
         """
         namespace_groups = defaultdict(list)
         for idx, op in get_ops:
-            namespace_groups[op.namespace].append((idx, op.key))
+            # A key _key_error() rejects is never found: no put stores it, and its
+            # query misses it or is a syntax error that would fail every get in
+            # the batch (in abatch(), every call merged into it). So it's left
+            # out, and its get returns None like any missing key.
+            if _key_error(op.namespace, op.key) is None:
+                namespace_groups[op.namespace].append((idx, op.key))
 
         results: list[tuple[str, Sequence, tuple[str, ...], list]] = []
         for namespace, items in namespace_groups.items():

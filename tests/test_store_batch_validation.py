@@ -79,9 +79,20 @@ REJECTED_KEYS = [
     pytest.param("a\x1f", CONTROL_CHARACTER, id="trailing-U+001F"),
     pytest.param("\x7fa", CONTROL_CHARACTER, id="leading-DEL"),
     pytest.param("_", SYNTAX_ERROR, id="underscore"),
+    # The query drops the tab, line feed, CR, VT or FF around the "_".
+    pytest.param("_\t", SYNTAX_ERROR, id="underscore-tab"),
+    pytest.param("\t_", SYNTAX_ERROR, id="tab-underscore"),
+    pytest.param("_\n", SYNTAX_ERROR, id="underscore-newline"),
+    pytest.param("\n_", SYNTAX_ERROR, id="newline-underscore"),
+    pytest.param("_\r", SYNTAX_ERROR, id="underscore-carriage-return"),
+    pytest.param("\x0b_\x0c", SYNTAX_ERROR, id="vertical-tab-underscore-form-feed"),
+    pytest.param("\t\n_\t", SYNTAX_ERROR, id="mixed-whitespace-underscore"),
     pytest.param(7, NOT_A_STRING, id="int"),
     pytest.param(b"k", NOT_A_STRING, id="bytes"),
 ]
+
+# The same keys without the errors, for gets.
+UNSTORABLE_KEYS = [pytest.param(p.values[0], id=p.id) for p in REJECTED_KEYS]
 
 # Ops whose namespace the store can't query, with the error each one raises.
 REJECTED_NAMESPACE_OPS = [
@@ -169,6 +180,17 @@ def test_rejected_namespace_leaves_stored_value_intact(
         store.batch([first_op, rejected_op])
 
     assert _stored(store) == [("valid", ORIGINAL)]
+
+
+@pytest.mark.parametrize("key", UNSTORABLE_KEYS)
+def test_get_of_rejected_key_finds_nothing(store: RedisStore, key: object) -> None:
+    store.put(NS, "valid", ORIGINAL)
+
+    assert store.get(NS, key) is None
+    missing, found = store.batch([GetOp(NS, key), GetOp(NS, "valid")])
+
+    assert missing is None
+    assert found is not None and found.value == ORIGINAL
 
 
 def test_put_with_empty_key_raises(store: RedisStore) -> None:
@@ -274,6 +296,22 @@ async def test_invalid_call_does_not_fail_a_concurrent_aput(
 
     assert results[0] is None
     assert isinstance(results[1], error)
+    assert await _astored(astore) == [("valid", ORIGINAL)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key", UNSTORABLE_KEYS)
+async def test_aget_of_rejected_key_does_not_fail_a_concurrent_aput(
+    astore: AsyncRedisStore, key: object
+) -> None:
+    # Started together, the two calls are merged into one abatch().
+    results = await asyncio.gather(
+        astore.aput(NS, "valid", ORIGINAL),
+        astore.aget(NS, key),
+        return_exceptions=True,
+    )
+
+    assert results == [None, None]
     assert await _astored(astore) == [("valid", ORIGINAL)]
 
 
