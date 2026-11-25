@@ -10,7 +10,7 @@ to Redis and can resume from any checkpoint.
 
 ## Prerequisites
 
-- Python 3.10+
+- Python 3.10 through 3.15
 - A running Redis 8.0+ instance (see {doc}`installation`)
 - `langgraph-checkpoint-redis` installed
 

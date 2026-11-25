@@ -106,7 +106,7 @@ make clean           # Remove cache and build artifacts
 
 ## Code Style Guidelines
 
-- Use Black for formatting with target versions py39-py313
+- Use Black for formatting with target versions py310-py315
 - Sort imports with isort (black profile)
 - Strict typing required (disallow_untyped_defs=True)
 - Follow PEP 8 naming conventions (snake_case for functions/variables)
