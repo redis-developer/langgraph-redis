@@ -11,7 +11,10 @@ using orjson.dumps(obj, default=self._default) instead of plain orjson.dumps(obj
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
-from langgraph.checkpoint.redis.jsonplus_redis import JsonPlusRedisSerializer
+from langgraph.checkpoint.redis.jsonplus_redis import (
+    REDIS_TYPED_JSON_TYPE,
+    JsonPlusRedisSerializer,
+)
 
 
 # Helper functions for backward compatibility with tests
@@ -161,7 +164,7 @@ def test_dumps_typed_with_messages():
     # Use dumps_typed (what the checkpointer actually calls)
     type_str, blob = serializer.dumps_typed(msg)
 
-    assert type_str == "json"
+    assert type_str == REDIS_TYPED_JSON_TYPE
     # Checkpoint 3.0: dumps_typed now returns bytes, not str
     assert isinstance(blob, bytes)
 

@@ -11,6 +11,18 @@ details, refer to the migration documents in the repository root:
 - [`MIGRATION_0.1.0.md`](https://github.com/redis-developer/langgraph-redis/blob/main/MIGRATION_0.1.0.md) -- initial migration guide
 - [`MIGRATION_0.2.0.md`](https://github.com/redis-developer/langgraph-redis/blob/main/MIGRATION_0.2.0.md) -- migration from 0.1.x to 0.2.0
 
+## Redis JSON encoding compatibility
+
+New serialized JSON writes use the `redis-json-typed` codec tag. Existing records
+remain readable through the legacy decoder without a data migration.
+
+We target removing the legacy decoder in **langgraph-checkpoint-redis 1.0.0**.
+Migration guidance will accompany that change. Until then, legacy reads remain
+supported.
+
+Reads do not rewrite stored data. Resuming a thread writes new checkpoints in
+the new format, but does not convert its older history or pending writes.
+
 ## Migrating to 0.2.0 from 0.1.x
 
 Version 0.2.0 is a major upgrade that brings compatibility with LangGraph 1.0,

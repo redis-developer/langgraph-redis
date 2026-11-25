@@ -14,6 +14,18 @@ logger = logging.getLogger(__name__)
 
 _TYPED_VALUE_MARKER = "__redis_jsonplus_typed__"
 _TYPED_VALUE_KEYS = {_TYPED_VALUE_MARKER, "type", "data"}
+# Retain legacy decoding for backward compatibility; target removal in 1.0.0
+# alongside migration guidance.
+LEGACY_JSON_TYPE = "json"
+REDIS_TYPED_JSON_TYPE = "redis-json-typed"
+
+
+def _is_typed_envelope(obj: Any) -> bool:
+    return (
+        isinstance(obj, dict)
+        and set(obj) == _TYPED_VALUE_KEYS
+        and obj.get(_TYPED_VALUE_MARKER) is True
+    )
 
 
 def _interrupt_fields() -> set[str]:
@@ -64,6 +76,10 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
     2. Handles LangChain objects by encoding them in the LC constructor format
     3. Handles Interrupt objects with custom serialization/deserialization
     4. Applies parent's _reviver for security-checked object reconstruction
+
+    New JSON payloads use ``redis-json-typed`` so typed-value envelopes are only
+    interpreted in data written with escaping enabled. Legacy ``json`` payloads
+    retain their previous marker semantics.
 
     In checkpoint 3.0, the serializer API uses only dumps_typed/loads_typed
     with tuple[str, bytes] signatures (changed from tuple[str, str] in 2.x).
@@ -280,6 +296,10 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
             }
             return self._encode_constructor_envelope(type(obj), kwargs=processed_dict)
         elif isinstance(obj, dict):
+            # Escape caller dictionaries before introducing our own envelopes.
+            # Upstream msgpack restores the literal map without interpreting keys.
+            if _is_typed_envelope(obj):
+                return self._encode_typed_value(obj)
             # RedisJSON requires string object keys. During msgpack-to-RedisJSON
             # normalization, preserve non-string keys in a typed envelope instead
             # of allowing orjson.OPT_NON_STR_KEYS to coerce or merge them.
@@ -331,7 +351,7 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
                 processed_obj = self._preprocess_redis_json(obj)
                 # Try orjson first with custom default handler
                 json_bytes = orjson.dumps(processed_obj, default=self._default_handler)
-                return "json", json_bytes
+                return REDIS_TYPED_JSON_TYPE, json_bytes
             except (TypeError, orjson.JSONEncodeError):
                 # Fall back to parent's msgpack serialization for bytes in nested structures
                 return super().dumps_typed(obj)
@@ -353,10 +373,12 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
             return data_bytes
         elif type_ == "bytearray":
             return bytearray(data_bytes)
-        elif type_ == "json":
+        elif type_ in (LEGACY_JSON_TYPE, REDIS_TYPED_JSON_TYPE):
             # Use orjson for parsing, then apply our custom revival
             parsed = orjson.loads(data_bytes)
-            return self._revive_if_needed(parsed)
+            return self._revive_if_needed(
+                parsed, typed_values=type_ == REDIS_TYPED_JSON_TYPE
+            )
         elif type_ == "msgpack":
             # Handle backward compatibility with old checkpoints that used msgpack
             return super().loads_typed(data)
@@ -419,7 +441,13 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
 
         return cls(*args, **kwargs)
 
-    def _revive_if_needed(self, obj: Any) -> Any:
+    def _revive_if_needed(
+        self,
+        obj: Any,
+        *,
+        typed_values: bool = False,
+        decode_bytes: Callable[[str], bytes] | None = None,
+    ) -> Any:
         """Recursively apply reviver to handle LangChain and LangGraph serialized objects.
 
         This method is crucial for preventing MESSAGE_COERCION_FAILURE by ensuring
@@ -436,21 +464,33 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
 
         Args:
             obj: The object to potentially revive, which may be a dict, list, or primitive.
+            typed_values: Enable escaped typed envelopes for redis-json-typed data.
+            decode_bytes: Decode checkpoint-only Redis byte markers in the same pass.
 
         Returns:
             The revived object with LangChain/LangGraph objects properly reconstructed.
         """
+        # Decode envelopes before walking their contents, and never walk the
+        # restored object: it may itself be a literal marker-shaped dictionary.
+        if typed_values and _is_typed_envelope(obj):
+            return self._decode_typed_value(obj)
         if isinstance(obj, list):
-            return [self._revive_if_needed(item) for item in obj]
+            return [
+                self._revive_if_needed(
+                    item, typed_values=typed_values, decode_bytes=decode_bytes
+                )
+                for item in obj
+            ]
         if isinstance(obj, dict):
+            if decode_bytes is not None and set(obj) == {"__bytes__"}:
+                return decode_bytes(obj["__bytes__"])
             # Match json.loads(object_hook=...) semantics by reviving children first.
-            revived = {k: self._revive_if_needed(v) for k, v in obj.items()}
-
-            if (
-                set(revived) == _TYPED_VALUE_KEYS
-                and revived.get(_TYPED_VALUE_MARKER) is True
-            ):
-                return self._decode_typed_value(revived)
+            revived = {
+                k: self._revive_if_needed(
+                    v, typed_values=typed_values, decode_bytes=decode_bytes
+                )
+                for k, v in obj.items()
+            }
 
             if revived.get("lc") in (1, 2) and revived.get("type") == "constructor":
                 # If the dictionary is an lc constructor envelope

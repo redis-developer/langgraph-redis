@@ -6,8 +6,10 @@ properly handles LangChain message serialization.
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import AsyncIterator
 
+import orjson
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
@@ -199,3 +201,33 @@ class TestIssue128AsyncMessageSerialization:
         assert item is not None
         assert item.value["data"] == b"async binary content"
         assert item.value["name"] == "test"
+
+
+async def test_store_preserves_literal_envelopes(async_store: AsyncRedisStore) -> None:
+    literal = {"__redis_jsonplus_typed__": True, "type": "bytes", "data": "YQ=="}
+    values = {
+        "native": {"literal": literal},
+        "typed": {"literal": literal, "amount": Decimal("1.10")},
+    }
+    for key, value in values.items():
+        await async_store.aput(("collision",), key, value)
+        item = await async_store.aget(("collision",), key)
+        assert item is not None
+        assert item.value == value
+    items = await async_store.asearch(("collision",))
+    assert {item.key: item.value for item in items} == values
+
+
+async def test_store_reads_legacy_json_wrapper(async_store: AsyncRedisStore) -> None:
+    literal = {"__redis_jsonplus_typed__": True, "type": "unknown", "data": ""}
+    value = {"literal": literal}
+    await async_store.aput(("legacy",), "value", {"seed": 1})
+    key = await anext(async_store._redis.scan_iter(match="store:*"))
+    await async_store._redis.json().set(
+        key,
+        "$.value",
+        {"__serde_type__": "json", "__serde_data__": orjson.dumps(value).decode()},
+    )
+    item = await async_store.aget(("legacy",), "value")
+    assert item is not None
+    assert item.value == value

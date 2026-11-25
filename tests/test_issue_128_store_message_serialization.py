@@ -12,8 +12,10 @@ handle LangChain message objects.
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Iterator
 
+import orjson
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
@@ -280,3 +282,33 @@ class TestIssue128MessageSerialization:
         assert item is not None
         assert item.value["data"] == b"binary content here"
         assert item.value["name"] == "test"
+
+
+def test_store_preserves_literal_envelopes(store: RedisStore) -> None:
+    literal = {"__redis_jsonplus_typed__": True, "type": "bytes", "data": "YQ=="}
+    values = {
+        "native": {"literal": literal},
+        "typed": {"literal": literal, "amount": Decimal("1.10")},
+    }
+    for key, value in values.items():
+        store.put(("collision",), key, value)
+        item = store.get(("collision",), key)
+        assert item is not None
+        assert item.value == value
+    items = store.search(("collision",))
+    assert {item.key: item.value for item in items} == values
+
+
+def test_store_reads_legacy_json_wrapper(store: RedisStore) -> None:
+    literal = {"__redis_jsonplus_typed__": True, "type": "unknown", "data": ""}
+    value = {"literal": literal}
+    store.put(("legacy",), "value", {"seed": 1})
+    key = next(store._redis.scan_iter(match="store:*"))
+    store._redis.json().set(
+        key,
+        "$.value",
+        {"__serde_type__": "json", "__serde_data__": orjson.dumps(value).decode()},
+    )
+    item = store.get(("legacy",), "value")
+    assert item is not None
+    assert item.value == value

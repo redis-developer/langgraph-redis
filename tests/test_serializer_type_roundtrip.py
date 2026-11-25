@@ -2,6 +2,7 @@
 
 import math
 from collections import deque
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from enum import Enum
@@ -10,7 +11,10 @@ from uuid import UUID
 
 import orjson
 import pytest
+from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.base import empty_checkpoint
+from langgraph.checkpoint.serde.types import _DeltaSnapshot
+from langgraph.types import Interrupt, Send
 
 from langgraph.checkpoint.redis import RedisSaver
 from langgraph.checkpoint.redis.base import BaseRedisSaver
@@ -82,7 +86,9 @@ def test_checkpoint_normalization_preserves_lossy_json_values() -> None:
 
     # The persisted checkpoint remains valid RedisJSON.
     orjson.dumps(dumped)
-    restored = saver._deserialize_channel_values(dumped["channel_values"])["payload"]
+    restored = saver._deserialize_channel_values(
+        dumped["channel_values"], type_=dumped["type"]
+    )["payload"]
     for name, expected in values.items():
         _assert_same_value(restored[name], expected)
 
@@ -153,3 +159,80 @@ def test_redis_store_preserves_lossy_json_values(redis_url: str) -> None:
     assert item is not None
     for name, expected in values.items():
         _assert_same_value(item.value[name], expected)
+
+
+LITERAL_ENVELOPES = [
+    pytest.param(
+        {"__redis_jsonplus_typed__": True, "type": "bytes", "data": "YQ=="},
+        id="valid-bytes",
+    ),
+    pytest.param(
+        {"__redis_jsonplus_typed__": True, "type": "unknown", "data": ""},
+        id="unknown-codec",
+    ),
+    pytest.param(
+        {"__redis_jsonplus_typed__": True, "type": "msgpack", "data": "wQ=="},
+        id="malformed-msgpack",
+    ),
+    pytest.param(
+        {"__redis_jsonplus_typed__": True, "type": "bytes", "data": "!"},
+        id="malformed-base64",
+    ),
+    pytest.param(
+        {
+            "__redis_jsonplus_typed__": True,
+            "type": {"__send__": True, "node": "literal", "arg": 1},
+            "data": {"__bytes__": "YQ=="},
+        },
+        id="nested-literal-markers",
+    ),
+]
+
+
+@dataclass
+class EnvelopeContainer:
+    value: dict[str, Any]
+
+
+@pytest.mark.parametrize("literal", LITERAL_ENVELOPES)
+@pytest.mark.parametrize("binary", [False, True], ids=["json", "msgpack-fallback"])
+def test_serializer_preserves_literal_envelopes(
+    literal: dict[str, Any], binary: bool
+) -> None:
+    value = {"literal": literal, "amount": Decimal("1.10")}
+    payload = {
+        "plain": value,
+        "snapshot": _DeltaSnapshot([value]),
+        "send": Send("node", value),
+        "interrupt": Interrupt(value=value),
+        "message": HumanMessage(content="hello", additional_kwargs=value),
+        "dataclass": EnvelopeContainer(value),
+    }
+    if binary:
+        payload["binary"] = b"payload"
+    serde = JsonPlusRedisSerializer()
+    assert serde.loads_typed(serde.dumps_typed(payload)) == payload
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        {"__redis_jsonplus_typed__": False, "type": "bytes", "data": "YQ=="},
+        {"__redis_jsonplus_typed__": 1, "type": "bytes", "data": "YQ=="},
+        {"__redis_jsonplus_typed__": True, "type": "bytes", "data": "YQ==", "extra": 1},
+        {"__redis_jsonplus_typed__": True, "type": "bytes"},
+        {"__redis_jsonplus_typed__": True, "type": 123, "data": []},
+    ],
+)
+def test_serializer_preserves_incomplete_or_invalid_literal_envelopes(
+    value: dict[str, Any],
+) -> None:
+    serde = JsonPlusRedisSerializer()
+    assert serde.loads_typed(serde.dumps_typed(value)) == value
+
+
+@pytest.mark.parametrize("literal", LITERAL_ENVELOPES[:-1])
+def test_legacy_json_does_not_decode_new_envelopes(literal: dict[str, Any]) -> None:
+    # Nested legacy Send/bytes markers retain their old meaning, so exclude those.
+    value = {"literal": literal}
+    assert JsonPlusRedisSerializer().loads_typed(("json", orjson.dumps(value))) == value

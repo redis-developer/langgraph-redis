@@ -23,7 +23,10 @@ from langgraph.graph.message import add_messages
 
 from langgraph.checkpoint.redis import RedisSaver
 from langgraph.checkpoint.redis.aio import AsyncRedisSaver
-from langgraph.checkpoint.redis.jsonplus_redis import JsonPlusRedisSerializer
+from langgraph.checkpoint.redis.jsonplus_redis import (
+    REDIS_TYPED_JSON_TYPE,
+    JsonPlusRedisSerializer,
+)
 
 
 def _messages_delta_reducer(
@@ -93,7 +96,9 @@ def _dump_and_restore_messages_channel(value: Any) -> tuple[dict[str, Any], Any]
     checkpoint["channel_values"]["messages"] = value
 
     dumped = saver._dump_checkpoint(checkpoint)
-    restored = saver._deserialize_channel_values(dumped["channel_values"])["messages"]
+    restored = saver._deserialize_channel_values(
+        dumped["channel_values"], type_=dumped["type"]
+    )["messages"]
     return dumped, restored
 
 
@@ -157,7 +162,7 @@ def test_msgpack_snapshot_roundtrip(snapshot_value: Any, expected_value: Any) ->
         _DeltaSnapshot(snapshot_value)
     )
 
-    assert dumped["type"] == "msgpack"
+    assert dumped["type"] == REDIS_TYPED_JSON_TYPE
     assert isinstance(restored, _DeltaSnapshot)
     assert restored.value == expected_value
 
@@ -172,7 +177,7 @@ def test_msgpack_tuple_not_snapshot() -> None:
     dumped, restored = _dump_and_restore_messages_channel((payload,))
     encoded = base64.b64encode(payload).decode()
 
-    assert dumped["type"] == "msgpack"
+    assert dumped["type"] == REDIS_TYPED_JSON_TYPE
     assert dumped["channel_values"]["messages"] == [{"__bytes__": encoded}]
     assert not isinstance(restored, _DeltaSnapshot)
     assert restored == [payload]

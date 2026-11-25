@@ -23,7 +23,10 @@ how Interrupt objects are handled.
 import pytest
 from langgraph.types import Send
 
-from langgraph.checkpoint.redis.jsonplus_redis import JsonPlusRedisSerializer
+from langgraph.checkpoint.redis.jsonplus_redis import (
+    REDIS_TYPED_JSON_TYPE,
+    JsonPlusRedisSerializer,
+)
 
 
 def test_send_object_serialization():
@@ -39,7 +42,7 @@ def test_send_object_serialization():
 
     # Serialize
     type_str, blob = serializer.dumps_typed(send_obj)
-    assert type_str == "json"
+    assert type_str == REDIS_TYPED_JSON_TYPE
     assert isinstance(blob, bytes)
 
     # Deserialize
