@@ -224,8 +224,7 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
         grouped_ops, num_ops = _group_ops(ops)
         results: list[Result] = [None] * num_ops
 
-        if PutOp in grouped_ops:
-            self._validate_put_ops(cast(list[tuple[int, PutOp]], grouped_ops[PutOp]))
+        self._validate_batch(grouped_ops)
 
         if GetOp in grouped_ops:
             self._batch_get_ops(

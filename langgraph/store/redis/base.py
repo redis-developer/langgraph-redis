@@ -24,6 +24,7 @@ from typing import (
 from langgraph.store.base import (
     GetOp,
     IndexConfig,
+    InvalidNamespaceError,
     Item,
     ListNamespacesOp,
     Op,
@@ -225,6 +226,105 @@ class RedisDocument(TypedDict, total=False):
     ttl_minutes: Optional[float]
     expires_at: Optional[int]
     doc_id: str
+
+
+# Puts, deletes and gets find an item with a search query on its namespace (the
+# TEXT field "prefix") and key (the TAG field "key"), so keys and namespace labels
+# those queries can't match are rejected before a batch runs. The characters below
+# were found by writing, reading, overwriting and deleting a key and a label that
+# held each ASCII character (alone, first, last and in the middle) on Redis 7.4,
+# 8.2 and 8.10.
+
+# Redis strips these from both ends of each comma-separated part of a TAG value
+# and indexes nothing for a part that is left empty.
+_TAG_STRIPPED_CHARS = " \t\n\r\x0b\x0c"
+# The query reads these as a break between words, so the query for a key holding
+# one misses the key and can match other keys instead (NUL is a syntax error).
+# Tab, line feed, VT, FF and CR are whitespace, so they aren't here: a key holding
+# nothing else is caught above, and inside a key they need escaping in the key
+# query instead.
+_KEY_UNQUERYABLE_CHARS = frozenset(
+    chr(c) for c in [*range(0x00, 0x09), *range(0x0E, 0x20), 0x7F]
+)
+# A label holding any of these can't be read back (NUL makes the query a syntax
+# error) or matches other labels made of the same words.
+_LABEL_CONTROL_CHARS = frozenset(chr(c) for c in [*range(0x00, 0x20), 0x7F])
+
+
+def _check_namespace(namespace: tuple[str, ...], *, allow_empty: bool = False) -> None:
+    """Raise InvalidNamespaceError for a namespace the store can't query.
+
+    Labels must be non-empty strings without "." (the store joins labels with
+    ".", so ("a.b",) would match ("a", "b")) or control characters. LangGraph's
+    BaseStore checks the same except control characters, in put() and aput()
+    only; this runs for every op. allow_empty keeps () for searching or listing
+    the whole store.
+    """
+    if not namespace and not allow_empty:
+        raise InvalidNamespaceError("Namespace cannot be empty.")
+    for label in namespace:
+        if not isinstance(label, str):
+            raise InvalidNamespaceError(
+                f"Invalid namespace label {label!r} found in {namespace}. Namespace "
+                f"labels must be strings, but got {type(label).__name__}."
+            )
+        if not label:
+            raise InvalidNamespaceError(
+                f"Namespace labels cannot be empty strings. Got {label!r} in "
+                f"{namespace}."
+            )
+        if "." in label:
+            raise InvalidNamespaceError(
+                f"Invalid namespace label {label!r} found in {namespace}. Namespace "
+                "labels cannot contain periods ('.')."
+            )
+        control = next((c for c in label if c in _LABEL_CONTROL_CHARS), None)
+        if control is not None:
+            raise InvalidNamespaceError(
+                f"Invalid namespace label {label!r} found in {namespace}. Namespace "
+                "labels cannot contain control characters "
+                f"(found U+{ord(control):04X})."
+            )
+
+
+def _check_key(namespace: tuple[str, ...], key: Any) -> None:
+    """Raise ValueError for a key that a put or delete can't match."""
+    if not isinstance(key, str):
+        raise ValueError(
+            f"Store keys must be strings, but got {type(key).__name__} {key!r} in "
+            f"namespace {namespace}."
+        )
+    if not any(part.strip(_TAG_STRIPPED_CHARS) for part in key.split(",")):
+        raise ValueError(
+            f"Store key {key!r} in namespace {namespace} has nothing Redis can "
+            "index: keys need a character other than commas and whitespace."
+        )
+    control = next((c for c in key if c in _KEY_UNQUERYABLE_CHARS), None)
+    if control is not None:
+        raise ValueError(
+            f"Store key {key!r} in namespace {namespace} contains the control "
+            f"character U+{ord(control):04X}, which Redis search can't match."
+        )
+    if key == "_":
+        raise ValueError(
+            f"Store key '_' in namespace {namespace} is a Redis search syntax error."
+        )
+
+
+def _check_op(op: Op) -> None:
+    """Raise ValueError for an op with a namespace or key the store can't query."""
+    if isinstance(op, PutOp):
+        _check_namespace(op.namespace)
+        _check_key(op.namespace, op.key)
+    elif isinstance(op, GetOp):
+        # Only the namespace: a get writes nothing, so its key can't leave
+        # another op half done.
+        _check_namespace(op.namespace)
+    elif isinstance(op, SearchOp):
+        _check_namespace(op.namespace_prefix, allow_empty=True)
+    elif isinstance(op, ListNamespacesOp):
+        for condition in op.match_conditions or ():
+            _check_namespace(condition.path, allow_empty=True)
 
 
 class BaseRedisStore(Generic[RedisClientType, IndexType]):
@@ -701,29 +801,24 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
                 results.append((filter_str, [], namespace, chunk_items))
         return results
 
-    def _validate_put_ops(self, put_ops: Sequence[tuple[int, PutOp]]) -> None:
-        """Check every put and delete in a batch before any op reaches Redis.
+    def _validate_batch(self, grouped_ops: dict[type, list[tuple[int, Op]]]) -> None:
+        """Check every op in a batch before any of them reaches Redis.
 
-        A batch writes op by op and deletes each key's old documents first, so an
-        op that failed part-way through would leave the ops before it with their
-        old documents deleted and their new ones unwritten. Raises ValueError, as
-        BaseStore does for an invalid namespace.
+        A batch deletes the old documents of each written key op by op and writes
+        the new ones at the end, so an op that failed part-way through would leave
+        the ops before it half done. Raises ValueError (InvalidNamespaceError for a
+        namespace), as BaseStore does for input it can check up front.
         """
-        for _, op in put_ops:
-            if op.key == "":
-                # Redis doesn't index an empty tag, so the key query for "" is
-                # a syntax error and the item could never be read back.
-                raise ValueError(
-                    "Store keys cannot be empty strings. "
-                    f"Got an empty key in namespace {op.namespace}."
-                )
-            if op.value is not None:
-                # RedisVL checks the document fields that come from the caller;
-                # the store fills in the rest.
-                validate_object(
-                    self.store_index.schema,
-                    {"prefix": _namespace_to_text(op.namespace), "key": op.key},
-                )
+        for ops in grouped_ops.values():
+            for _, op in ops:
+                _check_op(op)
+                if isinstance(op, PutOp) and op.value is not None:
+                    # RedisVL checks the document fields that come from the
+                    # caller; the store fills in the rest.
+                    validate_object(
+                        self.store_index.schema,
+                        {"prefix": _namespace_to_text(op.namespace), "key": op.key},
+                    )
 
     def _prepare_batch_PUT_queries(
         self,

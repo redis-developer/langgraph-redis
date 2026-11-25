@@ -6,15 +6,20 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from types import TracebackType
-from typing import Any, AsyncIterator, Iterable, Optional, Sequence, cast
+from typing import Any, AsyncIterator, Iterable, Literal, Optional, Sequence, cast
 
 from langgraph.store.base import (
+    NOT_PROVIDED,
     GetOp,
     IndexConfig,
+    Item,
     ListNamespacesOp,
+    NamespacePath,
+    NotProvided,
     Op,
     PutOp,
     Result,
+    SearchItem,
     SearchOp,
     TTLConfig,
     ensure_embeddings,
@@ -41,6 +46,8 @@ from langgraph.store.redis.base import (
     BaseRedisStore,
     RedisDocument,
     _aggregate_row_to_doc,
+    _check_key,
+    _check_namespace,
     _decode_ns,
     _ensure_string_or_literal,
     _filtered_search_request,
@@ -402,8 +409,7 @@ class AsyncRedisStore(
         grouped_ops, num_ops = _group_ops(ops)
         results: list[Result] = [None] * num_ops
 
-        if PutOp in grouped_ops:
-            self._validate_put_ops(cast(list[tuple[int, PutOp]], grouped_ops[PutOp]))
+        self._validate_batch(grouped_ops)
 
         tasks = []
 
@@ -445,6 +451,80 @@ class AsyncRedisStore(
         await asyncio.gather(*tasks)
 
         return results
+
+    # AsyncBatchedBaseStore merges the ops of concurrent calls into one abatch(),
+    # which rejects the whole batch for one invalid op. These check each call
+    # before its op is queued, so an invalid call fails on its own, as aput()
+    # already does for LangGraph's namespace check.
+
+    async def aget(
+        self,
+        namespace: tuple[str, ...],
+        key: str,
+        *,
+        refresh_ttl: bool | None = None,
+    ) -> Item | None:
+        _check_namespace(namespace)
+        return await super().aget(namespace, key, refresh_ttl=refresh_ttl)
+
+    async def asearch(
+        self,
+        namespace_prefix: tuple[str, ...],
+        /,
+        *,
+        query: str | None = None,
+        filter: dict[str, Any] | None = None,
+        limit: int = 10,
+        offset: int = 0,
+        refresh_ttl: bool | None = None,
+    ) -> list[SearchItem]:
+        _check_namespace(namespace_prefix, allow_empty=True)
+        return await super().asearch(
+            namespace_prefix,
+            query=query,
+            filter=filter,
+            limit=limit,
+            offset=offset,
+            refresh_ttl=refresh_ttl,
+        )
+
+    async def aput(
+        self,
+        namespace: tuple[str, ...],
+        key: str,
+        value: dict[str, Any],
+        index: Literal[False] | list[str] | None = None,
+        *,
+        ttl: float | None | NotProvided = NOT_PROVIDED,
+    ) -> None:
+        _check_namespace(namespace)
+        _check_key(namespace, key)
+        await super().aput(namespace, key, value, index, ttl=ttl)
+
+    async def adelete(self, namespace: tuple[str, ...], key: str) -> None:
+        _check_namespace(namespace)
+        _check_key(namespace, key)
+        await super().adelete(namespace, key)
+
+    async def alist_namespaces(
+        self,
+        *,
+        prefix: NamespacePath | None = None,
+        suffix: NamespacePath | None = None,
+        max_depth: int | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[tuple[str, ...]]:
+        for path in (prefix, suffix):
+            if path is not None:
+                _check_namespace(path, allow_empty=True)
+        return await super().alist_namespaces(
+            prefix=prefix,
+            suffix=suffix,
+            max_depth=max_depth,
+            limit=limit,
+            offset=offset,
+        )
 
     def batch(self: AsyncRedisStore, ops: Iterable[Op]) -> list[Result]:
         """Execute batch of operations synchronously.
