@@ -16,7 +16,12 @@ from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.checkpoint.serde.types import _DeltaSnapshot
 from langgraph.types import Interrupt, Send
 
-from langgraph.checkpoint.redis import RedisSaver
+from langgraph.checkpoint.redis import (
+    AsyncRedisSaver,
+    AsyncShallowRedisSaver,
+    RedisSaver,
+    ShallowRedisSaver,
+)
 from langgraph.checkpoint.redis.base import BaseRedisSaver
 from langgraph.checkpoint.redis.jsonplus_redis import JsonPlusRedisSerializer
 from langgraph.store.redis import RedisStore
@@ -159,32 +164,51 @@ def test_store_keeps_native_json_values_unwrapped() -> None:
     assert store._serialize_value(value) is value
 
 
-def test_redis_saver_preserves_lossy_json_values(redis_url: str) -> None:
-    values = _roundtrip_values()
+def _roundtrip_put_args(saver_cls: type) -> tuple[Any, ...]:
     checkpoint = empty_checkpoint()
-    checkpoint["channel_values"] = {"payload": values}
+    checkpoint["channel_values"] = {"payload": _roundtrip_values()}
     checkpoint["channel_versions"] = {"payload": "1"}
     config = {
         "configurable": {
-            "thread_id": "serializer-type-roundtrip",
+            "thread_id": f"serializer-type-roundtrip-{saver_cls.__name__}",
             "checkpoint_ns": "",
         }
     }
+    metadata = {"source": "input", "step": 0, "writes": {}}
+    return config, checkpoint, metadata, {"payload": "1"}
 
-    with RedisSaver.from_conn_string(redis_url) as saver:
-        saver.setup()
-        saved_config = saver.put(
-            config,
-            checkpoint,
-            {"source": "input", "step": 0, "writes": {}},
-            {"payload": "1"},
-        )
-        restored_checkpoint = saver.get(saved_config)
 
+def _assert_restored_roundtrip_values(restored_checkpoint: Any) -> None:
     assert restored_checkpoint is not None
     restored = restored_checkpoint["channel_values"]["payload"]
-    for name, expected in values.items():
+    for name, expected in _roundtrip_values().items():
         _assert_same_value(restored[name], expected)
+
+
+@pytest.mark.parametrize(
+    "saver_cls", [RedisSaver, ShallowRedisSaver], ids=lambda cls: cls.__name__
+)
+def test_redis_saver_preserves_lossy_json_values(
+    redis_url: str, saver_cls: type
+) -> None:
+    with saver_cls.from_conn_string(redis_url) as saver:
+        saver.setup()
+        saved_config = saver.put(*_roundtrip_put_args(saver_cls))
+        _assert_restored_roundtrip_values(saver.get(saved_config))
+
+
+@pytest.mark.parametrize(
+    "saver_cls",
+    [AsyncRedisSaver, AsyncShallowRedisSaver],
+    ids=lambda cls: cls.__name__,
+)
+async def test_async_redis_saver_preserves_lossy_json_values(
+    redis_url: str, saver_cls: type
+) -> None:
+    async with saver_cls.from_conn_string(redis_url) as saver:
+        await saver.asetup()
+        saved_config = await saver.aput(*_roundtrip_put_args(saver_cls))
+        _assert_restored_roundtrip_values(await saver.aget(saved_config))
 
 
 def test_redis_store_preserves_lossy_json_values(redis_url: str) -> None:
