@@ -176,13 +176,7 @@ class TestIssue128MessageSerialization:
         assert retrieved_message.tool_calls[0]["name"] == "get_weather"
 
     def test_search_with_message_values(self, store: RedisStore) -> None:
-        """Test searching for items that contain message values.
-
-        Note: When values contain non-JSON-serializable objects like HumanMessage,
-        the entire value is serialized using the serde wrapper. This means filters
-        on nested fields won't work for such values. This test verifies that
-        search works and messages are properly deserialized.
-        """
+        """Filter message-containing values and return deserialized messages."""
         namespace = ("test", "searchable")
 
         # Store items with messages
@@ -196,8 +190,9 @@ class TestIssue128MessageSerialization:
                 },
             )
 
-        # Search without filter (filters don't work on serialized values)
-        results = store.search(namespace)
+        results = store.search(
+            namespace, filter={"topic": ["topic_0", "topic_1", "topic_2"]}
+        )
         assert len(results) == 3
 
         # Verify messages are properly deserialized in all results

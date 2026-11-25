@@ -393,8 +393,7 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
         - If the value contains complex objects (HumanMessage, etc.), it uses
           the serde wrapper format with __serde_type__ and __serde_data__ keys
 
-        Note: Values containing LangChain messages will be wrapped in a serde format,
-        which means filters on nested fields won't work for such values.
+        Search filters operate on deserialized values, including wrapped values.
 
         Args:
             value: The value to serialize (can contain HumanMessage, AIMessage, etc.)

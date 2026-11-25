@@ -786,10 +786,18 @@ class AsyncRedisStore(
                             )
                             continue
 
-                        # Apply value filters if needed
+                        item = _row_to_search_item(
+                            _decode_ns(store_doc["prefix"]),
+                            store_doc,
+                            score=score,
+                            deserialize_fn=self._deserialize_value,
+                        )
+                        # Filter the decoded user value, not its storage wrapper.
                         if op.filter:
+                            value = item.value
+                            if not isinstance(value, dict):
+                                continue
                             matches = True
-                            value = store_doc.get("value", {})
                             for key, expected in op.filter.items():
                                 actual = value.get(key)
                                 if isinstance(expected, list):
@@ -812,14 +820,7 @@ class AsyncRedisStore(
                             )
                             refresh_keys.append(vector_key)
 
-                        items.append(
-                            _row_to_search_item(
-                                _decode_ns(store_doc["prefix"]),
-                                store_doc,
-                                score=score,
-                                deserialize_fn=self._deserialize_value,
-                            )
-                        )
+                        items.append(item)
 
                 # Refresh TTL if requested
                 if op.refresh_ttl and refresh_keys and self.ttl_config:
@@ -859,10 +860,17 @@ class AsyncRedisStore(
 
                 for doc in res.docs:
                     data = json.loads(doc.json)
-                    # Apply value filters
+                    item = _row_to_search_item(
+                        _decode_ns(data["prefix"]),
+                        data,
+                        deserialize_fn=self._deserialize_value,
+                    )
+                    # Filter the decoded user value, not its storage wrapper.
                     if op.filter:
+                        value = item.value
+                        if not isinstance(value, dict):
+                            continue
                         matches = True
-                        value = data.get("value", {})
                         for key, expected in op.filter.items():
                             actual = value.get(key)
                             if isinstance(expected, list):
@@ -885,13 +893,7 @@ class AsyncRedisStore(
                         )
                         refresh_keys.append(vector_key)
 
-                    items.append(
-                        _row_to_search_item(
-                            _decode_ns(data["prefix"]),
-                            data,
-                            deserialize_fn=self._deserialize_value,
-                        )
-                    )
+                    items.append(item)
 
                 # Refresh TTL if requested
                 if op.refresh_ttl and refresh_keys and self.ttl_config:

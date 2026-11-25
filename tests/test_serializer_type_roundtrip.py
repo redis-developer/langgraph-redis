@@ -5,7 +5,7 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
-from enum import Enum
+from enum import Enum, IntEnum
 from typing import Any
 from uuid import UUID
 
@@ -20,11 +20,22 @@ from langgraph.checkpoint.redis import RedisSaver
 from langgraph.checkpoint.redis.base import BaseRedisSaver
 from langgraph.checkpoint.redis.jsonplus_redis import JsonPlusRedisSerializer
 from langgraph.store.redis import RedisStore
+from langgraph.store.redis.aio import AsyncRedisStore
 from langgraph.store.redis.base import BaseRedisStore
 
 
 class StringValue(str, Enum):
     VALUE = "value"
+
+
+class IntegerValue(IntEnum):
+    VALUE = 1
+
+
+JSON_ENUM_VALUES = [
+    pytest.param(StringValue.VALUE, "value", id="string-enum"),
+    pytest.param(IntegerValue.VALUE, 1, id="integer-enum"),
+]
 
 
 ROUNDTRIP_CASES: list[tuple[str, Any]] = [
@@ -36,7 +47,6 @@ ROUNDTRIP_CASES: list[tuple[str, Any]] = [
     ("date", date(2024, 1, 2)),
     ("time", time(3, 4, 5)),
     ("uuid", UUID("12345678-1234-5678-1234-567812345678")),
-    ("enum", StringValue.VALUE),
     ("positive-infinity", float("inf")),
     ("negative-infinity", float("-inf")),
     ("nan", float("nan")),
@@ -66,6 +76,37 @@ def test_serializer_preserves_python_types(value: Any) -> None:
     restored = serializer.loads_typed((type_, data))["value"]
 
     _assert_same_value(restored, value)
+
+
+@pytest.mark.parametrize("value,expected", JSON_ENUM_VALUES)
+def test_store_filters_json_enum_values(
+    redis_url: str, value: Enum, expected: Any
+) -> None:
+    with RedisStore.from_conn_string(redis_url) as store:
+        store.setup()
+        store.put(("enum",), "item", {"status": value, "tenant": "acme"})
+        items = store.search(("enum",), filter={"tenant": "acme"})
+        assert [item.key for item in items] == ["item"]
+        _assert_same_value(items[0].value["status"], expected)
+        assert store.search(("enum",), filter={"tenant": None}) == []
+        assert [
+            item.key for item in store.search(("enum",), filter={"status": expected})
+        ] == ["item"]
+
+
+@pytest.mark.parametrize("value,expected", JSON_ENUM_VALUES)
+async def test_async_store_filters_json_enum_values(
+    redis_url: str, value: Enum, expected: Any
+) -> None:
+    async with AsyncRedisStore.from_conn_string(redis_url) as store:
+        await store.setup()
+        await store.aput(("enum",), "item", {"status": value, "tenant": "acme"})
+        items = await store.asearch(("enum",), filter={"tenant": "acme"})
+        assert [item.key for item in items] == ["item"]
+        _assert_same_value(items[0].value["status"], expected)
+        assert await store.asearch(("enum",), filter={"tenant": None}) == []
+        matches = await store.asearch(("enum",), filter={"status": expected})
+        assert [item.key for item in matches] == ["item"]
 
 
 class _DummySaver(BaseRedisSaver):
@@ -98,7 +139,6 @@ def test_store_wraps_values_that_json_would_change() -> None:
     store._serde = JsonPlusRedisSerializer()
     value = {
         "datetime": datetime(2024, 1, 2, 3, 4, 5),
-        "enum": StringValue.VALUE,
         "mapping": {1: "integer", "1": "string"},
     }
 
@@ -108,7 +148,6 @@ def test_store_wraps_values_that_json_would_change() -> None:
     assert set(serialized) == {"__serde_type__", "__serde_data__"}
     assert restored == value
     assert type(restored["datetime"]) is datetime
-    assert type(restored["enum"]) is StringValue
     assert set(restored["mapping"]) == {1, "1"}
 
 

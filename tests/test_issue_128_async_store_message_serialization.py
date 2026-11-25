@@ -129,7 +129,9 @@ class TestIssue128AsyncMessageSerialization:
                 },
             )
 
-        results = await async_store.asearch(namespace)
+        results = await async_store.asearch(
+            namespace, filter={"topic": ["topic_0", "topic_1", "topic_2"]}
+        )
         assert len(results) == 3
 
         for result in results:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from decimal import Decimal
 from typing import Iterator
 from uuid import uuid4
 
@@ -420,6 +421,52 @@ def test_search(store: RedisStore) -> None:
     # Cleanup
     for namespace, key, _ in test_data:
         store.delete(namespace, key)
+
+
+@pytest.mark.parametrize("query", [None, "apple"], ids=["regular", "vector"])
+def test_search_filters_deserialized_values(
+    vector_store: RedisStore, query: str | None
+) -> None:
+    namespace = ("wrapped_filters",)
+    # Keep a vector for this record, then simulate an unreadable stored value.
+    vector_store.put(namespace, "corrupt", {"text": "apple"})
+    corrupt_key = next(
+        vector_store._redis.scan_iter(match=f"{vector_store.store_prefix}:*")
+    )
+    vector_store._redis.json().set(
+        corrupt_key,
+        "$.value",
+        {"__serde_type__": "msgpack", "__serde_data__": "invalid-hex"},
+    )
+    values = {
+        "wrapped": {
+            "text": "apple",
+            "tenant": "acme",
+            "counts": {1: "integer", "1": "string"},
+            "amount": Decimal("1.10"),
+        },
+        "native": {"text": "apple", "tenant": "other"},
+        "null": {"text": "apple", "tenant": None, "amount": Decimal("2.20")},
+        "missing": {"text": "apple", "amount": Decimal("3.30")},
+    }
+    for key, value in values.items():
+        vector_store.put(namespace, key, value)
+    expected_values = {**values, "corrupt": None}
+    for condition, keys in [
+        ({"tenant": "acme"}, {"wrapped"}),
+        ({"tenant": ["acme", "other"]}, {"wrapped", "native"}),
+        # Preserve the existing behavior of treating missing fields as None.
+        ({"tenant": None}, {"null", "missing"}),
+        ({"amount": Decimal("1.10")}, {"wrapped"}),
+        ({"tenant": "acme", "amount": Decimal("2.20")}, set()),
+        ({"tenant": []}, set()),
+        ({}, set(expected_values)),
+    ]:
+        items = vector_store.search(namespace, query=query, filter=condition)
+        assert {item.key for item in items} == keys
+        for item in items:
+            assert item.value == expected_values[item.key]
+            assert (item.score is not None) == (query is not None)
 
 
 def test_large_batches(store: RedisStore) -> None:

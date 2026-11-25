@@ -96,9 +96,13 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
     def is_native_json_value(cls, obj: Any) -> bool:
         """Return whether JSON can store a value without changing its meaning.
 
-        Exact type checks are intentional: ``Enum`` and scalar subclasses can be
-        accepted by JSON encoders while losing their Python type.
+        JSON-compatible enums retain their legacy scalar representation. Exact
+        type checks keep other subclasses on the typed serialization path.
         """
+        if isinstance(obj, Enum):
+            return isinstance(obj, (str, int, float)) and cls.is_native_json_value(
+                obj.value
+            )
         if obj is None or type(obj) in (str, bool, int):
             return True
         if type(obj) is float:
@@ -316,9 +320,6 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
             ]
             # Preserve tuple type
             return tuple(processed) if isinstance(obj, tuple) else processed
-        elif isinstance(obj, Enum):
-            # orjson otherwise serializes Enum members as their raw value.
-            return self._encode_typed_value(obj)
         elif self.is_native_json_value(obj):
             return obj
         elif hasattr(obj, "to_json") or hasattr(obj, "__dict__"):

@@ -2,6 +2,7 @@
 
 import asyncio
 import time
+from decimal import Decimal
 from typing import AsyncIterator
 from uuid import uuid4
 
@@ -392,6 +393,52 @@ async def test_vector_update_with_score_verification(
     assert doc1_score is not None
     if after_score is not None:
         assert doc1_score > after_score
+
+
+@pytest.mark.parametrize("query", [None, "apple"], ids=["regular", "vector"])
+async def test_search_filters_deserialized_values(
+    vector_store: AsyncRedisStore, query: str | None
+) -> None:
+    namespace = ("wrapped_filters",)
+    # Keep a vector for this record, then simulate an unreadable stored value.
+    await vector_store.aput(namespace, "corrupt", {"text": "apple"})
+    corrupt_key = await anext(
+        vector_store._redis.scan_iter(match=f"{vector_store.store_prefix}:*")
+    )
+    await vector_store._redis.json().set(
+        corrupt_key,
+        "$.value",
+        {"__serde_type__": "msgpack", "__serde_data__": "invalid-hex"},
+    )
+    values = {
+        "wrapped": {
+            "text": "apple",
+            "tenant": "acme",
+            "counts": {1: "integer", "1": "string"},
+            "amount": Decimal("1.10"),
+        },
+        "native": {"text": "apple", "tenant": "other"},
+        "null": {"text": "apple", "tenant": None, "amount": Decimal("2.20")},
+        "missing": {"text": "apple", "amount": Decimal("3.30")},
+    }
+    for key, value in values.items():
+        await vector_store.aput(namespace, key, value)
+    expected_values = {**values, "corrupt": None}
+    for condition, keys in [
+        ({"tenant": "acme"}, {"wrapped"}),
+        ({"tenant": ["acme", "other"]}, {"wrapped", "native"}),
+        # Preserve the existing behavior of treating missing fields as None.
+        ({"tenant": None}, {"null", "missing"}),
+        ({"amount": Decimal("1.10")}, {"wrapped"}),
+        ({"tenant": "acme", "amount": Decimal("2.20")}, set()),
+        ({"tenant": []}, set()),
+        ({}, set(expected_values)),
+    ]:
+        items = await vector_store.asearch(namespace, query=query, filter=condition)
+        assert {item.key for item in items} == keys
+        for item in items:
+            assert item.value == expected_values[item.key]
+            assert (item.score is not None) == (query is not None)
 
 
 @pytest.mark.asyncio
