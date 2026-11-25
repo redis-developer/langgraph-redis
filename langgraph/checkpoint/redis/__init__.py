@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple, Union, cast
 
 import orjson
@@ -19,7 +19,8 @@ from langgraph.checkpoint.base import (
 from langgraph.constants import TASKS
 from redis import Redis
 from redis.cluster import RedisCluster
-from redis.commands.search.aggregation import AggregateRequest, Cursor
+from redis.commands.search.aggregation import AggregateRequest
+from redis.exceptions import ResponseError
 from redisvl.index import SearchIndex
 from redisvl.query import FilterQuery
 from redisvl.query.filter import Num, Tag
@@ -1667,6 +1668,34 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
                 configs, pipeline.execute(raise_on_error=False)
             )
 
+    def _iter_cursor_pages(
+        self, index: SearchIndex, request: AggregateRequest
+    ) -> Iterator[List[Any]]:
+        """Yield every page of an FT.AGGREGATE cursor, read on a single node.
+
+        If the caller stops early or an error occurs, the open cursor is released.
+        """
+        node = self._cursor_node_options()
+        reply = self._redis.execute_command(
+            "FT.AGGREGATE", index.name, *request.build_args(), **node
+        )
+        cursor_id = 0
+        try:
+            while True:
+                page, cursor_id = self._parse_cursor_page(reply)
+                yield page
+                if not cursor_id:
+                    return
+                reply = self._redis.execute_command(
+                    "FT.CURSOR", "READ", index.name, cursor_id, **node
+                )
+        finally:
+            if cursor_id:
+                with suppress(ResponseError):
+                    self._redis.execute_command(
+                        "FT.CURSOR", "DEL", index.name, cursor_id, **node
+                    )
+
     def _read_prune_search(
         self,
         index: SearchIndex,
@@ -1675,24 +1704,19 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
         thread_id: str,
         max_results: int,
     ) -> List[Any]:
-        """Read every match of a prune search by following its cursor to the end.
+        """Read every match of a prune search, keeping at most ``max_results``.
 
-        Keeps at most ``max_results`` records but counts every match, and raises
-        before returning if the search matched more than that.
+        Counts every match and raises before returning if there were more.
         """
         docs: List[Any] = []
         total = 0
-        reply = index.aggregate(request)
-        while True:
-            page, cursor_id = self._parse_prune_page(reply)
+        for page in self._iter_cursor_pages(index, request):
             total += len(page)
             docs.extend(page[: max(0, max_results - len(docs))])
-            if not cursor_id:
-                self._validate_prune_search_result(
-                    len(docs), total, thread_id=thread_id, max_results=max_results
-                )
-                return docs
-            reply = index.aggregate(Cursor(cursor_id))
+        self._validate_prune_search_result(
+            len(docs), total, thread_id=thread_id, max_results=max_results
+        )
+        return docs
 
     def prune(
         self,

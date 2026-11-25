@@ -14,6 +14,7 @@ Tests cover:
 - incomplete checkpoint and write searches are rejected before deleting thread data
 """
 
+import socket
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 from contextlib import contextmanager
@@ -23,8 +24,10 @@ import pytest
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import Checkpoint, CheckpointMetadata
 from redis import Redis
+from redis.cluster import RedisCluster
 from redisvl.query import CountQuery, FilterQuery
 from redisvl.query.filter import Tag
+from testcontainers.core.container import DockerContainer
 from ulid import ULID
 
 from langgraph.checkpoint.redis import RedisSaver
@@ -314,6 +317,64 @@ async def test_prune_reads_every_match_through_its_cursor(
         assert list(client.scan_iter(match=f"*{cp_id}*", count=10_000)) == []
     for config in retained:
         checkpoint = saver.get_tuple(config)
+        assert checkpoint is not None
+        assert checkpoint.pending_writes == [("task", "messages", "v")]
+
+
+def _wait_for(condition: Callable[[], Any], timeout: float = 30.0) -> None:
+    """Poll ``condition`` until it returns truthy, ignoring connection errors."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            if condition():
+                return
+        except Exception:
+            if time.monotonic() > deadline:
+                raise
+        if time.monotonic() > deadline:
+            raise TimeoutError("condition not met")
+        time.sleep(0.2)
+
+
+@pytest.fixture(scope="module")
+def redis_cluster_port() -> Iterator[int]:
+    """A single-node Redis Cluster that owns every slot, announced on its host port."""
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    container = (
+        DockerContainer("redis:8")
+        .with_bind_ports(port, port)
+        .with_command(
+            f"redis-server --port {port} --cluster-enabled yes "
+            f"--cluster-announce-ip 127.0.0.1 --cluster-announce-port {port} "
+            # Redis 8.12+ refuses an unauthenticated cluster bus unless told the
+            # port is trusted; this container is only reachable from localhost.
+            "--cluster-bus-port-protected-mode no --save '' --appendonly no"
+        )
+    )
+    with container:
+        client = Redis(host="127.0.0.1", port=port)
+        _wait_for(client.ping)
+        client.execute_command("CLUSTER", "ADDSLOTSRANGE", "0", "16383")
+        _wait_for(lambda: client.cluster("info")["cluster_state"] == "ok")
+        yield port
+
+
+def test_prune_reads_cursor_pages_on_a_redis_cluster(redis_cluster_port: int) -> None:
+    """Cursor reads stay on one node, so pruning works on a cluster with any redis-py."""
+    cluster = RedisCluster(host="127.0.0.1", port=redis_cluster_port)
+    with RedisSaver.from_conn_string(redis_client=cluster) as cluster_saver:
+        cluster_saver.setup()
+        thread_id = f"prune-cluster-{_make_ulid()}"
+        evicted, retained = (_config(thread_id, _make_ulid()) for _ in range(2))
+        _put_checkpoint_with_bulk_writes(cluster_saver, evicted, 2_500)  # 3 pages
+        _put_checkpoint_with_bulk_writes(cluster_saver, retained, 1)
+
+        cluster_saver.prune([thread_id])
+
+        assert cluster_saver.get_tuple(evicted) is None
+        checkpoint = cluster_saver.get_tuple(retained)
         assert checkpoint is not None
         assert checkpoint.pending_writes == [("task", "messages", "v")]
 

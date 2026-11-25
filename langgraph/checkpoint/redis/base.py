@@ -32,7 +32,7 @@ from langgraph.checkpoint.base import (
 )
 from langgraph.checkpoint.serde.base import SerializerProtocol
 from langgraph.checkpoint.serde.types import ChannelProtocol
-from redis.commands.search.aggregation import AggregateRequest, AggregateResult
+from redis.commands.search.aggregation import AggregateRequest
 from redis.exceptions import ResponseError
 from redisvl.query import FilterQuery
 from redisvl.query.filter import FilterExpression, Tag
@@ -1253,21 +1253,33 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
             ["checkpoint_ns", "checkpoint_id", "task_id", "idx"],
         )
 
+    def _cursor_node_options(self) -> Dict[str, Any]:
+        """Keep an FT.AGGREGATE cursor's commands on one cluster node.
+
+        A cursor exists only on the node that created it, and redis-py before 7.1
+        cannot route FT.AGGREGATE or FT.CURSOR in cluster mode. Standalone
+        clients need no options.
+        """
+        get_default_node = getattr(self._redis, "get_default_node", None)
+        return {"target_nodes": [get_default_node()]} if get_default_node else {}
+
     @staticmethod
-    def _parse_prune_page(reply: Any) -> Tuple[List[SimpleNamespace], int]:
-        """Normalize one cursor page (RESP2 or RESP3) into records and the next cursor ID."""
-        if isinstance(reply, AggregateResult):
-            # RESP2: rows are flat [key, value, ...] lists.
-            rows = [dict(zip(row[::2], row[1::2])) for row in reply.rows]
-            cursor_id = reply.cursor.cid if reply.cursor else 0
-        else:
-            # RESP3: [{"results": [{"extra_attributes": {...}}, ...], ...}, cursor_id]
-            body, cursor_id = reply
+    def _parse_cursor_page(reply: Any) -> Tuple[List[SimpleNamespace], int]:
+        """Normalize a raw FT.AGGREGATE or FT.CURSOR READ reply.
+
+        Returns the page's records and the next cursor ID (0 once exhausted).
+        """
+        body, cursor_id = reply
+        if isinstance(body, dict):
+            # RESP3: [{"results": [{"extra_attributes": {...}}, ...]}, cursor_id]
             results = body.get(b"results", body.get("results", []))
             rows = [
                 row.get(b"extra_attributes", row.get("extra_attributes", {}))
                 for row in results
             ]
+        else:
+            # RESP2: [[count, [field, value, ...], ...], cursor_id]
+            rows = [dict(zip(row[::2], row[1::2])) for row in body[1:]]
         records = [
             SimpleNamespace(
                 **{
