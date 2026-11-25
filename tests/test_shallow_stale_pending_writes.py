@@ -12,7 +12,6 @@ RedisSaver and LangGraph's InMemorySaver keep pending writes per checkpoint id.
 """
 
 import operator
-import sys
 import uuid
 from typing import Annotated, TypedDict
 
@@ -25,12 +24,6 @@ from langgraph.types import Command, Durability, interrupt
 
 from langgraph.checkpoint.redis.ashallow import AsyncShallowRedisSaver
 from langgraph.checkpoint.redis.shallow import ShallowRedisSaver
-
-# interrupt() inside an async node needs Python 3.11+ (see test_issue_133_hitl_shallow.py)
-requires_python_311 = pytest.mark.skipif(
-    sys.version_info < (3, 11),
-    reason="interrupt() in async context requires Python 3.11+ for TaskGroup support",
-)
 
 METADATA: CheckpointMetadata = {"source": "loop", "step": 1, "writes": {}}
 
@@ -168,7 +161,6 @@ def test_shallow_resume_update_is_applied_once(
         assert result["log"] == EXPECTED_LOG
 
 
-@requires_python_311
 @pytest.mark.parametrize("durability", DURABILITIES)
 async def test_ashallow_resume_update_is_applied_once(
     redis_url: str, durability: Durability

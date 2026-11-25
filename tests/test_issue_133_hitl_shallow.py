@@ -23,25 +23,15 @@ But in the HITL flow:
    previous checkpoint - INCLUDING the interrupt writes that were just saved!
 
 This results in the interrupt being lost before it can be read when resuming.
-
-Note: Some async tests require Python 3.11+ because interrupt() uses get_config()
-which needs TaskGroup context support only available in Python 3.11+.
 """
 
 import operator
-import sys
 from contextlib import asynccontextmanager
 from typing import Annotated, Any, AsyncGenerator, Dict, TypedDict
 from uuid import uuid4
 
 import pytest
 from langchain_core.messages import AnyMessage, HumanMessage
-
-# Skip marker for tests that require Python 3.11+ due to interrupt() async context requirements
-requires_python_311 = pytest.mark.skipif(
-    sys.version_info < (3, 11),
-    reason="interrupt() in async context requires Python 3.11+ for TaskGroup support",
-)
 from langgraph.checkpoint.base import (
     Checkpoint,
     CheckpointMetadata,
@@ -93,7 +83,6 @@ async def create_async_shallow_saver(
         yield saver
 
 
-@requires_python_311
 @pytest.mark.asyncio
 async def test_hitl_interrupt_persists_in_shallow_saver(redis_url: str) -> None:
     """
@@ -160,7 +149,6 @@ async def test_hitl_interrupt_persists_in_shallow_saver(redis_url: str) -> None:
         assert final_state.get("user_confirmed") is True
 
 
-@requires_python_311
 @pytest.mark.asyncio
 async def test_hitl_interrupt_with_multiple_checkpoints(redis_url: str) -> None:
     """
@@ -319,7 +307,6 @@ async def test_interrupt_write_order_timing(redis_url: str) -> None:
         # For HITL to work, the interrupt should NOT be cleaned up prematurely
 
 
-@requires_python_311
 @pytest.mark.asyncio
 async def test_interrupt_state_consistency_across_get_state_calls(
     redis_url: str,
@@ -505,7 +492,6 @@ def test_sync_hitl_interrupt_persists(redis_url: str) -> None:
         assert final_state.get("user_confirmed") is True
 
 
-@requires_python_311
 @pytest.mark.asyncio
 async def test_double_resume_not_required(redis_url: str) -> None:
     """

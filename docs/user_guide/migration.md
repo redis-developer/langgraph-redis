@@ -11,6 +11,39 @@ details, refer to the migration documents in the repository root:
 - [`MIGRATION_0.1.0.md`](https://github.com/redis-developer/langgraph-redis/blob/main/MIGRATION_0.1.0.md) -- initial migration guide
 - [`MIGRATION_0.2.0.md`](https://github.com/redis-developer/langgraph-redis/blob/main/MIGRATION_0.2.0.md) -- migration from 0.1.x to 0.2.0
 
+## Migrating to 0.7.0 from 0.6.x
+
+Version 0.7.0 drops support for Python 3.10, which reached end of life in
+October 2026. The API and the format of data stored in Redis are unchanged.
+
+### Python Version Requirement
+
+The minimum Python version increased from **3.10 to 3.11**. Verify your
+environment before upgrading:
+
+```bash
+python --version
+# Must be 3.11 or higher
+```
+
+### Dependency Updates
+
+Update your dependencies:
+
+```bash
+pip install --upgrade "langgraph-checkpoint-redis>=0.7.0"
+```
+
+The key version changes:
+
+| Package | 0.6.x | 0.7.0+ |
+|---------|-------|--------|
+| `redisvl` | `>=0.28.0` | `>=0.32.0` |
+| `python` | `>=3.10` | `>=3.11` |
+
+`redisvl` 0.32.0 is the first release that requires Python 3.11. If you pin
+`redisvl` below 0.32.0, raise the pin before upgrading.
+
 ## Migrating to 0.2.0 from 0.1.x
 
 Version 0.2.0 is a major upgrade that brings compatibility with LangGraph 1.0,

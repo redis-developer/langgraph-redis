@@ -8,7 +8,6 @@ readme = "README.md"
 repository = "https://www.github.com/redis-developer/langgraph-redis"
 keywords = ["ai", "redis", "redis-client", "vector-database", "agents", "langgraph", "langchain"]
 classifiers = [
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -19,12 +18,11 @@ classifiers = [
 packages = [{ include = "langgraph" }]
 
 [tool.poetry.dependencies]
-python = ">=3.10,<3.16"
+python = ">=3.11,<3.16"
 langgraph-checkpoint = ">=4.1.1,<5.0.0"
-redisvl = ">=0.31.0,<1.0.0"
+redisvl = ">=0.32.0,<1.0.0"
 redis = ">=6.3.0,!=8.0.0,<9.0"
 orjson = "^3.9.0"
-tomli = { version = "^2.0.1", python = "<3.11" }
 
 [tool.poetry.group.dev.dependencies]
 langgraph = ">=1.2.14"
@@ -92,7 +90,7 @@ requires = ["poetry-core>=1.0.0"]
 build-backend = "poetry.core.masonry.api"
 
 [tool.black]
-target-version = ['py310', 'py311', 'py312', 'py313', 'py314', 'py315']
+target-version = ['py311', 'py312', 'py313', 'py314', 'py315']
 exclude = '''
 (
   | \.egg

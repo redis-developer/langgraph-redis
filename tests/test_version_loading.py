@@ -9,10 +9,7 @@ import pytest
 def test_version_matches_pyproject():
     """Test that the version in version.py matches pyproject.toml."""
     # Read version from pyproject.toml
-    try:
-        import tomllib
-    except ImportError:
-        import tomli as tomllib  # type: ignore
+    import tomllib
 
     # Find pyproject.toml
     current = Path(__file__).resolve()

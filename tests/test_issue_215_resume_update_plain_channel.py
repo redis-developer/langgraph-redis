@@ -12,7 +12,6 @@ issue end to end and compares it with LangGraph's InMemorySaver.
 """
 
 import operator
-import sys
 import uuid
 from typing import Annotated, Any, TypedDict
 
@@ -24,12 +23,6 @@ from langgraph.types import Command, interrupt
 
 from langgraph.checkpoint.redis.ashallow import AsyncShallowRedisSaver
 from langgraph.checkpoint.redis.shallow import ShallowRedisSaver
-
-# interrupt() inside an async node needs Python 3.11+ (see test_issue_133_hitl_shallow.py)
-requires_python_311 = pytest.mark.skipif(
-    sys.version_info < (3, 11),
-    reason="interrupt() in async context requires Python 3.11+ for TaskGroup support",
-)
 
 
 class State(TypedDict):
@@ -95,7 +88,6 @@ def test_shallow_second_resume_with_update_matches_in_memory(redis_url: str) -> 
         assert graph.get_state(config).values == EXPECTED_FINAL
 
 
-@requires_python_311
 async def test_ashallow_second_resume_with_update_matches_in_memory(
     redis_url: str,
 ) -> None:
