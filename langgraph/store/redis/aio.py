@@ -24,6 +24,7 @@ from langgraph.store.base import (
 from langgraph.store.base.batch import AsyncBatchedBaseStore
 from redis.asyncio import Redis as AsyncRedis
 from redis.commands.search.query import Query
+from redis.exceptions import RedisError, ResponseError
 from redisvl.exceptions import RedisSearchError
 from redisvl.index import AsyncSearchIndex
 from redisvl.query import FilterQuery, VectorQuery
@@ -37,15 +38,20 @@ from langgraph.store.redis.base import (
     REDIS_KEY_SEPARATOR,
     REINDEX_WAIT_SECONDS,
     STORE_PREFIX,
+    STORE_SEARCH_PAGE_SIZE,
+    STORE_SORT_FIELD,
     STORE_VECTOR_PREFIX,
     BaseRedisStore,
     RedisDocument,
+    _aggregate_row_to_doc,
     _decode_ns,
     _ensure_string_or_literal,
+    _filtered_search_request,
     _group_ops,
     _index_is_current,
     _indexing_done,
     _is_missing_index,
+    _matches_filter,
     _namespace_to_text,
     _row_to_item,
     _row_to_search_item,
@@ -176,6 +182,74 @@ class AsyncRedisStore(
             await self._create_or_rebuild_index(self.store_index)
             if self.index_config:
                 await self._create_or_rebuild_index(self.vector_index)
+            await self._ensure_sort_field()
+
+    async def _ensure_sort_field(self) -> None:
+        """Give an index and documents from before STORE_SORT_FIELD the field.
+
+        Adds the field to a store index created without it, waits up to
+        index_ready_timeout seconds for the rescan that starts, then sets the
+        field on every document that lacks it. Both steps do nothing once done,
+        and this runs only from setup(), so the caller chooses when it runs and
+        with which credentials. A document an older version writes after this
+        has run lacks the field; list_namespaces still returns it, after the
+        others and in no fixed order, and the next setup() fills it in.
+        """
+        search = self._redis.ft(self.store_index.name)
+        if not self._index_has_field(await self.store_index.info(), STORE_SORT_FIELD):
+            try:
+                await search.alter_schema_add([self._sort_field_definition()])
+            except ResponseError:
+                # Another process may have added it first.
+                info = await self.store_index.info()
+                if not self._index_has_field(info, STORE_SORT_FIELD):
+                    raise
+
+        # FT.ALTER rescans existing documents in the background, and pages read
+        # during the rescan can skip documents.
+        deadline = time.monotonic() + self.index_ready_timeout
+        while self._still_indexing(await self.store_index.info()):
+            if time.monotonic() >= deadline:
+                raise self._index_not_ready_error()
+            await asyncio.sleep(0.05)
+
+        attempted: set[str] = set()
+        while True:
+            request = self._missing_sort_field_request()
+            # redis-py's annotation for the async aggregate() leaves out
+            # AggregateRequest, which it accepts as the sync one does.
+            rows = (await search.aggregate(request)).rows  # type: ignore[arg-type]
+            backfill = [
+                (key, doc_id)
+                for key, doc_id in self._sort_field_backfill(rows)
+                if key not in attempted
+            ]
+            if not backfill:
+                self._has_sort_field = True
+                return
+            attempted.update(key for key, _ in backfill)
+            path = f"$.{STORE_SORT_FIELD}"
+            if self.cluster_mode:
+                outcomes: list[Any] = []
+                for key, doc_id in backfill:
+                    try:
+                        outcomes.append(
+                            await self._redis.json().set(  # type: ignore[misc]
+                                key, path, doc_id, nx=True
+                            )
+                        )
+                    except ResponseError as e:
+                        outcomes.append(e)
+            else:
+                pipeline = self._redis.pipeline(transaction=False)
+                for key, doc_id in backfill:
+                    pipeline.json().set(key, path, doc_id, nx=True)
+                outcomes = await pipeline.execute(raise_on_error=False)
+            for (key, _), outcome in zip(backfill, outcomes):
+                # A document deleted after the search found it cannot take a
+                # field; any other failure is real.
+                if isinstance(outcome, Exception) and await self._redis.exists(key):
+                    raise outcome
 
     async def _create_or_rebuild_index(self, index: AsyncSearchIndex) -> None:
         """Create ``index``, or rebuild it if an earlier release created it
@@ -469,6 +543,30 @@ class AsyncRedisStore(
             self.abatch(ops), asyncio.get_event_loop()
         ).result()
 
+    async def _search_all(self, query: FilterQuery) -> AsyncIterator[dict[str, Any]]:
+        """Yield every document in the store index that matches ``query``.
+
+        Pages through the matches with paginate(), sorted on the unique
+        STORE_SORT_FIELD so pages do not repeat or skip documents. A document
+        written or deleted between two pages can still shift the pages after it.
+        Raises StoreSetupRequiredError on an index setup() has not given the field,
+        and StoreIndexNotReadyError while the index is still indexing.
+        """
+        if not self._has_sort_field:
+            info = await self.store_index.info()
+            if not self._index_has_field(info, STORE_SORT_FIELD):
+                raise self._setup_required_error()
+            # Pages read while the index rescans its documents can skip some.
+            if self._still_indexing(info):
+                raise self._index_not_ready_error()
+            self._has_sort_field = True
+        query.sort_by(STORE_SORT_FIELD)
+        async for page in self.store_index.paginate(
+            query, page_size=STORE_SEARCH_PAGE_SIZE
+        ):
+            for doc in page:
+                yield doc
+
     async def _batch_get_ops(
         self,
         get_ops: Sequence[tuple[int, GetOp]],
@@ -480,12 +578,16 @@ class AsyncRedisStore(
         )  # Track keys that need TTL refreshed by op index
 
         for query, _, namespace, items in self._get_batch_GET_ops_queries(get_ops):
-            res = await self.store_index.search(Query(query))
             # Parse JSON from each document
-            key_to_row = {
-                json.loads(doc.json)["key"]: (json.loads(doc.json), doc.id)
-                for doc in res.docs
-            }
+            key_to_row: dict[str, tuple[dict[str, Any], str]] = {}
+            # At most one document per distinct key in this chunk
+            num_keys = len({key for _, key in items})
+            docs = await self.store_index.query(
+                FilterQuery(filter_expression=query, num_results=num_keys)
+            )
+            for doc in docs:
+                doc_id = doc.pop("id")
+                key_to_row[doc["key"]] = (doc, doc_id)
 
             for idx, key in items:
                 if key in key_to_row:
@@ -691,6 +793,7 @@ class AsyncRedisStore(
             if "expires_at" in doc:
                 doc.pop("expires_at", None)
 
+            doc["doc_id"] = doc_id  # STORE_SORT_FIELD
             store_docs.append(doc)
             redis_key = f"{self.store_prefix}{REDIS_KEY_SEPARATOR}{doc_id}"
             store_keys.append(redis_key)
@@ -749,6 +852,38 @@ class AsyncRedisStore(
         # Now apply TTLs after all documents are loaded
         for main_key, (related_keys, ttl_minutes) in ttl_tracking.items():
             await self._apply_ttl_to_keys(main_key, related_keys, ttl_minutes)
+
+    async def _asearch_filtered(
+        self, query_str: str, filter: dict[str, Any], offset: int, limit: int
+    ) -> list[tuple[str, dict[str, Any]]]:
+        """Return the key and document of each document matching query_str that passes filter.
+
+        Value fields aren't part of the search index, so the filter runs client-side and
+        offset and limit have to apply to the filtered documents. The documents are read
+        with a cursor, which reaches all of them, also beyond the server's FT.SEARCH limit.
+        """
+        matched: list[tuple[str, dict[str, Any]]] = []
+        res = await self.store_index.aggregate(
+            _filtered_search_request(query_str, offset, limit)
+        )
+        while True:
+            for row in res.rows:
+                store_key, data = _aggregate_row_to_doc(row)
+                if _matches_filter(data.get("value", {}), filter):
+                    matched.append((store_key, data))
+            cursor_id = res.cursor.cid if res.cursor else 0
+            if not cursor_id:
+                break
+            if len(matched) >= offset + limit:
+                try:
+                    await self._redis.execute_command(
+                        "FT.CURSOR", "DEL", self.store_index.name, cursor_id
+                    )
+                except RedisError:
+                    pass  # The cursor expires on its own after its idle timeout
+                break
+            res = await self.store_index.aggregate(res.cursor)
+        return matched[offset : offset + limit]
 
     async def _batch_search_ops(
         self,
@@ -862,20 +997,10 @@ class AsyncRedisStore(
                             continue
 
                         # Apply value filters if needed
-                        if op.filter:
-                            matches = True
-                            value = store_doc.get("value", {})
-                            for key, expected in op.filter.items():
-                                actual = value.get(key)
-                                if isinstance(expected, list):
-                                    if actual not in expected:
-                                        matches = False
-                                        break
-                                elif actual != expected:
-                                    matches = False
-                                    break
-                            if not matches:
-                                continue
+                        if op.filter and not _matches_filter(
+                            store_doc.get("value", {}), op.filter
+                        ):
+                            continue
 
                         # If refresh_ttl is true, add to list for refreshing
                         if op.refresh_ttl:
@@ -924,37 +1049,25 @@ class AsyncRedisStore(
 
             else:
                 # Regular search
-                # Create a query with LIMIT and OFFSET parameters
-                query = Query(query_str).paging(offset, limit)
-
-                # Execute search with limit and offset applied by Redis
-                res = await self.store_index.search(query)
+                if op.filter:
+                    docs = await self._asearch_filtered(
+                        query_str, op.filter, offset, limit
+                    )
+                else:
+                    # Without a filter, Redis applies offset and limit directly
+                    res = await self.store_index.search(
+                        Query(query_str).paging(offset, limit)
+                    )
+                    docs = [(doc.id, json.loads(doc.json)) for doc in res.docs]
                 items = []
                 refresh_keys = []  # Track keys that need TTL refreshed
 
-                for doc in res.docs:
-                    data = json.loads(doc.json)
-                    # Apply value filters
-                    if op.filter:
-                        matches = True
-                        value = data.get("value", {})
-                        for key, expected in op.filter.items():
-                            actual = value.get(key)
-                            if isinstance(expected, list):
-                                if actual not in expected:
-                                    matches = False
-                                    break
-                            elif actual != expected:
-                                matches = False
-                                break
-                        if not matches:
-                            continue
-
+                for store_key, data in docs:
                     # If refresh_ttl is true, add the key to refresh list
                     if op.refresh_ttl:
-                        refresh_keys.append(doc.id)
+                        refresh_keys.append(store_key)
                         # Also find associated vector keys with same ID
-                        doc_id = doc.id.split(":")[-1]
+                        doc_id = store_key.split(":")[-1]
                         vector_key = (
                             f"{self.vector_prefix}{REDIS_KEY_SEPARATOR}{doc_id}"
                         )
@@ -1021,13 +1134,12 @@ class AsyncRedisStore(
 
             # Execute search with return_fields=["prefix"] to get just namespaces
             query = FilterQuery(filter_expression=base_query, return_fields=["prefix"])
-            res = await self.store_index.search(query)
 
             # Extract unique namespaces
             namespaces = set()
-            for doc in res.docs:
-                if hasattr(doc, "prefix"):
-                    ns = tuple(_token_unescaper.unescape(doc.prefix).split("."))
+            async for doc in self._search_all(query):
+                if "prefix" in doc:
+                    ns = tuple(_token_unescaper.unescape(doc["prefix"]).split("."))
                     # Apply max_depth if specified
                     if op.max_depth is not None:
                         ns = ns[: op.max_depth]

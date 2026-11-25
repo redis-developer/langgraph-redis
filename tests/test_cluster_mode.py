@@ -1,6 +1,5 @@
 """Tests for RedisStore Redis Cluster mode functionality."""
 
-import json
 from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import MagicMock
@@ -148,6 +147,10 @@ def store(request):
     store.vector_index.query = MagicMock(return_value=[])
     store.vector_index.load = MagicMock()
 
+    # Adding the sort field needs a real search index; that is tested against
+    # Redis in test_store_reads_past_ten_results.py. Here the index has it.
+    store._ensure_sort_field = MagicMock()  # type: ignore[method-assign]
+    store._has_sort_field = True
     store.setup()
     return store
 
@@ -211,10 +214,8 @@ def test_batch_get_ops_ttl_refresh(store):
         "created_at": int(datetime.now(timezone.utc).timestamp() * 1_000_000),
         "updated_at": int(datetime.now(timezone.utc).timestamp() * 1_000_000),
     }
-    mock_redis_doc = MagicMock()
-    mock_redis_doc.json = json.dumps(mock_doc_data)
-    mock_redis_doc.id = store_doc_id
-    store.store_index.search = MagicMock(return_value=MagicMock(docs=[mock_redis_doc]))
+    # The get's query result: the document's JSON with its id
+    store.store_index.query = MagicMock(return_value=[dict(mock_doc_data)])
 
     # Mock client.ttl to control TTL refresh logic
     client.ttl_calls.clear()
@@ -345,13 +346,18 @@ def test_batch_search_ops_vector_fetch_behavior(store):
 
 def test_batch_list_namespaces_ops_behavior(store):
     """Test listing namespaces in _batch_list_namespaces_ops."""
-    mock_doc1 = MagicMock(prefix="test.documents.public")
-    mock_doc2 = MagicMock(prefix="test.documents.private")
-    mock_doc3 = MagicMock(prefix="test.images.public")
-    mock_doc4 = MagicMock(prefix="prod.documents.public")
-
-    mock_search_result = MagicMock(docs=[mock_doc1, mock_doc2, mock_doc3, mock_doc4])
-    store.store_index.search = MagicMock(return_value=mock_search_result)
+    prefixes = [
+        "test.documents.public",
+        "test.documents.private",
+        "test.images.public",
+        "prod.documents.public",
+    ]
+    # paginate() output, split over two pages
+    pages = [
+        [{"id": f"store:{i}", "prefix": p} for i, p in enumerate(prefixes[:3])],
+        [{"id": "store:3", "prefix": prefixes[3]}],
+    ]
+    store.store_index.paginate = MagicMock(return_value=pages)
 
     list_ops = [
         (

@@ -215,6 +215,9 @@ async def test_async_cluster_mode_behavior_differs(
     mock_index_cluster.info = AsyncMock(return_value={"indexing": 0})
     async_cluster_store.store_index = mock_index_cluster
     async_cluster_store.vector_index = mock_index_cluster
+    # Adding the sort field needs a real search index (see
+    # test_store_reads_past_ten_results.py).
+    async_cluster_store._ensure_sort_field = AsyncMock()  # type: ignore[method-assign]
     await async_cluster_store.setup()  # Call setup to initialize indices
 
     mock_async_redis_cluster_client.expire_calls = []
@@ -241,6 +244,9 @@ async def test_async_cluster_mode_behavior_differs(
     mock_index_non_cluster.info = AsyncMock(return_value={"indexing": 0})
     async_non_cluster_store.store_index = mock_index_non_cluster
     async_non_cluster_store.vector_index = mock_index_non_cluster
+    # Adding the sort field needs a real search index (see
+    # test_store_reads_past_ten_results.py).
+    async_non_cluster_store._ensure_sort_field = AsyncMock()  # type: ignore[method-assign]
     await async_non_cluster_store.setup()
 
     mock_async_redis_client.expire_calls = []
