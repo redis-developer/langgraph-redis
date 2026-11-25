@@ -1686,6 +1686,13 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
         A cycle in required ancestry raises ``ValueError`` before any keys for
         that thread are deleted.
 
+        Prune only inactive threads. Prune deletes only what its searches
+        return and needs no configuration access. Searches run without a query
+        timeout (``TIMEOUT 0``); under ``ON_TIMEOUT=FAIL`` a search that still
+        times out raises before any keys for that thread are deleted. Redis
+        8.10+ caps even ``TIMEOUT 0`` when ``search-workers`` is 0, and a search
+        cut short by that cap returns a partial result that prune cannot detect.
+
         Each namespace (root ``""`` and any subgraph namespaces) is treated as
         an independent checkpoint chain.  Channel values are stored inline
         within each checkpoint document, so they are automatically removed
@@ -1808,13 +1815,8 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
                 )
 
                 # Evict all write documents for this checkpoint
-                writes_query = FilterQuery(
-                    filter_expression=(
-                        (Tag("thread_id") == storage_safe_thread_id)
-                        & (Tag("checkpoint_id") == checkpoint_id)
-                    ),
-                    return_fields=["checkpoint_ns", "checkpoint_id", "task_id", "idx"],
-                    num_results=max_results,
+                writes_query = self._make_prune_writes_query(
+                    storage_safe_thread_id, checkpoint_ns, checkpoint_id, max_results
                 )
                 writes_results = self.checkpoint_writes_index.search(writes_query)
                 self._validate_prune_search_result(

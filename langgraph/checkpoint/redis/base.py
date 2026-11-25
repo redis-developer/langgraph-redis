@@ -34,7 +34,7 @@ from langgraph.checkpoint.serde.types import ChannelProtocol
 from redis.commands.search.result import Result
 from redis.exceptions import ResponseError
 from redisvl.query import FilterQuery
-from redisvl.query.filter import Tag
+from redisvl.query.filter import FilterExpression, Tag
 
 from langgraph.checkpoint.redis.util import (
     from_storage_safe_id,
@@ -990,10 +990,10 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         storage_safe_thread_id: str, max_results: int
     ) -> FilterQuery:
         """Search a thread's checkpoints across namespaces, with their parents."""
-        return FilterQuery(
-            filter_expression=Tag("thread_id") == storage_safe_thread_id,
-            return_fields=["checkpoint_ns", "checkpoint_id", "parent_checkpoint_id"],
-            num_results=max_results,
+        return BaseRedisSaver._make_prune_query(
+            Tag("thread_id") == storage_safe_thread_id,
+            ["checkpoint_ns", "checkpoint_id", "parent_checkpoint_id"],
+            max_results,
         )
 
     @staticmethod
@@ -1226,6 +1226,46 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
                 f"search returned {returned} of {result.total} records "
                 f"(max_results={max_results}). Increase max_results and retry."
             )
+
+    @staticmethod
+    def _make_prune_query(
+        filter_expression: FilterExpression,
+        return_fields: List[str],
+        max_results: int,
+    ) -> FilterQuery:
+        """Build a prune search that runs without a query timeout.
+
+        Under Search's default ON_TIMEOUT=RETURN policy, a timed-out search
+        returns a partial set whose total equals its returned count, so
+        ``_validate_prune_search_result`` cannot detect it. ``TIMEOUT 0``
+        disables the query timeout for this search only, without reading or
+        changing deployment-wide configuration (FT.CONFIG is not available on
+        Redis Cloud or Redis Software). Redis 8.10+ still caps it when
+        ``search-workers`` is 0; see the pruning docs for that limitation.
+        """
+        query = FilterQuery(
+            filter_expression=filter_expression,
+            return_fields=return_fields,
+            num_results=max_results,
+        )
+        query.timeout(0)
+        return query
+
+    @staticmethod
+    def _make_prune_writes_query(
+        storage_safe_thread_id: str,
+        checkpoint_ns: str,
+        checkpoint_id: str,
+        max_results: int,
+    ) -> FilterQuery:
+        """Find the writes of one checkpoint, scoped to its full identity."""
+        return BaseRedisSaver._make_prune_query(
+            (Tag("thread_id") == storage_safe_thread_id)
+            & (Tag("checkpoint_ns") == checkpoint_ns)
+            & (Tag("checkpoint_id") == checkpoint_id),
+            ["checkpoint_ns", "checkpoint_id", "task_id", "idx"],
+            max_results,
+        )
 
     def _make_redis_checkpoint_key(
         self, thread_id: str, checkpoint_ns: str, checkpoint_id: str

@@ -62,6 +62,12 @@ ANCESTRY_CYCLE_CASES = (
     pytest.param(2, 6, id="support-ancestor-cycle"),
 )
 
+FORK_RETENTION_CASES = (
+    pytest.param(False, True, id="shared-snapshot"),
+    pytest.param(True, True, id="different-snapshots"),
+    pytest.param(True, False, id="truncated-fork-history"),
+)
+
 
 class _Checkpointer:
     """Drive RedisSaver and AsyncRedisSaver through one async test body."""
@@ -632,10 +638,10 @@ async def test_prune_walks_long_retained_chains_in_linear_time(
 
 
 @pytest.mark.parametrize(
-    "separate_snapshots", [False, True], ids=["shared-snapshot", "different-snapshots"]
+    ("separate_snapshots", "complete_search"), FORK_RETENTION_CASES
 )
 async def test_prune_preserves_forked_delta_history(
-    checkpointer: _Checkpointer, separate_snapshots: bool
+    checkpointer: _Checkpointer, separate_snapshots: bool, complete_search: bool
 ) -> None:
     thread_id = f"delta-fork-{uuid4()}"
     config = _config(thread_id)
@@ -658,11 +664,24 @@ async def test_prune_preserves_forked_delta_history(
     await checkpointer.invoke(graph, 30, fork)
     branch_b = (await checkpointer.state(graph, config)).config
     before = await checkpointer.checkpoints(config)
+    if not complete_search:
+        # Three branch-B checkpoints are omitted; the separate-snapshot case
+        # reproduces max_results=12 deleting the seed for [1, 2, 30].
+        with pytest.raises(ValueError, match="max_results"):
+            await checkpointer.prune([thread_id], max_results=len(before) - 3)
+        after = await checkpointer.checkpoints(config)
+        assert [cp.config for cp in after] == [cp.config for cp in before]
+        state = await checkpointer.state(graph, config)
+        _assert_branch_state(state.values, [1, 2, 30])
+        await checkpointer.prune([thread_id], max_results=len(before))
+        state = await checkpointer.state(graph, config)
+        _assert_branch_state(state.values, [1, 2, 30])
+        return
     expected = _expected_fork_retention(
         before, fork, (branch_a, branch_b), separate_snapshots=separate_snapshots
     )
 
-    await checkpointer.prune([thread_id], keep_last=4)
+    await checkpointer.prune([thread_id], keep_last=4, max_results=len(before))
 
     assert [cp.config for cp in await checkpointer.checkpoints(config)] == expected
     a_values = [1, 2, 3, 4] if separate_snapshots else [1, 2, 3]
