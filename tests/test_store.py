@@ -373,6 +373,87 @@ def test_basic_ops(store: RedisStore) -> None:
     assert deleted_item is None
 
 
+def test_search_filter_with_comparison_operators(store: RedisStore) -> None:
+    """Operator filters match like InMemoryStore instead of silently returning nothing."""
+    namespace = ("ops", str(uuid4()))
+    for i in range(6):
+        store.put(
+            namespace, f"item{i}", {"score": i, "status": "done" if i % 2 else "open"}
+        )
+
+    def keys(filter: dict) -> list[str]:
+        return sorted(item.key for item in store.search(namespace, filter=filter))
+
+    assert keys({"score": {"$gt": 3}}) == ["item4", "item5"]
+    assert keys({"score": {"$gte": 4}}) == ["item4", "item5"]
+    assert keys({"score": {"$lt": 2}}) == ["item0", "item1"]
+    assert keys({"score": {"$gt": 0, "$lte": 1}}) == ["item1"]
+    assert keys({"status": {"$eq": "done"}}) == ["item1", "item3", "item5"]
+    assert keys({"status": {"$ne": "done"}}) == ["item0", "item2", "item4"]
+
+
+def test_search_filter_applies_limit_and_offset_to_matching_items(
+    store: RedisStore,
+) -> None:
+    """limit and offset count the items that pass the filter, not the items Redis returned."""
+    namespace = ("paged", str(uuid4()))
+    for i in range(30):
+        store.put(namespace, f"other{i:02d}", {"keep": False})
+    for i in range(3):
+        store.put(namespace, f"match{i}", {"keep": True, "amount": Decimal("1.10")})
+
+    first = store.search(namespace, filter={"keep": True}, limit=2)
+    rest = store.search(namespace, filter={"keep": True}, limit=2, offset=2)
+
+    assert len(first) == 2
+    assert len(rest) == 1
+    assert {item.key for item in first + rest} == {"match0", "match1", "match2"}
+
+
+def test_search_filter_matches_nested_lists_exactly(store: RedisStore) -> None:
+    """A list inside a nested filter matches the stored list as a whole, and a top-level list is any-of."""
+    namespace = ("nested", str(uuid4()))
+    store.put(namespace, "both", {"tag": "a", "meta": {"tags": ["a", "b"]}})
+    store.put(namespace, "one", {"tag": "c", "meta": {"tags": ["a"]}})
+
+    def keys(filter: dict) -> list[str]:
+        return sorted(item.key for item in store.search(namespace, filter=filter))
+
+    assert keys({"meta": {"tags": ["a", "b"]}}) == ["both"]
+    assert keys({"meta": {"tags": ["a"]}}) == ["one"]
+    assert keys({"tag": ["a", "c"]}) == ["both", "one"]
+
+
+def test_search_filter_respects_the_server_result_limit(
+    store: RedisStore, max_search_results
+) -> None:
+    """A filtered search doesn't ask Redis for more results than MAXSEARCHRESULTS allows."""
+    namespace = ("capped", str(uuid4()))
+    store.put(namespace, "only", {"keep": True})
+    max_search_results(100)
+
+    assert [
+        item.key for item in store.search(namespace, filter={"keep": True}, limit=1)
+    ] == ["only"]
+
+
+def test_search_filter_reaches_items_beyond_the_server_result_limit(
+    store: RedisStore, max_search_results
+) -> None:
+    """Matching items after the first MAXSEARCHRESULTS documents of a namespace are still found."""
+    namespace = ("beyond", str(uuid4()))
+    store.batch(
+        [PutOp(namespace, f"item{i:03d}", {"keep": i >= 100}) for i in range(105)]
+    )
+    max_search_results(100)
+
+    assert len(store.search(namespace, filter={"keep": True}, limit=1)) == 1
+    assert {
+        item.key for item in store.search(namespace, filter={"keep": True}, limit=10)
+    } == {f"item{i:03d}" for i in range(100, 105)}
+    assert len(store.search(namespace, filter={"keep": True}, limit=10, offset=3)) == 2
+
+
 def test_search(store: RedisStore) -> None:
     """Test search functionality."""
     # Create test data
@@ -458,6 +539,7 @@ def test_search_filters_deserialized_values(
         # Preserve the existing behavior of treating missing fields as None.
         ({"tenant": None}, {"null", "missing"}),
         ({"amount": Decimal("1.10")}, {"wrapped"}),
+        ({"amount": {"$gte": Decimal("2.20")}}, {"null", "missing"}),
         ({"tenant": "acme", "amount": Decimal("2.20")}, set()),
         ({"tenant": []}, set()),
         ({}, set(expected_values)),
