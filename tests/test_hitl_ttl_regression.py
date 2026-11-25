@@ -28,7 +28,6 @@ These tests verify:
 
 import logging
 import operator
-import sys
 from contextlib import asynccontextmanager, contextmanager
 from typing import Annotated, Any, AsyncGenerator, Dict, Generator, List, TypedDict
 from uuid import uuid4
@@ -40,11 +39,6 @@ from redis.exceptions import ResponseError
 
 from langgraph.checkpoint.redis import RedisSaver
 from langgraph.checkpoint.redis.aio import AsyncRedisSaver
-
-requires_python_311 = pytest.mark.skipif(
-    sys.version_info < (3, 11),
-    reason="interrupt() in async context requires Python 3.11+ for TaskGroup support",
-)
 
 # Customer TTL config (matches BOA setup: 6 days in minutes)
 TTL_CONFIG: Dict[str, Any] = {"default_ttl": 1440 * 6, "refresh_on_read": True}
@@ -135,7 +129,6 @@ def test_sync_hitl_with_ttl(redis_url: str) -> None:
         assert final_state.get("user_confirmed") is True
 
 
-@requires_python_311
 @pytest.mark.asyncio
 async def test_async_hitl_with_ttl(redis_url: str) -> None:
     """AsyncRedisSaver + TTL + HitL interrupt/resume on standard Redis."""
@@ -183,7 +176,6 @@ async def test_async_hitl_with_ttl(redis_url: str) -> None:
         )
 
 
-@requires_python_311
 @pytest.mark.asyncio
 async def test_async_hitl_ttl_multi_step(redis_url: str) -> None:
     """Multi-step graph with TTL + HitL stresses the pipeline more heavily."""
@@ -235,7 +227,6 @@ async def test_async_hitl_ttl_multi_step(redis_url: str) -> None:
         assert len(final_state["messages"]) > 0
 
 
-@requires_python_311
 @pytest.mark.asyncio
 async def test_async_hitl_ttl_keys_have_expiry(redis_url: str) -> None:
     """Verify TTL is actually applied to checkpoint and write keys during HitL."""
@@ -290,7 +281,6 @@ async def test_async_hitl_ttl_keys_have_expiry(redis_url: str) -> None:
         await redis_client.aclose()
 
 
-@requires_python_311
 @pytest.mark.asyncio
 async def test_async_hitl_ttl_single_resume(redis_url: str) -> None:
     """TTL must not cause double-resume bug."""
