@@ -157,14 +157,12 @@ Prune only inactive threads: checkpoint creation, updates, and other pruning cal
 for those threads must be paused until pruning finishes. The search inventory and
 deletions are not atomic with concurrent writers.
 
-Pruning's searches disable the Search query timeout for themselves (`TIMEOUT 0`),
-so they always return their complete result set. Under Search's default
-`search-on-timeout` policy (`RETURN`), a search that times out returns a partial
-set whose reported total matches its returned count, which pruning could not
-tell apart from a complete result. The per-query override avoids this without
-reading or changing any server configuration, so pruning works on Redis Cloud and
-Redis Software and does not need `FT.CONFIG` permission. A search over a very
-large thread runs until it finishes instead of stopping at the server's timeout.
+Pruning reads each of its searches through an `FT.AGGREGATE` cursor until the
+cursor is exhausted, so it never acts on a partial result. It does not read or
+change server configuration, so it works on Redis Cloud and Redis Software
+without `FT.CONFIG` permission. If Search's `search-on-timeout` policy is `FAIL`,
+a read that times out raises before anything is deleted from the affected
+thread; retry the call.
 
 `max_results` defaults to 10,000 and limits each checkpoint search across a
 thread's namespaces and each write-cleanup search. If it truncates a checkpoint

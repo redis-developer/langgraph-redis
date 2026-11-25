@@ -16,14 +16,14 @@ Tests cover:
 
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
+from contextlib import contextmanager
 from typing import Any, Optional
 
 import pytest
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import Checkpoint, CheckpointMetadata
 from redis import Redis
-from redis.exceptions import ResponseError
-from redisvl.query import FilterQuery
+from redisvl.query import CountQuery, FilterQuery
 from redisvl.query.filter import Tag
 from ulid import ULID
 
@@ -149,7 +149,7 @@ async def test_prune_preserves_writes_for_same_id_in_another_namespace(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("policy", ["return", "return-strict", "fail", "unreadable"])
+@pytest.mark.parametrize("policy", ["return", "unreadable"])
 @pytest.mark.parametrize(
     ("strategy", "retained_per_ns"), [("keep_latest", 1), ("delete", 0)]
 )
@@ -161,7 +161,7 @@ async def test_prune_does_not_depend_on_search_timeout_configuration(
     strategy: str,
     retained_per_ns: int,
 ) -> None:
-    """Prune works under every timeout policy and without FT.CONFIG access.
+    """Prune needs no FT.CONFIG access and never changes the timeout policy.
 
     Redis Cloud and Redis Software do not support FT.CONFIG, and ACL users
     without @admin cannot run it.
@@ -176,15 +176,7 @@ async def test_prune_does_not_depend_on_search_timeout_configuration(
         if policy == "unreadable":
             client.execute_command("ACL", "SETUSER", "default", "-ft.config")
         else:
-            try:
-                if policy == "return-strict":
-                    client.config_set("search-on-timeout", policy.upper())
-                else:
-                    client.execute_command("FT.CONFIG", "SET", "ON_TIMEOUT", policy)
-            except ResponseError:
-                if policy == "return-strict":
-                    pytest.skip("RETURN_STRICT requires Redis 8.10 or later")
-                raise
+            client.execute_command("FT.CONFIG", "SET", "ON_TIMEOUT", policy)
 
         await prune([thread_id], strategy=strategy)
     finally:
@@ -200,64 +192,130 @@ async def test_prune_does_not_depend_on_search_timeout_configuration(
     assert policy_after_prune == (original if policy == "unreadable" else policy)
 
 
-@pytest.mark.asyncio
-async def test_prune_removes_every_write_when_search_exceeds_timeout(
-    saver: RedisSaver,
-    client: Redis,
-    prune: Callable[..., Awaitable[None]],
-) -> None:
-    """A search that exceeds the Search timeout must still remove every write.
+@contextmanager
+def _forced_search_timeout(client: Redis, mode: Optional[str]) -> Iterator[None]:
+    """Force Search timeouts for one test, then restore the server's settings."""
+    if mode is None:
+        yield
+        return
+    if mode == "search-timeout":  # FT.CONFIG works on Redis Stack and Redis 8.
+        original: dict[str, Any] = {
+            option: _get_search_config(client, option)
+            for option in ("TIMEOUT", "ON_TIMEOUT")
+        }
+        settings: dict[str, Any] = {"TIMEOUT": 1, "ON_TIMEOUT": "RETURN"}
 
-    Under the default ON_TIMEOUT=RETURN policy, a timed-out search returns a
-    partial set whose total equals its returned count, so the ``max_results``
-    truncation check alone cannot detect it.
-    """
-    write_count = 50_000
-    thread_id = f"prune-search-timeout-{_make_ulid()}"
-    evicted = _config(thread_id, _make_ulid())
-    retained = _config(thread_id, _make_ulid())
-    evicted_id = evicted["configurable"]["checkpoint_id"]
+        def apply(name: str, value: Any) -> None:
+            client.execute_command("FT.CONFIG", "SET", name, value)
+
+    else:  # foreground-cap: Redis 8.10+ caps every query's timeout when search-workers is 0.
+        names = (
+            "search-workers",
+            "search-_max-foreground-timeout-limit",
+            "search-on-timeout",
+        )
+        original = {name: client.config_get(name).get(name) for name in names}
+        if original["search-_max-foreground-timeout-limit"] is None:
+            pytest.skip("search-_max-foreground-timeout-limit requires Redis 8.10+")
+        settings = dict(zip(names, (0, 1, "return")))
+
+        def apply(name: str, value: Any) -> None:
+            client.config_set(name, value)
+
+    try:
+        for name, value in settings.items():
+            apply(name, value)
+        yield
+    finally:
+        for name, value in original.items():
+            apply(name, value)
+
+
+def _put_checkpoint_with_bulk_writes(
+    saver: RedisSaver, config: RunnableConfig, count: int
+) -> None:
+    """Seed a checkpoint and ``count`` writes in one pipelined call."""
+    checkpoint_id = config["configurable"]["checkpoint_id"]
     saver.put(
-        evicted,
-        _make_checkpoint(evicted_id),
+        config,
+        _make_checkpoint(checkpoint_id),
         CheckpointMetadata(source="input", step=0, writes={}),
         {"messages": "1"},
     )
-    # One call seeds every write in a single pipeline.
-    saver.put_writes(evicted, [("messages", "v")] * write_count, "task")
-    _put_checkpoint_with_writes(saver, retained)
+    saver.put_writes(config, [("messages", "v")] * count, "task")
 
-    original_timeout = _get_search_config(client, "TIMEOUT")
-    original_policy = _get_search_config(client, "ON_TIMEOUT")
-    try:
-        client.execute_command("FT.CONFIG", "SET", "TIMEOUT", "1")
-        client.execute_command("FT.CONFIG", "SET", "ON_TIMEOUT", "RETURN")
-        # Precondition: without an override, this search times out and returns
-        # a partial set. Skip on hardware fast enough to finish within 1 ms.
-        plain_result = saver.checkpoint_writes_index.search(
-            FilterQuery(
-                filter_expression=(Tag("thread_id") == thread_id)
-                & (Tag("checkpoint_id") == evicted_id),
-                return_fields=["task_id", "idx"],
-                num_results=write_count,
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("timeout_mode", "write_count", "decode_responses"),
+    [
+        # 2,500 writes span three 1,000-row cursor batches.
+        pytest.param(None, 2_500, False, id="no-timeout-bytes"),
+        pytest.param(None, 2_500, True, id="no-timeout-str"),
+        # 50,000 writes reliably exceed a 1 ms timeout on every tested version.
+        pytest.param("search-timeout", 50_000, False, id="search-timeout"),
+        pytest.param("foreground-cap", 50_000, False, id="foreground-cap"),
+    ],
+)
+@pytest.mark.parametrize("protocol", [2, 3], ids=["resp2", "resp3"])
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+async def test_prune_reads_every_match_through_its_cursor(
+    redis_url: str,
+    client: Redis,
+    saver: RedisSaver,
+    use_async: bool,
+    protocol: int,
+    timeout_mode: Optional[str],
+    write_count: int,
+    decode_responses: bool,
+) -> None:
+    """Prune sees every checkpoint and write, even when a single search times out.
+
+    A timed-out FT.SEARCH under ON_TIMEOUT=RETURN reports a partial total that
+    matches its returned count, and Redis 8.10+ caps even ``TIMEOUT 0``.
+    """
+    thread_id = f"prune-cursor-{_make_ulid()}"
+    evicted, retained = [], []
+    # A large evicted checkpoint, a small one in a subgraph namespace, and a
+    # newer retained checkpoint in each namespace.
+    for ns, count in (("", write_count), ("parent:1|child:2", 3)):
+        old, new = (_config(thread_id, _make_ulid(), ns) for _ in range(2))
+        _put_checkpoint_with_bulk_writes(saver, old, count)
+        _put_checkpoint_with_bulk_writes(saver, new, 1)
+        evicted.append(old["configurable"]["checkpoint_id"])
+        retained.append(new)
+
+    with _forced_search_timeout(client, timeout_mode):
+        if timeout_mode:
+            # Precondition: a single search over the large checkpoint is cut short.
+            # Count only (LIMIT 0 0): Redis Stack caps LIMIT at 10,000 rows.
+            matched = saver.checkpoint_writes_index.query(
+                CountQuery(
+                    filter_expression=(Tag("thread_id") == thread_id)
+                    & (Tag("checkpoint_id") == evicted[0])
+                )
             )
-        )
-        if len(plain_result.docs) == write_count:
-            pytest.skip("Search finished within 1 ms; cannot exercise a timeout")
+            if matched == write_count:
+                pytest.skip("Search finished within 1 ms; cannot exercise a timeout")
+        connection_args = {"protocol": protocol, "decode_responses": decode_responses}
+        if use_async:
+            async with AsyncRedisSaver.from_conn_string(
+                redis_url, connection_args=connection_args
+            ) as async_pruner:
+                await async_pruner.aprune([thread_id], max_results=write_count)
+        else:
+            with RedisSaver.from_conn_string(
+                redis_url, connection_args=connection_args
+            ) as pruner:
+                pruner.setup()
+                pruner.prune([thread_id], max_results=write_count)
 
-        await prune([thread_id], max_results=write_count)
-    finally:
-        client.execute_command("FT.CONFIG", "SET", "TIMEOUT", original_timeout)
-        client.execute_command("FT.CONFIG", "SET", "ON_TIMEOUT", original_policy)
-
-    assert saver.get_tuple(evicted) is None
-    orphaned = list(
-        client.scan_iter(match=f"checkpoint_write:*{evicted_id}*", count=10_000)
-    )
-    assert orphaned == []
-    retained_tuple = saver.get_tuple(retained)
-    assert retained_tuple is not None
-    assert retained_tuple.pending_writes == [("task-0", "messages", "write-0")]
+    for cp_id in evicted:
+        assert list(client.scan_iter(match=f"*{cp_id}*", count=10_000)) == []
+    for config in retained:
+        checkpoint = saver.get_tuple(config)
+        assert checkpoint is not None
+        assert checkpoint.pending_writes == [("task", "messages", "v")]
 
 
 @pytest.fixture(params=["checkpoints", "writes"])

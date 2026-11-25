@@ -6,6 +6,7 @@ import random
 import time
 from abc import abstractmethod
 from operator import index
+from types import SimpleNamespace
 from typing import (
     AbstractSet,
     Any,
@@ -31,7 +32,7 @@ from langgraph.checkpoint.base import (
 )
 from langgraph.checkpoint.serde.base import SerializerProtocol
 from langgraph.checkpoint.serde.types import ChannelProtocol
-from redis.commands.search.result import Result
+from redis.commands.search.aggregation import AggregateRequest, AggregateResult
 from redis.exceptions import ResponseError
 from redisvl.query import FilterQuery
 from redisvl.query.filter import FilterExpression, Tag
@@ -986,14 +987,11 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         return retained, eviction_candidates, fully_evicted_ns
 
     @staticmethod
-    def _prune_checkpoint_query(
-        storage_safe_thread_id: str, max_results: int
-    ) -> FilterQuery:
+    def _prune_checkpoint_query(storage_safe_thread_id: str) -> AggregateRequest:
         """Search a thread's checkpoints across namespaces, with their parents."""
-        return BaseRedisSaver._make_prune_query(
+        return BaseRedisSaver._prune_aggregate(
             Tag("thread_id") == storage_safe_thread_id,
             ["checkpoint_ns", "checkpoint_id", "parent_checkpoint_id"],
-            max_results,
         )
 
     @staticmethod
@@ -1216,55 +1214,70 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
 
     @staticmethod
     def _validate_prune_search_result(
-        result: Result, *, thread_id: str, max_results: int
+        returned: int, total: int, *, thread_id: str, max_results: int
     ) -> None:
         """Reject partial search results before deleting any keys for this thread."""
-        returned = len(result.docs)
-        if result.total > returned:
+        if total > returned:
             raise ValueError(
                 f"Cannot safely prune thread {thread_id!r}: "
-                f"search returned {returned} of {result.total} records "
+                f"search returned {returned} of {total} records "
                 f"(max_results={max_results}). Increase max_results and retry."
             )
 
     @staticmethod
-    def _make_prune_query(
-        filter_expression: FilterExpression,
-        return_fields: List[str],
-        max_results: int,
-    ) -> FilterQuery:
-        """Build a prune search that cannot return partial results on timeout.
+    def _prune_aggregate(
+        filter_expression: FilterExpression, fields: Sequence[str]
+    ) -> AggregateRequest:
+        """Read every match through an FT.AGGREGATE cursor.
 
-        Under Search's default ON_TIMEOUT=RETURN policy, a timed-out search
-        returns a partial set whose total equals its returned count, so
-        ``_validate_prune_search_result`` cannot detect it. ``TIMEOUT 0``
-        disables the query timeout for this search only, without reading or
-        changing deployment-wide configuration (FT.CONFIG is not available on
-        Redis Cloud or Redis Software).
+        A single FT.SEARCH that times out under ON_TIMEOUT=RETURN returns a
+        partial set whose total equals its returned count. A cursor resumes where
+        a timed-out batch stopped, so reading it until its ID is 0 yields every
+        match; under ON_TIMEOUT=FAIL a timed-out batch raises instead.
         """
-        query = FilterQuery(
-            filter_expression=filter_expression,
-            return_fields=return_fields,
-            num_results=max_results,
-        )
-        query.timeout(0)
-        return query
+        request = AggregateRequest(str(filter_expression))
+        request.load(*(f"@{field}" for field in fields))
+        request.cursor()
+        request.dialect(2)
+        return request
 
     @staticmethod
-    def _make_prune_writes_query(
-        storage_safe_thread_id: str,
-        checkpoint_ns: str,
-        checkpoint_id: str,
-        max_results: int,
-    ) -> FilterQuery:
+    def _prune_writes_query(
+        storage_safe_thread_id: str, checkpoint_ns: str, checkpoint_id: str
+    ) -> AggregateRequest:
         """Find the writes of one checkpoint, scoped to its full identity."""
-        return BaseRedisSaver._make_prune_query(
+        return BaseRedisSaver._prune_aggregate(
             (Tag("thread_id") == storage_safe_thread_id)
             & (Tag("checkpoint_ns") == checkpoint_ns)
             & (Tag("checkpoint_id") == checkpoint_id),
             ["checkpoint_ns", "checkpoint_id", "task_id", "idx"],
-            max_results,
         )
+
+    @staticmethod
+    def _parse_prune_page(reply: Any) -> Tuple[List[SimpleNamespace], int]:
+        """Normalize one cursor page (RESP2 or RESP3) into records and the next cursor ID."""
+        if isinstance(reply, AggregateResult):
+            # RESP2: rows are flat [key, value, ...] lists.
+            rows = [dict(zip(row[::2], row[1::2])) for row in reply.rows]
+            cursor_id = reply.cursor.cid if reply.cursor else 0
+        else:
+            # RESP3: [{"results": [{"extra_attributes": {...}}, ...], ...}, cursor_id]
+            body, cursor_id = reply
+            results = body.get(b"results", body.get("results", []))
+            rows = [
+                row.get(b"extra_attributes", row.get("extra_attributes", {}))
+                for row in results
+            ]
+        records = [
+            SimpleNamespace(
+                **{
+                    safely_decode(key): safely_decode(value)
+                    for key, value in row.items()
+                }
+            )
+            for row in rows
+        ]
+        return records, int(cursor_id)
 
     def _make_redis_checkpoint_key(
         self, thread_id: str, checkpoint_ns: str, checkpoint_id: str
