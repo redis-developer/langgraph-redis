@@ -26,11 +26,11 @@ The project consists of three main components:
 
 ### Python Dependencies
 
-The project requires the following main Python dependencies:
+The project supports Python 3.10 through 3.15 and requires the following main Python dependencies:
 
-- `redis>=5.2.1`
-- `redisvl>=0.5.1`
-- `langgraph-checkpoint>=2.0.24`
+- `redis>=6.3.0`
+- `redisvl>=0.31.0`
+- `langgraph-checkpoint>=4.1.1`
 
 ### Redis Modules Requirements
 
