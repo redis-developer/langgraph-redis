@@ -157,19 +157,28 @@ Prune only inactive threads: checkpoint creation, updates, and other pruning cal
 for those threads must be paused until pruning finishes. The search inventory and
 deletions are not atomic with concurrent writers.
 
-Pruning reads each of its searches through an `FT.AGGREGATE` cursor until the
-cursor is exhausted, so it never acts on a partial result. It does not read or
-change server configuration, so it works on Redis Cloud and Redis Software
-without `FT.CONFIG` permission. If Search's `search-on-timeout` policy is `FAIL`,
-a read that times out raises before anything is deleted from the affected
-thread; retry the call.
+Pruning deletes only what its searches return. It is not atomic, and it does
+not read or change server configuration, so it works on Redis Cloud and Redis
+Software without `FT.CONFIG` permission. Each search runs without a query
+timeout (`TIMEOUT 0`), because a search that times out under Search's default
+`search-on-timeout` policy (`RETURN`) reports a partial set whose total matches
+its returned count. If the policy is `FAIL`, a search that still times out
+raises before anything is deleted from the affected thread; retry the call.
+
+Known limitation: Redis 8.10 and later caps every query's timeout, including
+`TIMEOUT 0`, at `search-_max-foreground-timeout-limit` (60 seconds by default)
+when `search-workers` is 0. A prune search cut short by that cap returns a
+partial result that pruning cannot detect. Keep the cap above the time a
+thread's largest search needs, or enable `search-workers`.
 
 `max_results` defaults to 10,000 and limits each checkpoint search across a
 thread's namespaces and each write-cleanup search. If it truncates a checkpoint
 or write search, `prune` raises `ValueError` before deleting anything from the
-affected thread. Increase `max_results` and retry. This parameter is not a
-deletion batch size or a cursor for incremental pruning, and it does not limit
-dependency-walk reads.
+affected thread. Increase `max_results` and retry. It cannot exceed the server's
+`search-max-search-results` (10,000 on Redis Stack and on Redis Cloud Free and
+Fixed plans); asking for more raises before anything is deleted. This parameter
+is not a deletion batch size or a cursor for incremental pruning, and it does
+not limit dependency-walk reads.
 
 Completeness checks apply per thread: if a later thread in the same call
 fails, previously processed threads are not rolled back.

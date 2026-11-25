@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple, Union, cast
 
 import orjson
@@ -19,8 +19,6 @@ from langgraph.checkpoint.base import (
 from langgraph.constants import TASKS
 from redis import Redis
 from redis.cluster import RedisCluster
-from redis.commands.search.aggregation import AggregateRequest
-from redis.exceptions import ResponseError
 from redisvl.index import SearchIndex
 from redisvl.query import FilterQuery
 from redisvl.query.filter import Num, Tag
@@ -1668,56 +1666,6 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
                 configs, pipeline.execute(raise_on_error=False)
             )
 
-    def _iter_cursor_pages(
-        self, index: SearchIndex, request: AggregateRequest
-    ) -> Iterator[List[Any]]:
-        """Yield every page of an FT.AGGREGATE cursor, read on a single node.
-
-        If the caller stops early or an error occurs, the open cursor is released.
-        """
-        node = self._cursor_node_options()
-        reply = self._redis.execute_command(
-            "FT.AGGREGATE", index.name, *request.build_args(), **node
-        )
-        cursor_id = 0
-        try:
-            while True:
-                page, cursor_id = self._parse_cursor_page(reply)
-                yield page
-                if not cursor_id:
-                    return
-                reply = self._redis.execute_command(
-                    "FT.CURSOR", "READ", index.name, cursor_id, **node
-                )
-        finally:
-            if cursor_id:
-                with suppress(ResponseError):
-                    self._redis.execute_command(
-                        "FT.CURSOR", "DEL", index.name, cursor_id, **node
-                    )
-
-    def _read_prune_search(
-        self,
-        index: SearchIndex,
-        request: AggregateRequest,
-        *,
-        thread_id: str,
-        max_results: int,
-    ) -> List[Any]:
-        """Read every match of a prune search, keeping at most ``max_results``.
-
-        Counts every match and raises before returning if there were more.
-        """
-        docs: List[Any] = []
-        total = 0
-        for page in self._iter_cursor_pages(index, request):
-            total += len(page)
-            docs.extend(page[: max(0, max_results - len(docs))])
-        self._validate_prune_search_result(
-            len(docs), total, thread_id=thread_id, max_results=max_results
-        )
-        return docs
-
     def prune(
         self,
         thread_ids: Sequence[str],
@@ -1738,10 +1686,12 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
         A cycle in required ancestry raises ``ValueError`` before any keys for
         that thread are deleted.
 
-        Prune only inactive threads. Prune reads each search through a cursor
-        until it is exhausted and never acts on a partial result: under Search's
-        ``ON_TIMEOUT=FAIL`` policy, a timed-out read raises before any keys for
-        that thread are deleted. It needs no configuration access.
+        Prune only inactive threads. Prune deletes only what its searches
+        return and needs no configuration access. Searches run without a query
+        timeout (``TIMEOUT 0``); under ``ON_TIMEOUT=FAIL`` a search that still
+        times out raises before any keys for that thread are deleted. Redis
+        8.10+ caps even ``TIMEOUT 0`` when ``search-workers`` is 0, and a search
+        cut short by that cap returns a partial result that prune cannot detect.
 
         Each namespace (root ``""`` and any subgraph namespaces) is treated as
         an independent checkpoint chain.  Channel values are stored inline
@@ -1778,14 +1728,16 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
             storage_safe_thread_id = to_storage_safe_id(thread_id)
 
             # Fetch all checkpoints for this thread across all namespaces
-            checkpoint_docs = self._read_prune_search(
-                self.checkpoints_index,
-                self._prune_checkpoint_query(storage_safe_thread_id),
+            checkpoint_results = self.checkpoints_index.search(
+                self._prune_checkpoint_query(storage_safe_thread_id, max_results)
+            )
+            self._validate_prune_search_result(
+                checkpoint_results,
                 thread_id=thread_id,
                 max_results=max_results,
             )
 
-            if not checkpoint_docs:
+            if not checkpoint_results.docs:
                 continue
 
             # Within each namespace sort newest-first (ULIDs are lex time-ordered)
@@ -1793,7 +1745,7 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
             # Track namespaces where every checkpoint is evicted so we can clean
             # up the checkpoint_latest:{thread}:{ns} pointer key too.
             retained, eviction_candidates, fully_evicted_ns = (
-                self._partition_prune_candidates(checkpoint_docs, keep_last)
+                self._partition_prune_candidates(checkpoint_results.docs, keep_last)
             )
 
             if not eviction_candidates:
@@ -1810,7 +1762,7 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
             # Fetch each summary once per thread, batched along the searched parent
             # chain. Every visited checkpoint needs metadata to protect its own
             # channels as well as its descendants'.
-            parents = self._prune_parent_map(thread_id, checkpoint_docs)
+            parents = self._prune_parent_map(thread_id, checkpoint_results.docs)
             checkpoint_cache: Dict[Tuple[str, str], Optional[_PruneCheckpoint]] = {}
             batch_size = 1
             # Channels carried into each protected checkpoint. A later walk that
@@ -1863,15 +1815,16 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
                 )
 
                 # Evict all write documents for this checkpoint
-                write_docs = self._read_prune_search(
-                    self.checkpoint_writes_index,
-                    self._prune_writes_query(
-                        storage_safe_thread_id, checkpoint_ns, checkpoint_id
-                    ),
+                writes_query = self._make_prune_writes_query(
+                    storage_safe_thread_id, checkpoint_ns, checkpoint_id, max_results
+                )
+                writes_results = self.checkpoint_writes_index.search(writes_query)
+                self._validate_prune_search_result(
+                    writes_results,
                     thread_id=thread_id,
                     max_results=max_results,
                 )
-                for wdoc in write_docs:
+                for wdoc in writes_results.docs:
                     keys_to_delete.append(
                         self._make_redis_checkpoint_writes_key(
                             storage_safe_thread_id,

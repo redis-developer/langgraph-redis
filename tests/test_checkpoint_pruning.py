@@ -17,7 +17,8 @@ Tests cover:
 import socket
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
+from importlib.metadata import version
 from typing import Any, Optional
 
 import pytest
@@ -196,42 +197,26 @@ async def test_prune_does_not_depend_on_search_timeout_configuration(
 
 
 @contextmanager
-def _forced_search_timeout(client: Redis, mode: Optional[str]) -> Iterator[None]:
-    """Force Search timeouts for one test, then restore the server's settings."""
-    if mode is None:
-        yield
-        return
-    if mode == "search-timeout":  # FT.CONFIG works on Redis Stack and Redis 8.
-        original: dict[str, Any] = {
-            option: _get_search_config(client, option)
-            for option in ("TIMEOUT", "ON_TIMEOUT")
-        }
-        settings: dict[str, Any] = {"TIMEOUT": 1, "ON_TIMEOUT": "RETURN"}
-
-        def apply(name: str, value: Any) -> None:
-            client.execute_command("FT.CONFIG", "SET", name, value)
-
-    else:  # foreground-cap: Redis 8.10+ caps every query's timeout when search-workers is 0.
-        names = (
-            "search-workers",
-            "search-_max-foreground-timeout-limit",
-            "search-on-timeout",
-        )
-        original = {name: client.config_get(name).get(name) for name in names}
-        if original["search-_max-foreground-timeout-limit"] is None:
-            pytest.skip("search-_max-foreground-timeout-limit requires Redis 8.10+")
-        settings = dict(zip(names, (0, 1, "return")))
-
-        def apply(name: str, value: Any) -> None:
-            client.config_set(name, value)
-
+def _forced_search_timeout(client: Redis) -> Iterator[None]:
+    """Make Search queries time out after 1 ms under ON_TIMEOUT=RETURN, then restore."""
+    original = {
+        option: _get_search_config(client, option)
+        for option in ("TIMEOUT", "ON_TIMEOUT")
+    }
     try:
-        for name, value in settings.items():
-            apply(name, value)
+        client.execute_command("FT.CONFIG", "SET", "TIMEOUT", 1)
+        client.execute_command("FT.CONFIG", "SET", "ON_TIMEOUT", "RETURN")
         yield
     finally:
-        for name, value in original.items():
-            apply(name, value)
+        for option, value in original.items():
+            client.execute_command("FT.CONFIG", "SET", option, value)
+
+
+# redisvl releases before 0.32 can return raw RESP3 search replies with
+# redis-py 6.x, which breaks every search-based read (list, prune, delete_thread).
+_REDISVL_RETURNS_RAW_RESP3 = tuple(
+    int(part) for part in version("redisvl").split(".")[:2]
+) < (0, 32)
 
 
 def _put_checkpoint_with_bulk_writes(
@@ -250,34 +235,39 @@ def _put_checkpoint_with_bulk_writes(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("timeout_mode", "write_count", "decode_responses"),
+    ("force_timeout", "write_count", "decode_responses"),
     [
-        # 2,500 writes span three 1,000-row cursor batches.
-        pytest.param(None, 2_500, False, id="no-timeout-bytes"),
-        pytest.param(None, 2_500, True, id="no-timeout-str"),
+        pytest.param(False, 5, False, id="no-timeout-bytes"),
+        pytest.param(False, 5, True, id="no-timeout-str"),
         # 50,000 writes reliably exceed a 1 ms timeout on every tested version.
-        pytest.param("search-timeout", 50_000, False, id="search-timeout"),
-        pytest.param("foreground-cap", 50_000, False, id="foreground-cap"),
+        pytest.param(True, 50_000, False, id="search-timeout"),
     ],
 )
 @pytest.mark.parametrize("protocol", [2, 3], ids=["resp2", "resp3"])
 @pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
-async def test_prune_reads_every_match_through_its_cursor(
+async def test_prune_removes_every_match_in_each_client_mode(
     redis_url: str,
     client: Redis,
     saver: RedisSaver,
     use_async: bool,
     protocol: int,
-    timeout_mode: Optional[str],
+    force_timeout: bool,
     write_count: int,
     decode_responses: bool,
 ) -> None:
-    """Prune sees every checkpoint and write, even when a single search times out.
+    """Prune removes every evicted checkpoint and write, even past the Search timeout.
 
     A timed-out FT.SEARCH under ON_TIMEOUT=RETURN reports a partial total that
-    matches its returned count, and Redis 8.10+ caps even ``TIMEOUT 0``.
+    matches its returned count, so prune runs its searches with ``TIMEOUT 0``.
     """
-    thread_id = f"prune-cursor-{_make_ulid()}"
+    if protocol == 3 and _REDISVL_RETURNS_RAW_RESP3:
+        pytest.skip("redisvl < 0.32 can return raw RESP3 search replies")
+    if (
+        force_timeout
+        and int(_get_search_config(client, "MAXSEARCHRESULTS")) < write_count
+    ):
+        pytest.skip("search-max-search-results is too low to force a 1 ms timeout")
+    thread_id = f"prune-client-mode-{_make_ulid()}"
     evicted, retained = [], []
     # A large evicted checkpoint, a small one in a subgraph namespace, and a
     # newer retained checkpoint in each namespace.
@@ -288,10 +278,10 @@ async def test_prune_reads_every_match_through_its_cursor(
         evicted.append(old["configurable"]["checkpoint_id"])
         retained.append(new)
 
-    with _forced_search_timeout(client, timeout_mode):
-        if timeout_mode:
-            # Precondition: a single search over the large checkpoint is cut short.
-            # Count only (LIMIT 0 0): Redis Stack caps LIMIT at 10,000 rows.
+    with _forced_search_timeout(client) if force_timeout else nullcontext():
+        if force_timeout:
+            # Precondition: without an override, a search over the large
+            # checkpoint is cut short. Count only (LIMIT 0 0).
             matched = saver.checkpoint_writes_index.query(
                 CountQuery(
                     filter_expression=(Tag("thread_id") == thread_id)
@@ -348,6 +338,9 @@ def redis_cluster_port() -> Iterator[int]:
         .with_command(
             f"redis-server --port {port} --cluster-enabled yes "
             f"--cluster-announce-ip 127.0.0.1 --cluster-announce-port {port} "
+            # The bus defaults to port + 10000, which overflows for host ports
+            # above 55535, so pin it inside the container (it is never published).
+            "--cluster-port 16379 "
             # Redis 8.12+ refuses an unauthenticated cluster bus unless told the
             # port is trusted; this container is only reachable from localhost.
             "--cluster-bus-port-protected-mode no --save '' --appendonly no"
@@ -361,14 +354,14 @@ def redis_cluster_port() -> Iterator[int]:
         yield port
 
 
-def test_prune_reads_cursor_pages_on_a_redis_cluster(redis_cluster_port: int) -> None:
-    """Cursor reads stay on one node, so pruning works on a cluster with any redis-py."""
+def test_prune_on_a_redis_cluster(redis_cluster_port: int) -> None:
+    """Pruning works against a real Redis Cluster, not only mocked cluster clients."""
     cluster = RedisCluster(host="127.0.0.1", port=redis_cluster_port)
     with RedisSaver.from_conn_string(redis_client=cluster) as cluster_saver:
         cluster_saver.setup()
         thread_id = f"prune-cluster-{_make_ulid()}"
         evicted, retained = (_config(thread_id, _make_ulid()) for _ in range(2))
-        _put_checkpoint_with_bulk_writes(cluster_saver, evicted, 2_500)  # 3 pages
+        _put_checkpoint_with_bulk_writes(cluster_saver, evicted, 3)
         _put_checkpoint_with_bulk_writes(cluster_saver, retained, 1)
 
         cluster_saver.prune([thread_id])
