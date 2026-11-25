@@ -2,7 +2,6 @@
 
 import importlib.metadata
 import os
-import sys
 
 from redisvl.version import __version__ as __redisvl_version__
 
@@ -14,11 +13,7 @@ def _get_version() -> str:
         return importlib.metadata.version("langgraph-checkpoint-redis")
     except importlib.metadata.PackageNotFoundError:
         # Fallback for development/editable installs
-        if sys.version_info >= (3, 11):
-            import tomllib
-        else:
-            import tomli as tomllib
-
+        import tomllib
         from pathlib import Path
 
         # Get search depth from environment variable (default to 5)
