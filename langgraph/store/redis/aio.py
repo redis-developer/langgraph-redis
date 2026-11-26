@@ -34,6 +34,7 @@ from ulid import ULID
 
 from langgraph.checkpoint.redis.util import unwrap_connection_errors
 from langgraph.store.redis.base import (
+    REBUILD_LOCK_SECONDS,
     REBUILD_WARNING,
     REDIS_KEY_SEPARATOR,
     REINDEX_WAIT_SECONDS,
@@ -53,6 +54,7 @@ from langgraph.store.redis.base import (
     _is_missing_index,
     _matches_filter,
     _namespace_to_text,
+    _rebuild_lock_name,
     _row_to_item,
     _row_to_search_item,
     logger,
@@ -257,32 +259,46 @@ class AsyncRedisStore(
 
         The rebuild drops only the index definition (never the documents) and
         Redis re-indexes the existing documents in the background. Several
-        processes may run this at once: whichever drops or creates the index
-        first wins, and the others fall through to waiting on it.
+        processes may run this at once: the drop and recreate run under a Redis
+        lock, after re-reading the index, so a process that saw the old index
+        cannot drop one another process has just rebuilt.
         """
+        if await self._index_outdated(index):
+            # Decide again under the lock: another process may have rebuilt
+            # the index while this one waited, and must not lose it.
+            async with self._redis.lock(
+                _rebuild_lock_name(index.name),
+                timeout=REBUILD_LOCK_SECONDS,
+                blocking_timeout=REINDEX_WAIT_SECONDS,
+            ):
+                if await self._index_outdated(index):
+                    logger.warning(REBUILD_WARNING, index.name)
+                    try:
+                        await index.delete(drop=False)
+                    except RedisSearchError as e:
+                        if not _is_missing_index(e):
+                            raise
+                        # Dropped by a process outside the lock; create below.
+                    await self._create_index(index)
+        await self._create_index(index)
+        await self._wait_for_indexing(index)
+
+    async def _index_outdated(self, index: AsyncSearchIndex) -> bool:
+        """Whether ``index`` exists and predates STOPWORDS 0 / NOSTEM."""
         try:
-            outdated = await index.exists() and not _index_is_current(
-                await index.info()
-            )
+            return await index.exists() and not _index_is_current(await index.info())
         except RedisSearchError as e:
             if not _is_missing_index(e):
                 raise
-            outdated = False  # dropped by another process since exists()
-        if outdated:
-            logger.warning(REBUILD_WARNING, index.name)
-            try:
-                await index.delete(drop=False)
-            except RedisSearchError as e:
-                if not _is_missing_index(e):
-                    raise
-                # Another process dropped it first; create it below.
+            return False  # dropped by another process since exists()
+
+    async def _create_index(self, index: AsyncSearchIndex) -> None:
         try:
             await index.create(overwrite=False)  # no-op if it already exists
         except RedisSearchError:
             # Another process created it between the exists() check and FT.CREATE.
             if not await index.exists():
                 raise
-        await self._wait_for_indexing(index)
 
     async def _wait_for_indexing(self, index: AsyncSearchIndex) -> None:
         """Wait (up to REINDEX_WAIT_SECONDS) for Redis to finish indexing the

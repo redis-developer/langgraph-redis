@@ -185,10 +185,38 @@ def _index_is_current(info: Dict[str, Any]) -> bool:
     if stopwords is None or len(stopwords) > 0:
         return False
     for attr in info.get("attributes", []):
-        attr = [str(a) for a in attr]
-        if "attribute" in attr and attr[attr.index("attribute") + 1] == "prefix":
-            return "NOSTEM" in attr
+        tokens = _attribute_tokens(attr)
+        if _attribute_name(tokens) == "prefix":
+            return "NOSTEM" in tokens
     return False
+
+
+def _attribute_tokens(attr: Any) -> list[str]:
+    """One FT.INFO attribute as a flat list of strings, whichever protocol
+    replied: RESP2 gives ``[key, value, ..., flag, ...]``, RESP3 a map whose
+    ``flags`` value lists the flags."""
+    if isinstance(attr, dict):
+        flat: list[Any] = []
+        for key, value in attr.items():
+            flat.append(key)
+            flat.extend(value if isinstance(value, (list, tuple)) else [value])
+    else:
+        flat = list(attr)
+    return [v.decode() if isinstance(v, bytes) else str(v) for v in flat]
+
+
+def _attribute_name(tokens: list[str]) -> Optional[str]:
+    if "attribute" not in tokens:
+        return None
+    i = tokens.index("attribute")
+    return tokens[i + 1] if i + 1 < len(tokens) else None
+
+
+def _rebuild_lock_name(index_name: str) -> str:
+    """The Redis lock setup() holds while it decides on and runs a rebuild, so
+    a process that read the old index cannot drop one another process has
+    just rebuilt."""
+    return f"langgraph:store_index_rebuild_lock:{index_name}"
 
 
 # How RediSearch words "this index does not exist" across versions.
@@ -228,6 +256,10 @@ REBUILD_WARNING = (
 # How long setup() waits for Redis to re-index existing documents after it
 # rebuilds an outdated index, before carrying on with a warning.
 REINDEX_WAIT_SECONDS = 60.0
+
+# How long a rebuild may hold the rebuild lock (it covers only the drop and
+# create, not the re-index wait) before Redis frees it for another process.
+REBUILD_LOCK_SECONDS = 30.0
 
 # Schemas for Redis Search indices
 SCHEMAS = [
@@ -674,13 +706,10 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
     @staticmethod
     def _index_has_field(info: Dict[str, Any], name: str) -> bool:
         """Whether FT.INFO output lists an attribute called ``name``."""
-        for attr in info.get("attributes", []):
-            values = [v.decode() if isinstance(v, bytes) else v for v in attr]
-            if "attribute" in values:
-                i = values.index("attribute")
-                if i + 1 < len(values) and values[i + 1] == name:
-                    return True
-        return False
+        return any(
+            _attribute_name(_attribute_tokens(attr)) == name
+            for attr in info.get("attributes", [])
+        )
 
     @staticmethod
     def _still_indexing(info: Dict[str, Any]) -> bool:

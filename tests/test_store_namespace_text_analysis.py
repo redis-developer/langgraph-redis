@@ -28,6 +28,7 @@ from unittest.mock import patch
 import pytest
 from langgraph.store.base import GetOp
 from redis import Redis
+from redis.asyncio import Redis as AsyncRedis
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redisvl.exceptions import RedisSearchError
 from redisvl.index import SearchIndex
@@ -303,6 +304,58 @@ def test_concurrent_setup_on_legacy_index_succeeds_in_every_worker(
     assert int(info["num_docs"]) == 200
 
 
+def test_resp3_client_reads_a_current_index_as_current(own_redis_url: str) -> None:
+    """RESP3 returns FT.INFO attributes as maps rather than flat lists; a
+    current index must still read as current, or every setup() rebuilds it."""
+    with RedisStore.from_conn_string(own_redis_url) as s:
+        s.setup()
+    client = Redis.from_url(own_redis_url, protocol=3)
+    try:
+        s = RedisStore(client)
+        info = s.store_index.info()
+        assert isinstance(info["attributes"][0], dict)  # really the RESP3 shape
+        assert s._index_outdated(s.store_index) is False
+        assert s._index_has_field(info, "doc_id")
+    finally:
+        client.close()
+
+
+def test_delayed_upgrader_does_not_drop_an_index_another_process_rebuilt(
+    own_redis_url: str,
+) -> None:
+    """A process that read the legacy index before another process finished
+    rebuilding it must not drop the rebuilt index."""
+    _create_legacy_store_index(own_redis_url)
+    with (
+        RedisStore.from_conn_string(own_redis_url) as delayed,
+        RedisStore.from_conn_string(own_redis_url) as other,
+    ):
+        delayed.put(("users",), "k0", {"i": 0})
+        real_info = delayed.store_index.info
+        stale_reads = []
+
+        def info_then_let_other_finish() -> dict[str, Any]:
+            info = real_info()
+            if not stale_reads:
+                stale_reads.append(info)
+                other.setup()  # completes the upgrade before `delayed` acts
+            return info
+
+        with (
+            patch.object(
+                delayed.store_index, "info", side_effect=info_then_let_other_finish
+            ),
+            patch.object(
+                delayed.store_index, "delete", wraps=delayed.store_index.delete
+            ) as delete,
+        ):
+            delayed.setup()
+
+        assert stale_reads, "the delayed process never read the legacy index"
+        delete.assert_not_called()
+        assert other.get(("users",), "k0").value == {"i": 0}
+
+
 def test_setup_raises_connection_error_while_waiting_for_indexing(
     own_redis_url: str,
 ) -> None:
@@ -500,3 +553,52 @@ async def test_async_setup_raises_connection_error_while_waiting_for_indexing(
             with pytest.raises(RedisConnectionError):
                 await s.setup()
         assert time.monotonic() - started < 5
+
+
+async def test_async_resp3_client_reads_a_current_index_as_current(
+    own_redis_url: str,
+) -> None:
+    async with AsyncRedisStore(own_redis_url) as s:
+        await s.setup()
+    client = AsyncRedis.from_url(own_redis_url, protocol=3)
+    try:
+        s = AsyncRedisStore(redis_client=client)
+        info = await s.store_index.info()
+        assert isinstance(info["attributes"][0], dict)
+        assert await s._index_outdated(s.store_index) is False
+        assert s._index_has_field(info, "doc_id")
+    finally:
+        await client.aclose()
+
+
+async def test_async_delayed_upgrader_does_not_drop_an_index_another_process_rebuilt(
+    own_redis_url: str,
+) -> None:
+    _create_legacy_store_index(own_redis_url)
+    delayed = AsyncRedisStore(own_redis_url)
+    other = AsyncRedisStore(own_redis_url)
+    async with delayed, other:
+        await delayed.aput(("users",), "k0", {"i": 0})
+        real_info = delayed.store_index.info
+        stale_reads = []
+
+        async def info_then_let_other_finish() -> dict[str, Any]:
+            info = await real_info()
+            if not stale_reads:
+                stale_reads.append(info)
+                await other.setup()
+            return info
+
+        with (
+            patch.object(
+                delayed.store_index, "info", side_effect=info_then_let_other_finish
+            ),
+            patch.object(
+                delayed.store_index, "delete", wraps=delayed.store_index.delete
+            ) as delete,
+        ):
+            await delayed.setup()
+
+        assert stale_reads, "the delayed process never read the legacy index"
+        delete.assert_not_called()
+        assert (await other.aget(("users",), "k0")).value == {"i": 0}
