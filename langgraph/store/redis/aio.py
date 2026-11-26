@@ -25,6 +25,7 @@ from langgraph.store.base.batch import AsyncBatchedBaseStore
 from redis.asyncio import Redis as AsyncRedis
 from redis.commands.search.query import Query
 from redis.exceptions import RedisError, ResponseError
+from redisvl.exceptions import RedisSearchError
 from redisvl.index import AsyncSearchIndex
 from redisvl.query import FilterQuery, VectorQuery
 from redisvl.redis.connection import RedisConnectionFactory
@@ -33,7 +34,10 @@ from ulid import ULID
 
 from langgraph.checkpoint.redis.util import unwrap_connection_errors
 from langgraph.store.redis.base import (
+    REBUILD_LOCK_SECONDS,
+    REBUILD_WARNING,
     REDIS_KEY_SEPARATOR,
+    REINDEX_WAIT_SECONDS,
     STORE_PREFIX,
     STORE_SEARCH_PAGE_SIZE,
     STORE_SORT_FIELD,
@@ -45,8 +49,12 @@ from langgraph.store.redis.base import (
     _ensure_string_or_literal,
     _filtered_search_request,
     _group_ops,
+    _index_is_current,
+    _indexing_done,
+    _is_missing_index,
     _matches_filter,
     _namespace_to_text,
+    _rebuild_lock_name,
     _row_to_item,
     _row_to_search_item,
     logger,
@@ -149,7 +157,14 @@ class AsyncRedisStore(
             self._redis = redis_client
 
     async def setup(self) -> None:
-        """Initialize store indices."""
+        """Create the store's search indexes, or bring existing ones up to date.
+
+        Safe to call on every start. An index created by a release before the
+        namespace field used STOPWORDS 0 / NOSTEM is rebuilt once: its
+        definition is dropped and recreated, the stored items are kept, and
+        this waits (up to ``REINDEX_WAIT_SECONDS``) for Redis to re-index them.
+        Pause other writers to the store while that one-time rebuild runs.
+        """
         # Handle embeddings in same way as sync store
         if self.index_config:
             self.embeddings = ensure_embeddings(
@@ -166,9 +181,9 @@ class AsyncRedisStore(
 
         # Create indices in Redis
         with unwrap_connection_errors():
-            await self.store_index.create(overwrite=False)
+            await self._create_or_rebuild_index(self.store_index)
             if self.index_config:
-                await self.vector_index.create(overwrite=False)
+                await self._create_or_rebuild_index(self.vector_index)
             await self._ensure_sort_field()
 
     async def _ensure_sort_field(self) -> None:
@@ -237,6 +252,81 @@ class AsyncRedisStore(
                 # field; any other failure is real.
                 if isinstance(outcome, Exception) and await self._redis.exists(key):
                     raise outcome
+
+    async def _create_or_rebuild_index(self, index: AsyncSearchIndex) -> None:
+        """Create ``index``, or rebuild it if an earlier release created it
+        without STOPWORDS 0 / NOSTEM on ``prefix``, then wait for indexing.
+
+        The rebuild drops only the index definition (never the documents) and
+        Redis re-indexes the existing documents in the background. Several
+        processes may run this at once: the drop and recreate run under a Redis
+        lock, after re-reading the index, so a process that saw the old index
+        cannot drop one another process has just rebuilt.
+        """
+        if await self._index_outdated(index):
+            # Decide again under the lock: another process may have rebuilt
+            # the index while this one waited, and must not lose it.
+            async with self._redis.lock(
+                _rebuild_lock_name(index.name),
+                timeout=REBUILD_LOCK_SECONDS,
+                blocking_timeout=REINDEX_WAIT_SECONDS,
+            ):
+                if await self._index_outdated(index):
+                    logger.warning(REBUILD_WARNING, index.name)
+                    try:
+                        await index.delete(drop=False)
+                    except RedisSearchError as e:
+                        if not _is_missing_index(e):
+                            raise
+                        # Dropped by a process outside the lock; create below.
+                    await self._create_index(index)
+        await self._create_index(index)
+        await self._wait_for_indexing(index)
+
+    async def _index_outdated(self, index: AsyncSearchIndex) -> bool:
+        """Whether ``index`` exists and predates STOPWORDS 0 / NOSTEM."""
+        try:
+            return await index.exists() and not _index_is_current(await index.info())
+        except RedisSearchError as e:
+            if not _is_missing_index(e):
+                raise
+            return False  # dropped by another process since exists()
+
+    async def _create_index(self, index: AsyncSearchIndex) -> None:
+        try:
+            await index.create(overwrite=False)  # no-op if it already exists
+        except RedisSearchError:
+            # Another process created it between the exists() check and FT.CREATE.
+            if not await index.exists():
+                raise
+
+    async def _wait_for_indexing(self, index: AsyncSearchIndex) -> None:
+        """Wait (up to REINDEX_WAIT_SECONDS) for Redis to finish indexing the
+        documents under ``index``, so the first operations see every item."""
+        deadline = time.monotonic() + REINDEX_WAIT_SECONDS
+        while True:
+            try:
+                if _indexing_done(await index.info()):
+                    return
+                missing = False
+            except RedisSearchError as e:
+                if not _is_missing_index(e):
+                    raise
+                missing = True  # another process is between drop and create
+            if time.monotonic() > deadline:
+                if missing:
+                    raise RedisSearchError(
+                        f"Search index {index.name!r} still does not exist "
+                        f"{REINDEX_WAIT_SECONDS:.0f}s after setup() created it."
+                    )
+                logger.warning(
+                    "Search index %r is still indexing after %.0fs; queries "
+                    "may miss items until it finishes.",
+                    index.name,
+                    REINDEX_WAIT_SECONDS,
+                )
+                return
+            await asyncio.sleep(0.05)
 
     async def _detect_cluster_mode(self) -> None:
         """Detect if the Redis client is a cluster client by inspecting its class."""
