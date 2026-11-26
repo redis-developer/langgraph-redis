@@ -24,13 +24,13 @@ def _compose_project_name(config: pytest.Config) -> str:
 
     Each xdist worker gets its own project, and by default so does each run,
     so two suites sharing a Docker host never recreate or tear down each
-    other's Redis. Workers of one xdist run share its ``testrun_uid``.
+    other's Redis. Workers of one xdist run share its ``testrunuid``.
     """
     workerinput = getattr(config, "workerinput", {})
     worker_id = workerinput.get("workerid", "master")
     prefix = os.environ.get(PROJECT_PREFIX_ENV)
     if not prefix:
-        run_id = workerinput.get("testrun_uid") or uuid.uuid4().hex
+        run_id = workerinput.get("testrunuid") or uuid.uuid4().hex
         prefix = f"redis_test_{run_id[:12]}"
     return f"{prefix}_{worker_id}".lower()
 
