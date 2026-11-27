@@ -49,7 +49,7 @@ TestContainers. The library handles container lifecycle automatically.
 ```python
 from testcontainers.redis import RedisContainer
 
-# Use redis:8 (has all required modules) or redis/redis-stack-server:latest
+# Use redis:8 (has all required modules)
 redis_container = RedisContainer("redis:8")
 redis_container.start()
 try:
@@ -83,7 +83,9 @@ pytest --run-api-tests      # Include API integration tests
 **Important**: Always use `make test-all` when evaluating changes to ensure all tests pass, including API integration
 tests.
 
-Note: Tests automatically use TestContainers for Redis - do not manually start Redis containers.
+Note: Tests automatically use TestContainers for Redis - do not manually start Redis containers. Each run gets its own
+Compose project, so concurrent suites on one Docker host do not interfere. `REDIS_TEST_PROJECT_PREFIX` pins the project
+prefix instead; runs sharing a prefix tear down each other's Redis.
 
 ### Code Quality
 

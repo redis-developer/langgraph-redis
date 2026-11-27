@@ -9,6 +9,8 @@ Verifies that:
 These tests use TestContainers to spin up a real Redis instance.
 """
 
+import os
+
 import pytest
 from langchain_core.messages import ToolMessage as LangChainToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
@@ -55,7 +57,7 @@ def _extract_tool_call_id(request, fallback="call_1"):
 @pytest.fixture(scope="module")
 def redis_url():
     """Provide a Redis URL using TestContainers."""
-    redis_container = RedisContainer("redis/redis-stack-server:latest")
+    redis_container = RedisContainer(os.environ.get("REDIS_IMAGE", "redis:8"))
     redis_container.start()
     try:
         host = redis_container.get_container_host_ip()
