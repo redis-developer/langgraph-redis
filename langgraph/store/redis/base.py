@@ -44,8 +44,7 @@ from redisvl.query.filter import Tag, Text
 from redisvl.utils.token_escaper import TokenEscaper
 
 from langgraph.checkpoint.redis.jsonplus_redis import (
-    LEGACY_JSON_TYPE,
-    REDIS_TYPED_JSON_TYPE,
+    JSON_TYPES,
     JsonPlusRedisSerializer,
 )
 
@@ -537,7 +536,7 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
         type_str, data_bytes = self._serde.dumps_typed(value)
         # Store the serialized data with type info for proper deserialization
         # Handle different type formats explicitly for clarity
-        if type_str in (LEGACY_JSON_TYPE, REDIS_TYPED_JSON_TYPE):
+        if type_str in JSON_TYPES:
             data_encoded = data_bytes.decode("utf-8")
         else:
             # bytes, bytearray, msgpack, and other types are hex-encoded
@@ -574,7 +573,7 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
 
             try:
                 # Convert back to bytes based on type
-                if type_str in (LEGACY_JSON_TYPE, REDIS_TYPED_JSON_TYPE):
+                if type_str in JSON_TYPES:
                     data_bytes = data_str.encode("utf-8")
                 else:
                     # bytes, bytearray, msgpack types are hex-encoded

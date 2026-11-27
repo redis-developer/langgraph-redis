@@ -48,7 +48,6 @@ from langgraph.checkpoint.redis.base import (
     aexpire_with_retry,
     apersist_with_retry,
 )
-from langgraph.checkpoint.redis.jsonplus_redis import LEGACY_JSON_TYPE
 from langgraph.checkpoint.redis.key_registry import (
     AsyncCheckpointKeyRegistry as AsyncKeyRegistry,
 )
@@ -591,7 +590,7 @@ class AsyncRedisSaver(
         }
         metadata = cast(CheckpointMetadata, sanitized_metadata)
         metadata = self._load_metadata(
-            metadata, type_=(checkpoint_data_dict or {}).get("type", LEGACY_JSON_TYPE)
+            metadata, type_=self._codec_type(checkpoint_data_dict)
         )
 
         config_param: RunnableConfig = {
@@ -742,7 +741,7 @@ class AsyncRedisSaver(
                 )
                 channel_values = self._deserialize_channel_values(
                     checkpoint_dict.get("channel_values", {}),
-                    type_=checkpoint_dict.get("type", LEGACY_JSON_TYPE),
+                    type_=self._codec_type(checkpoint_dict),
                 )
             else:
                 # If checkpoint data is missing, the document is corrupted
@@ -839,7 +838,7 @@ class AsyncRedisSaver(
 
             metadata = self._load_metadata(
                 metadata,
-                type_=(doc_data["checkpoint_dict"] or {}).get("type", LEGACY_JSON_TYPE),
+                type_=self._codec_type(doc_data["checkpoint_dict"]),
             )
 
             # Pre-create the config structure more efficiently
@@ -1476,7 +1475,7 @@ class AsyncRedisSaver(
         checkpoint = cast(list[dict[str, Any]], checkpoint_data)[0]
         return self._deserialize_channel_values(
             checkpoint.get("channel_values", {}),
-            type_=checkpoint.get("type", LEGACY_JSON_TYPE),
+            type_=self._codec_type(checkpoint),
         )
 
     async def _aload_pending_sends(

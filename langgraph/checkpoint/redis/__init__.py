@@ -34,7 +34,6 @@ from langgraph.checkpoint.redis.base import (
     BaseRedisSaver,
     expire_with_retry,
 )
-from langgraph.checkpoint.redis.jsonplus_redis import LEGACY_JSON_TYPE
 from langgraph.checkpoint.redis.key_registry import SyncCheckpointKeyRegistry
 from langgraph.checkpoint.redis.message_exporter import (
     LangChainRecipe,
@@ -340,7 +339,7 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
                 )
                 channel_values = self._deserialize_channel_values(
                     checkpoint_dict.get("channel_values", {}),
-                    type_=checkpoint_dict.get("type", LEGACY_JSON_TYPE),
+                    type_=self._codec_type(checkpoint_dict),
                 )
             else:
                 # If checkpoint data is missing, the document is corrupted
@@ -435,7 +434,7 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
 
             metadata = self._load_metadata(
                 metadata,
-                type_=(doc_data["checkpoint_dict"] or {}).get("type", LEGACY_JSON_TYPE),
+                type_=self._codec_type(doc_data["checkpoint_dict"]),
             )
 
             # Pre-create the config structure more efficiently
@@ -1027,7 +1026,7 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
         channel_values = checkpoint_inner.get("channel_values", {})
         # Deserialize them since they're stored in serialized form
         channel_values = self._deserialize_channel_values(
-            channel_values, type_=checkpoint_inner.get("type", LEGACY_JSON_TYPE)
+            channel_values, type_=self._codec_type(checkpoint_inner)
         )
 
         # Fetch pending_sends from parent checkpoint
@@ -1058,7 +1057,7 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
         }
         metadata = cast(CheckpointMetadata, sanitized_metadata)
         metadata = self._load_metadata(
-            metadata, type_=checkpoint_inner.get("type", LEGACY_JSON_TYPE)
+            metadata, type_=self._codec_type(checkpoint_inner)
         )
 
         config_param: RunnableConfig = {
@@ -1172,7 +1171,7 @@ class RedisSaver(BaseRedisSaver[Union[Redis, RedisCluster], SearchIndex]):
         checkpoint = cast(list[dict[str, Any]], checkpoint_data)[0]
         return self._deserialize_channel_values(
             checkpoint.get("channel_values", {}),
-            type_=checkpoint.get("type", LEGACY_JSON_TYPE),
+            type_=self._codec_type(checkpoint),
         )
 
     def _load_pending_writes(

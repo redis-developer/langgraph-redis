@@ -18,6 +18,8 @@ _TYPED_VALUE_KEYS = {_TYPED_VALUE_MARKER, "type", "data"}
 # alongside migration guidance.
 LEGACY_JSON_TYPE = "json"
 REDIS_TYPED_JSON_TYPE = "redis-json-typed"
+# Codec tags whose payload is JSON text.
+JSON_TYPES = frozenset({LEGACY_JSON_TYPE, REDIS_TYPED_JSON_TYPE})
 
 
 def _is_typed_envelope(obj: Any) -> bool:
@@ -375,7 +377,7 @@ class JsonPlusRedisSerializer(JsonPlusSerializer):
             return data_bytes
         elif type_ == "bytearray":
             return bytearray(data_bytes)
-        elif type_ in (LEGACY_JSON_TYPE, REDIS_TYPED_JSON_TYPE):
+        elif type_ in JSON_TYPES:
             # Use orjson for parsing, then apply our custom revival
             parsed = orjson.loads(data_bytes)
             return self._revive_if_needed(

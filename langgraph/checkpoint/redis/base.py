@@ -31,6 +31,7 @@ from langgraph.checkpoint.redis.util import (
 )
 
 from .jsonplus_redis import (
+    JSON_TYPES,
     LEGACY_JSON_TYPE,
     REDIS_TYPED_JSON_TYPE,
     JsonPlusRedisSerializer,
@@ -411,7 +412,7 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         type_, data = self.serde.dumps_typed(checkpoint)
 
         # Decode the serialized data - handle both JSON and msgpack
-        if type_ in (LEGACY_JSON_TYPE, REDIS_TYPED_JSON_TYPE):
+        if type_ in JSON_TYPES:
             checkpoint_data = cast(dict, orjson.loads(data))
         else:
             checkpoint_data = cast(dict, self.serde.loads_typed((type_, data)))
@@ -447,6 +448,11 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
             option=orjson.OPT_NON_STR_KEYS,
         )
         return cast(dict, orjson.loads(json_bytes))
+
+    @staticmethod
+    def _codec_type(checkpoint: Optional[Mapping[str, Any]]) -> str:
+        """Return a stored checkpoint's codec tag; untagged data is legacy JSON."""
+        return (checkpoint or {}).get("type", LEGACY_JSON_TYPE)
 
     def _deserialize_channel_values(
         self, channel_values: dict[str, Any], *, type_: str = LEGACY_JSON_TYPE

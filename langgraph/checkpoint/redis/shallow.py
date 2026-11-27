@@ -31,7 +31,6 @@ from langgraph.checkpoint.redis.base import (
     BaseRedisSaver,
     expire_with_retry,
 )
-from langgraph.checkpoint.redis.jsonplus_redis import LEGACY_JSON_TYPE
 from langgraph.checkpoint.redis.util import (
     checkpoint_id_timestamp,
     from_storage_safe_str,
@@ -286,7 +285,7 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
             channel_values: Dict[str, Any] = checkpoint.get("channel_values", {})
             # Deserialize them since they're stored in serialized form
             channel_values = self._deserialize_channel_values(
-                channel_values, type_=checkpoint.get("type", LEGACY_JSON_TYPE)
+                channel_values, type_=self._codec_type(checkpoint)
             )
 
             # Parse metadata
@@ -305,9 +304,7 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
                 for k, v in metadata_dict.items()
             }
             metadata = cast(CheckpointMetadata, sanitized_metadata)
-            metadata = self._load_metadata(
-                metadata, type_=checkpoint.get("type", LEGACY_JSON_TYPE)
-            )
+            metadata = self._load_metadata(metadata, type_=self._codec_type(checkpoint))
 
             # Load checkpoint with inline channel values
             checkpoint_param = self._load_checkpoint(
@@ -366,7 +363,7 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         channel_values: Dict[str, Any] = checkpoint.get("channel_values", {})
         # Deserialize them since they're stored in serialized form
         channel_values = self._deserialize_channel_values(
-            channel_values, type_=checkpoint.get("type", LEGACY_JSON_TYPE)
+            channel_values, type_=self._codec_type(checkpoint)
         )
 
         # Parse metadata
@@ -404,7 +401,7 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
             },
             checkpoint=checkpoint_param,
             metadata=self._load_metadata(
-                sanitized_metadata, type_=checkpoint.get("type", LEGACY_JSON_TYPE)
+                sanitized_metadata, type_=self._codec_type(checkpoint)
             ),
             parent_config=None,
             pending_writes=pending_writes,
@@ -597,7 +594,7 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         # Deserialize channel values since they're stored in serialized form
         return self._deserialize_channel_values(
             channel_values,
-            type_=checkpoint.get("type", LEGACY_JSON_TYPE),
+            type_=self._codec_type(checkpoint),
         )
 
     def _load_pending_sends(

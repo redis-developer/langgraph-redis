@@ -790,91 +790,115 @@ def _checkpoint(payload: dict[str, Any]) -> Checkpoint:
 # Exercise both normalization paths without crossing every input with every saver.
 LEGACY_RECORDS = [("json", False), ("msgpack", True), (None, False)]
 
+LITERAL = {"__redis_jsonplus_typed__": True, "type": "bytes", "data": "YQ=="}
+# Escaping must also protect legacy markers nested in a literal envelope.
+NESTED_LITERAL = {
+    "__redis_jsonplus_typed__": True,
+    "type": {"__send__": True, "node": "literal", "arg": 1},
+    "data": {"__bytes__": "YQ=="},
+}
+LEGACY_VALUES = {"literal": LITERAL, "snapshot": _DeltaSnapshot([b"abc"])}
+LEGACY_METADATA = {"source": "input", "step": 0, "literal": LITERAL}
+LEGACY_WRITE_FIELDS = {
+    "$.type": "json",
+    "$.blob": base64.b64encode(orjson.dumps(LITERAL)).decode(),
+}
+
+
+def _legacy_raw_checkpoint(
+    raw: dict[str, Any], legacy_type: str | None
+) -> dict[str, Any]:
+    """Rewrite a stored checkpoint as wire data the new encoder never wrote."""
+    raw["channel_values"] = {
+        "payload": {
+            "literal": LITERAL,
+            "snapshot": {"__delta_snapshot__": True, "value": [{"__bytes__": "YWJj"}]},
+        }
+    }
+    raw.pop("type", None)
+    if legacy_type is not None:
+        raw["type"] = legacy_type
+    return raw
+
+
+def _typed_case(
+    legacy_type: str | None, binary: bool
+) -> tuple[dict[str, Any], Checkpoint, dict[str, Any]]:
+    """Return the values, checkpoint and metadata of the resumed, escaped write."""
+    expected: dict[str, Any] = {
+        **LEGACY_VALUES,
+        "literal": NESTED_LITERAL,
+        "amount": Decimal("1.10"),
+        "snapshot": _DeltaSnapshot([NESTED_LITERAL]),
+        "message": HumanMessage(
+            content="hello", additional_kwargs={"literal": NESTED_LITERAL}
+        ),
+    }
+    if binary:
+        expected["binary"] = b"payload"
+    checkpoint = _checkpoint(expected)
+    # A resumed checkpoint's old tag must not overwrite the new one.
+    checkpoint["type"] = legacy_type or "json"  # type: ignore[typeddict-unknown-key]
+    return expected, checkpoint, {**LEGACY_METADATA, "literal": NESTED_LITERAL}
+
+
+def _assert_reads(
+    current: Any, history: list[Any], values: Any, expected: Any, typed: bool
+) -> None:
+    assert current is not None
+    for item in (current, history[0]):
+        assert item.checkpoint["channel_values"] == {"payload": expected}
+        assert item.metadata["literal"] == expected["literal"]
+        assert item.pending_writes == [("task", "literal", expected["literal"])]
+        if typed:
+            assert item.checkpoint["type"] == REDIS_TYPED_JSON_TYPE
+    assert values == {"payload": expected}
+
 
 @pytest.mark.parametrize("saver_cls", [RedisSaver, ShallowRedisSaver])
 @pytest.mark.parametrize("legacy_type,binary", LEGACY_RECORDS)
 def test_saver_reads_legacy_then_typed_envelopes(
     redis_url: str, saver_cls: Any, legacy_type: str | None, binary: bool
 ) -> None:
-    literal = {"__redis_jsonplus_typed__": True, "type": "bytes", "data": "YQ=="}
     config = {"configurable": {"thread_id": str(uuid4()), "checkpoint_ns": ""}}
-    metadata = {"source": "input", "step": 0, "literal": literal}
-    legacy = {"literal": literal, "snapshot": _DeltaSnapshot([b"abc"])}
     with saver_cls.from_conn_string(redis_url) as saver:
         saver.setup()
-        saved = saver.put(config, _checkpoint({}), metadata, {"payload": "1"})
+        saved = old_config = saver.put(
+            config, _checkpoint({}), LEGACY_METADATA, {"payload": "1"}
+        )
         saver.put_writes(saved, [("literal", None)], "task")
         # Seed historical wire data without passing it through the new encoder.
+        redis_json = saver._redis.json()
         checkpoint_key = next(saver._redis.scan_iter(match="checkpoint:*"))
-        raw = saver._redis.json().get(checkpoint_key)["checkpoint"]
-        raw["channel_values"] = {
-            "payload": {
-                "literal": literal,
-                "snapshot": {
-                    "__delta_snapshot__": True,
-                    "value": [{"__bytes__": "YWJj"}],
-                },
-            }
-        }
-        raw.pop("type", None)
-        if legacy_type is not None:
-            raw["type"] = legacy_type
-        saver._redis.json().set(checkpoint_key, "$.checkpoint", raw)
-        saver._redis.json().set(
-            checkpoint_key, "$.metadata", orjson.dumps(metadata).decode()
+        raw = redis_json.get(checkpoint_key)["checkpoint"]
+        redis_json.set(
+            checkpoint_key, "$.checkpoint", _legacy_raw_checkpoint(raw, legacy_type)
+        )
+        redis_json.set(
+            checkpoint_key, "$.metadata", orjson.dumps(LEGACY_METADATA).decode()
         )
         write_key = next(saver._redis.scan_iter(match="checkpoint_write:*"))
-        saver._redis.json().set(write_key, "$.type", "json")
-        saver._redis.json().set(
-            write_key, "$.blob", base64.b64encode(orjson.dumps(literal)).decode()
-        )
-        old_config = saved
+        for path, value in LEGACY_WRITE_FIELDS.items():
+            redis_json.set(write_key, path, value)
 
         for typed in (False, True):
-            expected = dict(legacy)
+            expected: dict[str, Any] = LEGACY_VALUES
             if typed:
-                # Escaping must also protect legacy markers nested in a literal envelope.
-                expected["literal"] = {
-                    "__redis_jsonplus_typed__": True,
-                    "type": {"__send__": True, "node": "literal", "arg": 1},
-                    "data": {"__bytes__": "YQ=="},
-                }
-                expected.update(
-                    amount=Decimal("1.10"),
-                    snapshot=_DeltaSnapshot([expected["literal"]]),
-                    message=HumanMessage(
-                        content="hello",
-                        additional_kwargs={"literal": expected["literal"]},
-                    ),
-                )
-                metadata = {**metadata, "literal": expected["literal"]}
-                if binary:
-                    expected["binary"] = b"payload"
-                checkpoint = _checkpoint(expected)
-                # A resumed checkpoint's old tag must not overwrite the new one.
-                checkpoint["type"] = legacy_type or "json"  # type: ignore[typeddict-unknown-key]
+                expected, checkpoint, metadata = _typed_case(legacy_type, binary)
                 saved = saver.put(saved, checkpoint, metadata, {"payload": "1"})
-                saver.put_writes(saved, [("literal", expected["literal"])], "task")
+                saver.put_writes(saved, [("literal", NESTED_LITERAL)], "task")
             history = list(saver.list(config))
-            current = saver.get_tuple(saved)
-            assert current is not None
-            for item in (current, history[0]):
-                assert item.checkpoint["channel_values"] == {"payload": expected}
-                assert item.metadata["literal"] == expected["literal"]
-                assert item.pending_writes == [("task", "literal", expected["literal"])]
-                if typed:
-                    assert item.checkpoint["type"] == REDIS_TYPED_JSON_TYPE
             values = saver.get_channel_values(
                 config["configurable"]["thread_id"],
                 "",
                 saved["configurable"]["checkpoint_id"],
             )
-            assert values == {"payload": expected}
+            _assert_reads(saver.get_tuple(saved), history, values, expected, typed)
 
         if saver_cls is RedisSaver:
             old = saver.get_tuple(old_config)
             assert old is not None
-            assert old.checkpoint["channel_values"] == {"payload": legacy}
+            assert old.checkpoint["channel_values"] == {"payload": LEGACY_VALUES}
             assert len(history) == 2
 
 
@@ -883,85 +907,45 @@ def test_saver_reads_legacy_then_typed_envelopes(
 async def test_async_saver_reads_legacy_then_typed_envelopes(
     redis_url: str, saver_cls: Any, legacy_type: str | None, binary: bool
 ) -> None:
-    literal = {"__redis_jsonplus_typed__": True, "type": "bytes", "data": "YQ=="}
     config = {"configurable": {"thread_id": str(uuid4()), "checkpoint_ns": ""}}
-    metadata = {"source": "input", "step": 0, "literal": literal}
-    legacy = {"literal": literal, "snapshot": _DeltaSnapshot([b"abc"])}
     async with saver_cls.from_conn_string(redis_url) as saver:
         await saver.asetup()
-        saved = await saver.aput(config, _checkpoint({}), metadata, {"payload": "1"})
+        saved = old_config = await saver.aput(
+            config, _checkpoint({}), LEGACY_METADATA, {"payload": "1"}
+        )
         await saver.aput_writes(saved, [("literal", None)], "task")
         # Seed historical wire data without passing it through the new encoder.
+        redis_json = saver._redis.json()
         checkpoint_key = await anext(saver._redis.scan_iter(match="checkpoint:*"))
-        raw = (await saver._redis.json().get(checkpoint_key))["checkpoint"]
-        raw["channel_values"] = {
-            "payload": {
-                "literal": literal,
-                "snapshot": {
-                    "__delta_snapshot__": True,
-                    "value": [{"__bytes__": "YWJj"}],
-                },
-            }
-        }
-        raw.pop("type", None)
-        if legacy_type is not None:
-            raw["type"] = legacy_type
-        await saver._redis.json().set(checkpoint_key, "$.checkpoint", raw)
-        await saver._redis.json().set(
-            checkpoint_key, "$.metadata", orjson.dumps(metadata).decode()
+        raw = (await redis_json.get(checkpoint_key))["checkpoint"]
+        await redis_json.set(
+            checkpoint_key, "$.checkpoint", _legacy_raw_checkpoint(raw, legacy_type)
+        )
+        await redis_json.set(
+            checkpoint_key, "$.metadata", orjson.dumps(LEGACY_METADATA).decode()
         )
         write_key = await anext(saver._redis.scan_iter(match="checkpoint_write:*"))
-        await saver._redis.json().set(write_key, "$.type", "json")
-        await saver._redis.json().set(
-            write_key, "$.blob", base64.b64encode(orjson.dumps(literal)).decode()
-        )
-        old_config = saved
+        for path, value in LEGACY_WRITE_FIELDS.items():
+            await redis_json.set(write_key, path, value)
 
         for typed in (False, True):
-            expected = dict(legacy)
+            expected: dict[str, Any] = LEGACY_VALUES
             if typed:
-                # Escaping must also protect legacy markers nested in a literal envelope.
-                expected["literal"] = {
-                    "__redis_jsonplus_typed__": True,
-                    "type": {"__send__": True, "node": "literal", "arg": 1},
-                    "data": {"__bytes__": "YQ=="},
-                }
-                expected.update(
-                    amount=Decimal("1.10"),
-                    snapshot=_DeltaSnapshot([expected["literal"]]),
-                    message=HumanMessage(
-                        content="hello",
-                        additional_kwargs={"literal": expected["literal"]},
-                    ),
-                )
-                metadata = {**metadata, "literal": expected["literal"]}
-                if binary:
-                    expected["binary"] = b"payload"
-                checkpoint = _checkpoint(expected)
-                # A resumed checkpoint's old tag must not overwrite the new one.
-                checkpoint["type"] = legacy_type or "json"  # type: ignore[typeddict-unknown-key]
+                expected, checkpoint, metadata = _typed_case(legacy_type, binary)
                 saved = await saver.aput(saved, checkpoint, metadata, {"payload": "1"})
-                await saver.aput_writes(
-                    saved, [("literal", expected["literal"])], "task"
-                )
+                await saver.aput_writes(saved, [("literal", NESTED_LITERAL)], "task")
             history = [item async for item in saver.alist(config)]
-            current = await saver.aget_tuple(saved)
-            assert current is not None
-            for item in (current, history[0]):
-                assert item.checkpoint["channel_values"] == {"payload": expected}
-                assert item.metadata["literal"] == expected["literal"]
-                assert item.pending_writes == [("task", "literal", expected["literal"])]
-                if typed:
-                    assert item.checkpoint["type"] == REDIS_TYPED_JSON_TYPE
             values = await saver.aget_channel_values(
                 config["configurable"]["thread_id"],
                 "",
                 saved["configurable"]["checkpoint_id"],
             )
-            assert values == {"payload": expected}
+            _assert_reads(
+                await saver.aget_tuple(saved), history, values, expected, typed
+            )
 
         if saver_cls is AsyncRedisSaver:
             old = await saver.aget_tuple(old_config)
             assert old is not None
-            assert old.checkpoint["channel_values"] == {"payload": legacy}
+            assert old.checkpoint["channel_values"] == {"payload": LEGACY_VALUES}
             assert len(history) == 2
