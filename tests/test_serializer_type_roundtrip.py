@@ -37,28 +37,26 @@ class IntegerValue(IntEnum):
     VALUE = 1
 
 
-JSON_ENUM_VALUES = [
-    pytest.param(StringValue.VALUE, "value", id="string-enum"),
-    pytest.param(IntegerValue.VALUE, 1, id="integer-enum"),
-]
+ENUM_CASES: dict[str, Enum] = {
+    "string-enum": StringValue.VALUE,
+    "integer-enum": IntegerValue.VALUE,
+}
 
-
-ROUNDTRIP_CASES: list[tuple[str, Any]] = [
-    ("decimal", Decimal("1.10")),
-    ("timedelta", timedelta(days=1, seconds=2)),
-    ("frozenset", frozenset({1, 2})),
-    ("deque", deque([1, 2])),
-    ("datetime", datetime(2024, 1, 2, 3, 4, 5)),
-    ("date", date(2024, 1, 2)),
-    ("time", time(3, 4, 5)),
-    ("uuid", UUID("12345678-1234-5678-1234-567812345678")),
-    ("positive-infinity", float("inf")),
-    ("negative-infinity", float("-inf")),
-    ("nan", float("nan")),
-    ("mixed-dict-keys", {1: "integer", "1": "string"}),
-]
-
-ROUNDTRIP_VALUES = [pytest.param(value, id=name) for name, value in ROUNDTRIP_CASES]
+ROUNDTRIP_CASES: dict[str, Any] = {
+    "decimal": Decimal("1.10"),
+    "timedelta": timedelta(days=1, seconds=2),
+    "frozenset": frozenset({1, 2}),
+    "deque": deque([1, 2]),
+    "datetime": datetime(2024, 1, 2, 3, 4, 5),
+    "date": date(2024, 1, 2),
+    "time": time(3, 4, 5),
+    "uuid": UUID("12345678-1234-5678-1234-567812345678"),
+    **ENUM_CASES,
+    "positive-infinity": float("inf"),
+    "negative-infinity": float("-inf"),
+    "nan": float("nan"),
+    "mixed-dict-keys": {1: "integer", "1": "string"},
+}
 
 
 def _assert_same_value(actual: Any, expected: Any) -> None:
@@ -69,11 +67,7 @@ def _assert_same_value(actual: Any, expected: Any) -> None:
         assert actual == expected
 
 
-def _roundtrip_values() -> dict[str, Any]:
-    return dict(ROUNDTRIP_CASES)
-
-
-@pytest.mark.parametrize("value", ROUNDTRIP_VALUES)
+@pytest.mark.parametrize("value", ROUNDTRIP_CASES.values(), ids=ROUNDTRIP_CASES.keys())
 def test_serializer_preserves_python_types(value: Any) -> None:
     serializer = JsonPlusRedisSerializer()
 
@@ -83,34 +77,32 @@ def test_serializer_preserves_python_types(value: Any) -> None:
     _assert_same_value(restored, value)
 
 
-@pytest.mark.parametrize("value,expected", JSON_ENUM_VALUES)
-def test_store_filters_json_enum_values(
-    redis_url: str, value: Enum, expected: Any
-) -> None:
+@pytest.mark.parametrize("value", ENUM_CASES.values(), ids=ENUM_CASES.keys())
+def test_store_filters_enum_values_by_plain_value(redis_url: str, value: Enum) -> None:
     with RedisStore.from_conn_string(redis_url) as store:
         store.setup()
         store.put(("enum",), "item", {"status": value, "tenant": "acme"})
         items = store.search(("enum",), filter={"tenant": "acme"})
         assert [item.key for item in items] == ["item"]
-        _assert_same_value(items[0].value["status"], expected)
+        _assert_same_value(items[0].value["status"], value)
         assert store.search(("enum",), filter={"tenant": None}) == []
         assert [
-            item.key for item in store.search(("enum",), filter={"status": expected})
+            item.key for item in store.search(("enum",), filter={"status": value.value})
         ] == ["item"]
 
 
-@pytest.mark.parametrize("value,expected", JSON_ENUM_VALUES)
-async def test_async_store_filters_json_enum_values(
-    redis_url: str, value: Enum, expected: Any
+@pytest.mark.parametrize("value", ENUM_CASES.values(), ids=ENUM_CASES.keys())
+async def test_async_store_filters_enum_values_by_plain_value(
+    redis_url: str, value: Enum
 ) -> None:
     async with AsyncRedisStore.from_conn_string(redis_url) as store:
         await store.setup()
         await store.aput(("enum",), "item", {"status": value, "tenant": "acme"})
         items = await store.asearch(("enum",), filter={"tenant": "acme"})
         assert [item.key for item in items] == ["item"]
-        _assert_same_value(items[0].value["status"], expected)
+        _assert_same_value(items[0].value["status"], value)
         assert await store.asearch(("enum",), filter={"tenant": None}) == []
-        matches = await store.asearch(("enum",), filter={"status": expected})
+        matches = await store.asearch(("enum",), filter={"status": value.value})
         assert [item.key for item in matches] == ["item"]
 
 
@@ -124,7 +116,7 @@ class _DummySaver(BaseRedisSaver):
 
 def test_checkpoint_normalization_preserves_lossy_json_values() -> None:
     saver = _DummySaver(redis_client=object())
-    values = _roundtrip_values()
+    values = ROUNDTRIP_CASES
     checkpoint = empty_checkpoint()
     checkpoint["channel_values"] = {"payload": values}
 
@@ -166,7 +158,7 @@ def test_store_keeps_native_json_values_unwrapped() -> None:
 
 def _roundtrip_put_args(saver_cls: type) -> tuple[Any, ...]:
     checkpoint = empty_checkpoint()
-    checkpoint["channel_values"] = {"payload": _roundtrip_values()}
+    checkpoint["channel_values"] = {"payload": ROUNDTRIP_CASES}
     checkpoint["channel_versions"] = {"payload": "1"}
     config = {
         "configurable": {
@@ -181,7 +173,7 @@ def _roundtrip_put_args(saver_cls: type) -> tuple[Any, ...]:
 def _assert_restored_roundtrip_values(restored_checkpoint: Any) -> None:
     assert restored_checkpoint is not None
     restored = restored_checkpoint["channel_values"]["payload"]
-    for name, expected in _roundtrip_values().items():
+    for name, expected in ROUNDTRIP_CASES.items():
         _assert_same_value(restored[name], expected)
 
 
@@ -211,8 +203,32 @@ async def test_async_redis_saver_preserves_lossy_json_values(
         _assert_restored_roundtrip_values(await saver.aget(saved_config))
 
 
+def test_redis_saver_returns_plain_value_for_blocked_enum(redis_url: str) -> None:
+    """With msgpack revival locked down, an unlisted Enum degrades to its value."""
+    checkpoint = empty_checkpoint()
+    checkpoint["channel_values"] = {"payload": ENUM_CASES}
+    checkpoint["channel_versions"] = {"payload": "1"}
+    config = {
+        "configurable": {"thread_id": "serializer-blocked-enum", "checkpoint_ns": ""}
+    }
+
+    with RedisSaver.from_conn_string(redis_url) as saver:
+        saver.setup()
+        # Equivalent to LANGGRAPH_STRICT_MSGPACK=true with no allowlist.
+        saver.serde = JsonPlusRedisSerializer(allowed_msgpack_modules=None)
+        saved_config = saver.put(
+            config, checkpoint, {"source": "input", "step": 0}, {"payload": "1"}
+        )
+        restored_checkpoint = saver.get(saved_config)
+
+    assert restored_checkpoint is not None
+    restored = restored_checkpoint["channel_values"]["payload"]
+    for name, member in ENUM_CASES.items():
+        _assert_same_value(restored[name], member.value)
+
+
 def test_redis_store_preserves_lossy_json_values(redis_url: str) -> None:
-    values = _roundtrip_values()
+    values = ROUNDTRIP_CASES
 
     with RedisStore.from_conn_string(redis_url) as store:
         store.setup()
