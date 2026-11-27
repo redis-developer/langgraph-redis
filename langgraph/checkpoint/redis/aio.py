@@ -47,6 +47,7 @@ from langgraph.checkpoint.redis.base import (
     BaseRedisSaver,
     aexpire_with_retry,
     apersist_with_retry,
+    asearch_list_matches,
 )
 from langgraph.checkpoint.redis.key_registry import (
     AsyncCheckpointKeyRegistry as AsyncKeyRegistry,
@@ -687,11 +688,11 @@ class AsyncRedisSaver(
         for expr in filter_expression[1:]:
             combined_filter &= expr
 
-        # Construct the Redis query
-        # Sort by checkpoint_id in descending order to get most recent checkpoints first
-        query = FilterQuery(
-            filter_expression=combined_filter,
-            return_fields=[
+        # The matching checkpoints, newest first
+        docs = await asearch_list_matches(
+            self.checkpoints_index,
+            combined_filter,
+            [
                 "thread_id",
                 "checkpoint_ns",
                 "checkpoint_id",
@@ -700,19 +701,15 @@ class AsyncRedisSaver(
                 "$.metadata",
                 "has_writes",  # Include has_writes to optimize pending_writes loading
             ],
-            num_results=limit or 10000,
-            sort_by=("checkpoint_id", "DESC"),
+            limit,
         )
-
-        # Execute the query asynchronously
-        results = await self.checkpoints_index.search(query)
 
         # Pre-process all docs to collect batch query requirements
         all_docs_data = []
         pending_sends_batch_keys = []
         pending_writes_batch_keys = []
 
-        for doc in results.docs:
+        for doc in docs:
             # Extract all attributes once
             doc_dict = doc.__dict__ if hasattr(doc, "__dict__") else {}
 

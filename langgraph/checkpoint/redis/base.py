@@ -18,8 +18,11 @@ from langgraph.checkpoint.base import (
 )
 from langgraph.checkpoint.serde.base import SerializerProtocol
 from langgraph.checkpoint.serde.types import ChannelProtocol
+from redis.commands.search.aggregation import AggregateRequest
+from redis.commands.search.document import Document
+from redisvl.index import AsyncSearchIndex, SearchIndex
 from redisvl.query import FilterQuery
-from redisvl.query.filter import Tag
+from redisvl.query.filter import FilterExpression, Tag
 
 from langgraph.checkpoint.redis.util import (
     safely_decode,
@@ -43,6 +46,106 @@ CHECKPOINT_WRITE_PREFIX = "checkpoint_write"
 # never expire and never leave the search index.
 _TTL_RETRY_ATTEMPTS = 3
 _TTL_RETRY_BASE_DELAY_SECONDS = 0.05
+
+# list() reads its matches with one FT.SEARCH, which returns at most the server's
+# MAXSEARCHRESULTS: 10,000 by default on Redis Stack, where a larger LIMIT raises.
+LIST_SEARCH_LIMIT = 10_000
+# Rows per read when list() reads its matches through an FT.AGGREGATE cursor
+LIST_CURSOR_READ_SIZE = 1_000
+
+
+def _list_search_query(
+    filter_expression: Union[FilterExpression, str],
+    return_fields: List[str],
+    limit: Optional[int],
+) -> FilterQuery:
+    """The FT.SEARCH of list(): the newest matches first, at most LIST_SEARCH_LIMIT."""
+    return FilterQuery(
+        filter_expression=filter_expression,
+        return_fields=return_fields,
+        num_results=min(limit, LIST_SEARCH_LIMIT) if limit else LIST_SEARCH_LIMIT,
+        sort_by=("checkpoint_id", "DESC"),
+    )
+
+
+def _list_search_left_out_matches(results: Any, limit: Optional[int]) -> bool:
+    """Whether the search returned fewer of its matches than list() has to yield."""
+    wanted = min(limit, results.total) if limit else results.total
+    return len(results.docs) < wanted
+
+
+def _list_cursor_request(
+    filter_expression: Union[FilterExpression, str], return_fields: List[str]
+) -> AggregateRequest:
+    """An FT.AGGREGATE cursor over every match of _list_search_query().
+
+    A cursor isn't limited by MAXSEARCHRESULTS, but sorting in FT.AGGREGATE is
+    limited by MAXAGGREGATERESULTS (also 10,000 on Redis Stack), so the rows are
+    read unsorted and _list_cursor_documents() sorts them.
+    """
+    fields = dict.fromkeys(["checkpoint_id", *return_fields])
+    return (
+        AggregateRequest(str(filter_expression))
+        .load("@__key", *(f if f.startswith("$") else f"@{f}" for f in fields))
+        .cursor(count=LIST_CURSOR_READ_SIZE)
+        .dialect(2)
+    )
+
+
+def _list_cursor_documents(rows: List[Any], limit: Optional[int]) -> List[Document]:
+    """The rows of a _list_cursor_request() as search documents, newest first."""
+    docs = []
+    for row in rows:
+        values = [safely_decode(value) for value in row]
+        fields = dict(zip(values[::2], values[1::2]))
+        docs.append(Document(fields.pop("__key"), **fields))
+    docs.sort(key=lambda doc: doc["checkpoint_id"], reverse=True)
+    return docs[:limit] if limit else docs
+
+
+def search_list_matches(
+    index: SearchIndex,
+    filter_expression: Union[FilterExpression, str],
+    return_fields: List[str],
+    limit: Optional[int],
+) -> List[Any]:
+    """The checkpoints list() yields, newest first: all matches, or the newest `limit`.
+
+    One FT.SEARCH reads them, unless there are more than LIST_SEARCH_LIMIT; then
+    they are read through an FT.AGGREGATE cursor. Either way they are redis-py
+    search Documents.
+    """
+    results = index.search(_list_search_query(filter_expression, return_fields, limit))
+    if not _list_search_left_out_matches(results, limit):
+        return results.docs
+    rows: List[Any] = []
+    res = index.aggregate(_list_cursor_request(filter_expression, return_fields))
+    while True:
+        rows.extend(res.rows)
+        if not (res.cursor and res.cursor.cid):
+            return _list_cursor_documents(rows, limit)
+        res = index.aggregate(res.cursor)
+
+
+async def asearch_list_matches(
+    index: AsyncSearchIndex,
+    filter_expression: Union[FilterExpression, str],
+    return_fields: List[str],
+    limit: Optional[int],
+) -> List[Any]:
+    """The async variant of search_list_matches()."""
+    results = await index.search(
+        _list_search_query(filter_expression, return_fields, limit)
+    )
+    if not _list_search_left_out_matches(results, limit):
+        return results.docs
+    rows: List[Any] = []
+    res = await index.aggregate(_list_cursor_request(filter_expression, return_fields))
+    while True:
+        rows.extend(res.rows)
+        if not (res.cursor and res.cursor.cid):
+            return _list_cursor_documents(rows, limit)
+        res = await index.aggregate(res.cursor)
 
 
 def expire_with_retry(

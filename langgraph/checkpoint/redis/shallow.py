@@ -30,6 +30,7 @@ from langgraph.checkpoint.redis.base import (
     REDIS_KEY_SEPARATOR,
     BaseRedisSaver,
     expire_with_retry,
+    search_list_matches,
 )
 from langgraph.checkpoint.redis.util import (
     checkpoint_id_timestamp,
@@ -258,25 +259,21 @@ class ShallowRedisSaver(BaseRedisSaver[Redis, SearchIndex]):
         for expr in filter_expression[1:]:
             combined_filter &= expr
 
-        # Get checkpoint data
-        # Sort by checkpoint_id in descending order to get most recent checkpoints first
-        query = FilterQuery(
-            filter_expression=combined_filter,
-            return_fields=[
+        # The matching checkpoints, newest first
+        docs = search_list_matches(
+            self.checkpoints_index,
+            combined_filter,
+            [
                 "thread_id",
                 "checkpoint_ns",
                 "$.checkpoint",
                 "$.metadata",
             ],
-            num_results=limit or 10000,
-            sort_by=("checkpoint_id", "DESC"),
+            limit,
         )
 
-        # Execute the query
-        results = self.checkpoints_index.search(query)
-
         # Process the results
-        for doc in results.docs:
+        for doc in docs:
             thread_id = cast(str, getattr(doc, "thread_id", ""))
             checkpoint_ns = cast(str, getattr(doc, "checkpoint_ns", ""))
             checkpoint = json.loads(doc["$.checkpoint"])
