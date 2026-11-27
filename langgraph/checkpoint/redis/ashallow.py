@@ -341,7 +341,9 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             # Channel values are stored inline in the checkpoint, as list() reads them
             checkpoint = json.loads(doc["$.checkpoint"])
             channel_values: Dict[str, Any] = checkpoint.get("channel_values", {})
-            channel_values = self._deserialize_channel_values(channel_values)
+            channel_values = self._deserialize_channel_values(
+                channel_values, type_=self._codec_type(checkpoint)
+            )
 
             # aput stores the metadata as a JSON string
             metadata = json.loads(getattr(doc, "$.metadata", "{}"))
@@ -373,7 +375,9 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
                     }
                 },
                 checkpoint=checkpoint_param,
-                metadata=cast(CheckpointMetadata, sanitized_metadata),
+                metadata=self._load_metadata(
+                    sanitized_metadata, type_=self._codec_type(checkpoint)
+                ),
                 parent_config=None,
                 pending_writes=pending_writes,
             )
@@ -409,7 +413,9 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         # NO NEED TO CALL aget_channel_values - we already have the data!
         channel_values: Dict[str, Any] = checkpoint.get("channel_values", {})
         # Deserialize them since they're stored in serialized form
-        channel_values = self._deserialize_channel_values(channel_values)
+        channel_values = self._deserialize_channel_values(
+            channel_values, type_=self._codec_type(checkpoint)
+        )
 
         # Parse metadata
         metadata = full_checkpoint_data.get("metadata", {})
@@ -448,7 +454,9 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
         return CheckpointTuple(
             config=config_param,
             checkpoint=checkpoint_param,
-            metadata=cast(CheckpointMetadata, sanitized_metadata),
+            metadata=self._load_metadata(
+                sanitized_metadata, type_=self._codec_type(checkpoint)
+            ),
             parent_config=None,
             pending_writes=pending_writes,
         )
@@ -580,13 +588,20 @@ class AsyncShallowRedisSaver(BaseRedisSaver[AsyncRedis, AsyncSearchIndex]):
             return {}
 
         # checkpoint_data[0] is already a deserialized dict
-        checkpoint = (
-            checkpoint_data[0] if isinstance(checkpoint_data, list) else checkpoint_data
+        checkpoint = cast(
+            dict[str, Any],
+            (
+                checkpoint_data[0]
+                if isinstance(checkpoint_data, list)
+                else checkpoint_data
+            ),
         )
         channel_values = checkpoint.get("channel_values", {})
 
         # Deserialize channel values since they're stored in serialized form
-        return self._deserialize_channel_values(channel_values)
+        return self._deserialize_channel_values(
+            channel_values, type_=self._codec_type(checkpoint)
+        )
 
     async def _aload_pending_sends(
         self,

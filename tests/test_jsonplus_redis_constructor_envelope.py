@@ -9,7 +9,10 @@ from langgraph.checkpoint.base import CheckpointMetadata, empty_checkpoint
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
 from langgraph.checkpoint.redis import RedisSaver
-from langgraph.checkpoint.redis.jsonplus_redis import JsonPlusRedisSerializer
+from langgraph.checkpoint.redis.jsonplus_redis import (
+    REDIS_TYPED_JSON_TYPE,
+    JsonPlusRedisSerializer,
+)
 
 
 @dataclasses.dataclass
@@ -43,7 +46,7 @@ def test_dataclass_roundtrip_when_constructor_helper_is_unavailable(
     )
     result = serializer.loads_typed((type_str, data_bytes))
 
-    assert type_str == "json"
+    assert type_str == REDIS_TYPED_JSON_TYPE
     assert result["payload"] == ConstructorEnvelopePayload(value="ok")
 
 

@@ -117,15 +117,10 @@ def test_complete_deserialization_failure_handling():
         # Create checkpointer with a broken serializer
         checkpointer = RedisSaver(redis_url)
 
-        # Mock the serializer to always fail on deserialization
-        original_deserialize = checkpointer._recursive_deserialize
-
-        def failing_deserialize(obj: Any) -> Any:
-            if isinstance(obj, dict) and obj.get("lc"):
-                raise ValueError("Simulated deserialization failure")
-            return original_deserialize(obj)
-
-        checkpointer._recursive_deserialize = failing_deserialize
+        # Fail constructor revival through either legacy or versioned decoding.
+        checkpointer.serde._reviver = MagicMock(
+            side_effect=ValueError("Simulated deserialization failure")
+        )
         checkpointer.setup()
 
         thread_id = str(uuid4())

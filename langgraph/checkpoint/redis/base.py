@@ -5,6 +5,8 @@ import logging
 import random
 import time
 from abc import abstractmethod
+from collections.abc import Mapping
+from functools import partial
 from typing import Any, Dict, Generic, List, Optional, Sequence, Tuple, Union, cast
 
 import orjson
@@ -28,7 +30,12 @@ from langgraph.checkpoint.redis.util import (
     unwrap_connection_errors,
 )
 
-from .jsonplus_redis import JsonPlusRedisSerializer
+from .jsonplus_redis import (
+    JSON_TYPES,
+    LEGACY_JSON_TYPE,
+    REDIS_TYPED_JSON_TYPE,
+    JsonPlusRedisSerializer,
+)
 from .types import IndexType, RedisClientType
 
 logger = logging.getLogger(__name__)
@@ -405,7 +412,7 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         type_, data = self.serde.dumps_typed(checkpoint)
 
         # Decode the serialized data - handle both JSON and msgpack
-        if type_ == "json":
+        if type_ in JSON_TYPES:
             checkpoint_data = cast(dict, orjson.loads(data))
         else:
             checkpoint_data = cast(dict, self.serde.loads_typed((type_, data)))
@@ -416,6 +423,9 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
                 checkpoint_data = cast(
                     dict, self._msgpack_to_redis_json(checkpoint_data)
                 )
+                # The persisted representation is JSON produced by the new
+                # normalizer, even though serialization fell back to msgpack.
+                type_ = REDIS_TYPED_JSON_TYPE
 
         # Ensure channel_versions are always strings to fix issue #40
         if "channel_versions" in checkpoint_data:
@@ -423,7 +433,7 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
                 k: str(v) for k, v in checkpoint_data["channel_versions"].items()
             }
 
-        return {"type": type_, **checkpoint_data, "pending_sends": []}
+        return {**checkpoint_data, "type": type_, "pending_sends": []}
 
     def _msgpack_to_redis_json(self, value: Any) -> dict[str, Any]:
         """Convert a msgpack-deserialized checkpoint into Redis JSON-safe data."""
@@ -439,8 +449,13 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         )
         return cast(dict, orjson.loads(json_bytes))
 
+    @staticmethod
+    def _codec_type(checkpoint: Optional[Mapping[str, Any]]) -> str:
+        """Return a stored checkpoint's codec tag; untagged data is legacy JSON."""
+        return (checkpoint or {}).get("type", LEGACY_JSON_TYPE)
+
     def _deserialize_channel_values(
-        self, channel_values: dict[str, Any]
+        self, channel_values: dict[str, Any], *, type_: str = LEGACY_JSON_TYPE
     ) -> dict[str, Any]:
         """Deserialize channel values that were stored inline.
 
@@ -450,13 +465,27 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         This specifically handles LangChain message objects that may be stored in their
         serialized format: {'lc': 1, 'type': 'constructor', 'id': [...], 'kwargs': {...}}
         and ensures they are properly reconstructed as message objects.
+
+        ``type_`` is the enclosing checkpoint's persisted codec tag; untagged
+        checkpoints default to the legacy JSON decoder.
         """
         if not channel_values:
             return {}
 
+        deserialize = self._recursive_deserialize
+        if type_ == REDIS_TYPED_JSON_TYPE:
+            # One traversal handles Redis byte markers and typed values together.
+            # Passing already revived children through a second reviver would
+            # reinterpret escaped literal dictionaries.
+            deserialize = partial(
+                cast(JsonPlusRedisSerializer, self.serde)._revive_if_needed,
+                typed_values=True,
+                decode_bytes=self._decode_blob,
+            )
+
         try:
             # Apply recursive deserialization to handle nested structures and LangChain objects
-            return self._recursive_deserialize(channel_values)
+            return deserialize(channel_values)
         except Exception as e:
             logger.warning(
                 f"Error deserializing channel values, attempting recovery: {e}"
@@ -465,7 +494,7 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
             recovered = {}
             for key, value in channel_values.items():
                 try:
-                    recovered[key] = self._recursive_deserialize(value)
+                    recovered[key] = deserialize(value)
                 except Exception as inner_e:
                     logger.error(
                         f"Failed to deserialize channel '{key}': {inner_e}. "
@@ -585,7 +614,9 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
             for t, b in [self.serde.dumps_typed(value)]
         ]
 
-    def _load_metadata(self, metadata: dict[str, Any]) -> CheckpointMetadata:
+    def _load_metadata(
+        self, metadata: Mapping[str, Any], *, type_: str = LEGACY_JSON_TYPE
+    ) -> CheckpointMetadata:
         """Load metadata from Redis-compatible dictionary.
 
         Args:
@@ -594,9 +625,12 @@ class BaseRedisSaver(BaseCheckpointSaver[str], Generic[RedisClientType, IndexTyp
         Returns:
             Original metadata dictionary.
         """
-        # Roundtrip through serializer to ensure proper type handling
-        type_str, data_bytes = self.serde.dumps_typed(metadata)
-        return self.serde.loads_typed((type_str, data_bytes))
+        if type_ == REDIS_TYPED_JSON_TYPE:
+            return cast(JsonPlusRedisSerializer, self.serde)._revive_if_needed(
+                metadata, typed_values=True
+            )
+        # Legacy metadata is already JSON; preserve its existing read behavior.
+        return cast(CheckpointMetadata, metadata)
 
     def _dump_metadata(self, metadata: CheckpointMetadata) -> str:
         """Convert metadata to a Redis-compatible dictionary.

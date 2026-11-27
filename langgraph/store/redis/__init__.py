@@ -557,8 +557,9 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
         """Return the key and document of each document matching query_str that passes filter.
 
         Value fields aren't part of the search index, so the filter runs client-side and
-        offset and limit have to apply to the filtered documents. The documents are read
-        with a cursor, which reaches all of them, also beyond the server's FT.SEARCH limit.
+        offset and limit have to apply to the filtered documents. Returned values are
+        already deserialized. The documents are read with a cursor, which reaches all
+        of them, also beyond the server's FT.SEARCH limit.
         """
         matched: list[tuple[str, dict[str, Any]]] = []
         res = self.store_index.aggregate(
@@ -567,7 +568,9 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
         while True:
             for row in res.rows:
                 store_key, data = _aggregate_row_to_doc(row)
-                if _matches_filter(data.get("value", {}), filter):
+                value = self._deserialize_value(data.get("value", {}))
+                if isinstance(value, dict) and _matches_filter(value, filter):
+                    data["value"] = value
                     matched.append((store_key, data))
             cursor_id = res.cursor.cid if res.cursor else 0
             if not cursor_id:
@@ -692,9 +695,16 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
                             )
                             continue
 
-                        # Apply value filters if needed
-                        if op.filter and not _matches_filter(
-                            store_doc.get("value", {}), op.filter
+                        item = _row_to_search_item(
+                            _decode_ns(store_doc["prefix"]),
+                            store_doc,
+                            score=score,
+                            deserialize_fn=self._deserialize_value,
+                        )
+                        # Filter the decoded user value, not its storage wrapper.
+                        if op.filter and (
+                            not isinstance(item.value, dict)
+                            or not _matches_filter(item.value, op.filter)
                         ):
                             continue
 
@@ -708,14 +718,7 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
                             )
                             refresh_keys.append(vector_key)
 
-                        items.append(
-                            _row_to_search_item(
-                                _decode_ns(store_doc["prefix"]),
-                                store_doc,
-                                score=score,
-                                deserialize_fn=self._deserialize_value,
-                            )
-                        )
+                        items.append(item)
 
                 # Refresh TTL if requested
                 if op.refresh_ttl and refresh_keys and self.ttl_config:
@@ -756,6 +759,12 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
                 refresh_keys = []  # Track keys that need TTL refreshed
 
                 for store_key, data in docs:
+                    # Filtered documents already carry decoded values.
+                    item = _row_to_search_item(
+                        _decode_ns(data["prefix"]),
+                        data,
+                        deserialize_fn=None if op.filter else self._deserialize_value,
+                    )
                     # If refresh_ttl is true, add the key to refresh list
                     if op.refresh_ttl:
                         refresh_keys.append(store_key)
@@ -766,13 +775,7 @@ class RedisStore(BaseStore, BaseRedisStore[Redis, SearchIndex]):
                         )
                         refresh_keys.append(vector_key)
 
-                    items.append(
-                        _row_to_search_item(
-                            _decode_ns(data["prefix"]),
-                            data,
-                            deserialize_fn=self._deserialize_value,
-                        )
-                    )
+                    items.append(item)
 
                 # Refresh TTL if requested
                 if op.refresh_ttl and refresh_keys and self.ttl_config:

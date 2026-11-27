@@ -43,7 +43,10 @@ from redisvl.index import SearchIndex
 from redisvl.query.filter import Tag, Text
 from redisvl.utils.token_escaper import TokenEscaper
 
-from langgraph.checkpoint.redis.jsonplus_redis import JsonPlusRedisSerializer
+from langgraph.checkpoint.redis.jsonplus_redis import (
+    JSON_TYPES,
+    JsonPlusRedisSerializer,
+)
 
 from .token_unescaper import TokenUnescaper
 from .types import IndexType, RedisClientType
@@ -513,8 +516,7 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
         - If the value contains complex objects (HumanMessage, etc.), it uses
           the serde wrapper format with __serde_type__ and __serde_data__ keys
 
-        Note: Values containing LangChain messages will be wrapped in a serde format,
-        which means filters on nested fields won't work for such values.
+        Search filters operate on deserialized values, including wrapped values.
 
         Args:
             value: The value to serialize (can contain HumanMessage, AIMessage, etc.)
@@ -525,21 +527,16 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
         if value is None:
             return None
 
-        # First, try standard JSON serialization to check if it's needed
-        try:
-            json.dumps(value)
-            # Value is already JSON-serializable, return as-is for backward
-            # compatibility and to preserve filter functionality
+        # Store only values that JSON can round-trip without changing their type,
+        # keys, or numeric value. Other values use the serde wrapper below.
+        if self._serde.is_native_json_value(value):
             return value
-        except TypeError:
-            # Value contains non-JSON-serializable objects, use serde wrapper
-            pass
 
         # Use the serializer to handle complex objects
         type_str, data_bytes = self._serde.dumps_typed(value)
         # Store the serialized data with type info for proper deserialization
         # Handle different type formats explicitly for clarity
-        if type_str == "json":
+        if type_str in JSON_TYPES:
             data_encoded = data_bytes.decode("utf-8")
         else:
             # bytes, bytearray, msgpack, and other types are hex-encoded
@@ -576,7 +573,7 @@ class BaseRedisStore(Generic[RedisClientType, IndexType]):
 
             try:
                 # Convert back to bytes based on type
-                if type_str == "json":
+                if type_str in JSON_TYPES:
                     data_bytes = data_str.encode("utf-8")
                 else:
                     # bytes, bytearray, msgpack types are hex-encoded

@@ -561,13 +561,13 @@ class AsyncRedisSaver(
         # Execute all tasks in parallel - pending_sends is optional
         if doc_parent_checkpoint_id:
             results = await asyncio.gather(*tasks)
-            channel_values: Dict[str, Any] = self._recursive_deserialize(results[0])
+            channel_values: Dict[str, Any] = results[0]
             pending_sends: List[Tuple[str, Union[str, bytes]]] = results[1]
             pending_writes: List[PendingWrite] = results[2]
         else:
             # Only channel_values and pending_writes tasks
             results = await asyncio.gather(*tasks)
-            channel_values = self._recursive_deserialize(results[0])
+            channel_values = results[0]
             pending_sends = []
             pending_writes = results[1]
 
@@ -589,6 +589,9 @@ class AsyncRedisSaver(
             for k, v in metadata_dict.items()
         }
         metadata = cast(CheckpointMetadata, sanitized_metadata)
+        metadata = self._load_metadata(
+            metadata, type_=self._codec_type(checkpoint_data_dict)
+        )
 
         config_param: RunnableConfig = {
             "configurable": {
@@ -736,8 +739,9 @@ class AsyncRedisSaver(
                     if isinstance(checkpoint_data, dict)
                     else orjson.loads(checkpoint_data)
                 )
-                channel_values = self._recursive_deserialize(
-                    checkpoint_dict.get("channel_values", {})
+                channel_values = self._deserialize_channel_values(
+                    checkpoint_dict.get("channel_values", {}),
+                    type_=self._codec_type(checkpoint_dict),
                 )
             else:
                 # If checkpoint data is missing, the document is corrupted
@@ -831,6 +835,11 @@ class AsyncRedisSaver(
                 metadata = cast(CheckpointMetadata, sanitized_metadata)
             else:
                 metadata = cast(CheckpointMetadata, metadata_dict)
+
+            metadata = self._load_metadata(
+                metadata,
+                type_=self._codec_type(doc_data["checkpoint_dict"]),
+            )
 
             # Pre-create the config structure more efficiently
             config_param: RunnableConfig = {
@@ -1463,8 +1472,11 @@ class AsyncRedisSaver(
             return {}
 
         # checkpoint_data[0] is already a deserialized dict, not a typed tuple
-        checkpoint = checkpoint_data[0]
-        return checkpoint.get("channel_values", {})
+        checkpoint = cast(list[dict[str, Any]], checkpoint_data)[0]
+        return self._deserialize_channel_values(
+            checkpoint.get("channel_values", {}),
+            type_=self._codec_type(checkpoint),
+        )
 
     async def _aload_pending_sends(
         self, thread_id: str, checkpoint_ns: str = "", parent_checkpoint_id: str = ""

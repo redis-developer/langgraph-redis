@@ -21,6 +21,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, Interrupt, interrupt
 
 from langgraph.checkpoint.redis import RedisSaver
+from langgraph.checkpoint.redis.jsonplus_redis import REDIS_TYPED_JSON_TYPE
 
 
 class AgentState(TypedDict):
@@ -157,7 +158,7 @@ def test_interrupt_serializer_roundtrip_current_fields() -> None:
     original = Interrupt(value={"question": "approve?"})
 
     type_str, data = serde.dumps_typed(original)
-    assert type_str == "json"
+    assert type_str == REDIS_TYPED_JSON_TYPE
 
     restored = serde.loads_typed((type_str, data))
     assert isinstance(restored, Interrupt), f"Expected Interrupt, got {type(restored)}"
